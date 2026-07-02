@@ -1,0 +1,235 @@
+{
+  "name": "Bookmark Pipeline — Full Etsy Product Run",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "bookmark-create",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Receive Bookmark Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/tasks/create",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"directive\": \"Create Etsy bookmark: {{ $json.body.theme }}\",\n  \"task_type\": \"design\"\n}",
+        "options": {}
+      },
+      "id": "create-task",
+      "name": "Create Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/librarian/retrieve",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $('Receive Bookmark Request').item.json.body.theme }}\",\n  \"n_results\": 3\n}",
+        "options": {}
+      },
+      "id": "librarian-retrieve",
+      "name": "Librarian Retrieve",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const theme = $('Receive Bookmark Request').item.json.body.theme;\nconst taskId = $('Create Task').item.json.task_id;\nconst libResult = $('Librarian Retrieve').item.json;\nconst citations = libResult.passages || [];\n\nreturn [{\n  json: {\n    theme: theme,\n    citations: citations,\n    task_id: taskId,\n  }\n}];"
+      },
+      "id": "build-artist-payload",
+      "name": "Build Artist Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/artist/brief",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "artist-brief",
+      "name": "Artist Brief",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const taskId = $('Build Artist Payload').item.json.task_id;\nconst imagePrompt = $('Artist Brief').item.json.image_prompt;\n\nreturn [{\n  json: {\n    prompt: imagePrompt,\n    aspect_ratio: '2:3',\n    task_id: taskId,\n  }\n}];"
+      },
+      "id": "build-generate-payload",
+      "name": "Build Generate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/artist/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "artist-generate",
+      "name": "Artist Generate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const theme = $('Receive Bookmark Request').item.json.body.theme;\nconst taskId = $('Build Artist Payload').item.json.task_id;\nconst imagePrompt = $('Artist Brief').item.json.image_prompt;\nconst imageUrl = $('Artist Generate').item.json.image_url;\nconst citations = $('Librarian Retrieve').item.json.passages || [];\n\nreturn [{\n  json: {\n    theme: theme,\n    image_prompt: imagePrompt,\n    image_url: imageUrl,\n    citations: citations,\n    task_id: taskId,\n    target_score: 9.0,\n    max_attempts: 3,\n  }\n}];"
+      },
+      "id": "build-write-approve-payload",
+      "name": "Build Write & Approve Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/pipeline/write-approve",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "write-approve",
+      "name": "Write & Approve",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const theme = $('Receive Bookmark Request').item.json.body.theme;\nconst taskId = $('Build Artist Payload').item.json.task_id;\nconst imageUrl = $('Artist Generate').item.json.image_url;\nconst imagePrompt = $('Artist Brief').item.json.image_prompt;\nconst wa = $('Write & Approve').item.json;\n\nreturn [{\n  json: {\n    task_id: taskId,\n    theme: theme,\n    image_url: imageUrl,\n    image_prompt: imagePrompt,\n    listing: wa.listing,\n    reviewer_scores: wa.review,\n  }\n}];"
+      },
+      "id": "build-save-payload",
+      "name": "Build Save Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/products/save",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "save-product",
+      "name": "Save Product",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const imageUrl = $('Artist Generate').item.json.image_url;\nconst quote = $('Write & Approve').item.json.listing.bookmark_quote || '';\nconst taskId = $('Build Artist Payload').item.json.task_id;\n\nreturn [{\n  json: {\n    image_path: imageUrl,\n    quote: quote,\n    task_id: taskId,\n  }\n}];"
+      },
+      "id": "build-compositor-payload",
+      "name": "Build Compositor Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/compositor/render",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "compositor-render",
+      "name": "Compositor Render",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const theme = $('Receive Bookmark Request').item.json.body.theme;\nconst imageUrl = $('Artist Generate').item.json.image_url;\nconst frontImagePath = $('Compositor Render').item.json.front_image_path || imageUrl;\nconst backImagePath = $('Compositor Render').item.json.back_image_path || null;\nconst wa = $('Write & Approve').item.json;\nconst listing = wa.listing;\nconst review = wa.review;\nconst attempts = wa.attempts;\nconst targetReached = wa.target_reached;\nconst consultationTurns = wa.consultation || [];\nconst productId = $('Save Product').item.json.product_id;\nconst taskId = $('Build Artist Payload').item.json.task_id;\n\nconst overall = review.overall || 0;\nconst recommendation = review.recommendation || 'No recommendation';\n\nlet badge;\nif (overall >= 9 && targetReached) {\n  badge = overall >= 9.5 ? 'EXCEPTIONAL' : 'APPROVED';\n} else {\n  badge = 'BEST EFFORT';\n}\n\nconst scores = review.scores || {};\nconst scoreLines = Object.entries(scores).map(([k, v]) =>\n  `  ${k}: ${v.score}/10 — ${v.note}`\n).join('\\n');\n\nconst tags = (listing.tags || []).slice(0, 8).join(', ');\n\nconst attemptsNote = attempts === 1\n  ? 'Approved on first attempt.'\n  : `Reached score after ${attempts} revision${attempts > 1 ? 's' : ''}.`;\n\nconst consultLines = consultationTurns.length > 0\n  ? consultationTurns.flatMap(t => [\n      `[${t.agent} — ${t.role}]`,\n      t.message,\n      '',\n    ])\n  : ['(No consultation recorded)'];\n\nconst summary = [\n  `=== BOOKMARK PIPELINE COMPLETE — ${badge} ===`,\n  '',\n  `Task ID   : ${taskId}`,\n  `Product ID: ${productId}`,\n  `Theme     : ${theme}`,\n  `Score     : ${overall}/10  |  ${attemptsNote}`,\n  '',\n  '--- AGENT CONSULTATION ---',\n  ...consultLines,\n  '--- LISTING ---',\n  `Title     : ${listing.title || '—'}`,\n  `Quote     : ${listing.bookmark_quote || '—'}`,\n  `Price     : ${listing.price_note || '—'}`,\n  `Tags      : ${tags}`,\n  '',\n  '--- IMAGE ---',\n  `Source    : ${imageUrl}`,\n  `Front     : ${frontImagePath}`,\n  `Back      : ${backImagePath || '—'}`,\n  '',\n  '--- REVIEW ---',\n  `Overall   : ${overall}/10`,\n  `Decision  : ${recommendation}`,\n  '',\n  'Principle scores:',\n  scoreLines,\n  '',\n  targetReached\n    ? 'Next step: Review front + back images, then post to Etsy.'\n    : `Note: Could not reach 9.0 after ${attempts} attempts (${overall}/10). Listing saved — review manually before posting.`,\n].join('\\n');\n\nreturn [{\n  json: {\n    task_id: taskId,\n    product_id: productId,\n    theme: theme,\n    image_url: imageUrl,\n    front_image_path: frontImagePath,\n    back_image_path: backImagePath,\n    bookmark_quote: listing.bookmark_quote || null,\n    listing_title: listing.title,\n    listing_tags: listing.tags,\n    listing_description: listing.description,\n    price_note: listing.price_note,\n    review_overall: overall,\n    review_passed: review.passed,\n    review_recommendation: recommendation,\n    badge: badge,\n    attempts: attempts,\n    target_reached: targetReached,\n    consultation: consultationTurns,\n    summary: summary,\n  }\n}];"
+      },
+      "id": "format-summary",
+      "name": "Format Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 300]
+    }
+  ],
+  "connections": {
+    "Receive Bookmark Request": {
+      "main": [[{"node": "Create Task",                      "type": "main", "index": 0}]]
+    },
+    "Create Task": {
+      "main": [[{"node": "Librarian Retrieve",               "type": "main", "index": 0}]]
+    },
+    "Librarian Retrieve": {
+      "main": [[{"node": "Build Artist Payload",             "type": "main", "index": 0}]]
+    },
+    "Build Artist Payload": {
+      "main": [[{"node": "Artist Brief",                     "type": "main", "index": 0}]]
+    },
+    "Artist Brief": {
+      "main": [[{"node": "Build Generate Payload",           "type": "main", "index": 0}]]
+    },
+    "Build Generate Payload": {
+      "main": [[{"node": "Artist Generate",                  "type": "main", "index": 0}]]
+    },
+    "Artist Generate": {
+      "main": [[{"node": "Build Write & Approve Payload",    "type": "main", "index": 0}]]
+    },
+    "Build Write & Approve Payload": {
+      "main": [[{"node": "Write & Approve",                  "type": "main", "index": 0}]]
+    },
+    "Write & Approve": {
+      "main": [[{"node": "Build Save Payload",               "type": "main", "index": 0}]]
+    },
+    "Build Save Payload": {
+      "main": [[{"node": "Save Product",                     "type": "main", "index": 0}]]
+    },
+    "Save Product": {
+      "main": [[{"node": "Build Compositor Payload",         "type": "main", "index": 0}]]
+    },
+    "Build Compositor Payload": {
+      "main": [[{"node": "Compositor Render",                "type": "main", "index": 0}]]
+    },
+    "Compositor Render": {
+      "main": [[{"node": "Format Summary",                   "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

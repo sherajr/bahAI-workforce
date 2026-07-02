@@ -1,0 +1,7 @@
+{
+  "pythonPath": "C:/Users/Sheraj/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe",
+  "venvPath": "C:/Users/Sheraj/AppData/Local/hermes/hermes-agent",
+  "venv": "venv",
+  "include": ["agents"],
+  "typeCheckingMode": "basic"
+}

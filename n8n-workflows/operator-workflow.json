@@ -1,0 +1,123 @@
+{
+  "name": "Operator — Directive Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "operator-run",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Receive Directive",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/operator/prepare",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"directive\": \"{{ $json.body.directive }}\",\n  \"task_type\": \"{{ $json.body.task_type || 'plan' }}\"\n}",
+        "options": {}
+      },
+      "id": "prepare-context",
+      "name": "Prepare Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/librarian/retrieve",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $('Receive Directive').item.json.body.directive }}\",\n  \"task_type\": \"{{ $('Receive Directive').item.json.body.task_type || 'plan' }}\",\n  \"n_results\": 2\n}",
+        "options": {}
+      },
+      "id": "librarian-check",
+      "name": "Librarian Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prepareResult = $('Prepare Context').item.json;\nconst librarianResult = $('Librarian Check').item.json;\n\nlet librarianContext = '';\nif (librarianResult.source === 'vector_index' && librarianResult.passages.length > 0) {\n  librarianContext = '\\n\\n## Librarian — Relevant Citations\\n';\n  librarianResult.passages.forEach(p => {\n    librarianContext += `\\n- ${p.formatted}`;\n  });\n} else if (librarianResult.constitution_excerpt) {\n  librarianContext = `\\n\\n## Librarian — Constitution Reference\\n${librarianResult.constitution_excerpt}`;\n  librarianContext += `\\n\\n*Note: ${librarianResult.note}*`;\n}\n\nreturn {\n  task_id: prepareResult.task_id,\n  trust_level: prepareResult.trust_level,\n  librarian_result: librarianResult,\n  messages: [\n    { role: 'system', content: prepareResult.system_prompt + librarianContext },\n    { role: 'user', content: prepareResult.user_message }\n  ]\n};"
+      },
+      "id": "build-llm-messages",
+      "name": "Build LLM Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"qwen3-16k:latest\",\n  \"messages\": {{ JSON.stringify($json.messages) }},\n  \"stream\": false,\n  \"options\": {\n    \"temperature\": 0.3,\n    \"num_predict\": 8000\n  }\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "ollama-decompose",
+      "name": "Ollama — Decompose",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/operator/save",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"task_id\": \"{{ $('Build LLM Messages').item.json.task_id }}\",\n  \"llm_output\": {{ JSON.stringify($json.message.content) }},\n  \"librarian_result\": {{ JSON.stringify($('Build LLM Messages').item.json.librarian_result) }}\n}",
+        "options": {}
+      },
+      "id": "save-task-card",
+      "name": "Save Task Card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const taskCard = $json.task_card;\n\nconst lines = [\n  '═══ TASK PLAN — AWAITING YOUR GO-AHEAD ═══',\n  `Task ID: ${taskCard.task_id}`,\n  `Directive: ${taskCard.directive}`,\n  `Type: ${taskCard.task_type}`,\n  '',\n  'Constitution principles:',\n  ...(taskCard.constitution_principles_used || []).map(p => `  • ${p}`),\n  '',\n  `Librarian note: ${taskCard.librarian_note || 'None'}`,\n  '',\n  'Sub-tasks:',\n  ...(taskCard.sub_tasks || []).map(t =>\n    `  Step ${t.step} → [${t.agent.toUpperCase()}]: ${t.action}`\n  ),\n  '',\n  'Review the plan above. When ready, direct each agent in turn.',\n];\n\nreturn {\n  task_id: taskCard.task_id,\n  task_card: taskCard,\n  approval_summary: lines.join('\\n'),\n  status: 'awaiting_your_direction',\n};"
+      },
+      "id": "format-approval",
+      "name": "Format Approval Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    }
+  ],
+  "connections": {
+    "Receive Directive": {
+      "main": [[{"node": "Prepare Context", "type": "main", "index": 0}]]
+    },
+    "Prepare Context": {
+      "main": [[{"node": "Librarian Check", "type": "main", "index": 0}]]
+    },
+    "Librarian Check": {
+      "main": [[{"node": "Build LLM Messages", "type": "main", "index": 0}]]
+    },
+    "Build LLM Messages": {
+      "main": [[{"node": "Ollama — Decompose", "type": "main", "index": 0}]]
+    },
+    "Ollama — Decompose": {
+      "main": [[{"node": "Save Task Card", "type": "main", "index": 0}]]
+    },
+    "Save Task Card": {
+      "main": [[{"node": "Format Approval Summary", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
