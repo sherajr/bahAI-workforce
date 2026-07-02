@@ -60,7 +60,7 @@ def write_listing(
         f"{consult_block}\n"
         "Product details:\n"
         "- Designed by Sheraj, a Bahá'í artist\n"
-        "- 3.5\" × 8.5\" printed on premium cardstock, available laminated\n"
+        "- 2\" × 6\" printed on premium cardstock, available laminated\n"
         "- Designed in Canva, printed to order — each one is made with care\n"
         "- Ships within 3–5 business days\n\n"
         "Return ONLY this JSON object — no other text:\n"
