@@ -12,7 +12,10 @@
       "name": "Receive Bookmark Request",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [240, 300]
+      "position": [
+        240,
+        300
+      ]
     },
     {
       "parameters": {
@@ -27,7 +30,10 @@
       "name": "Create Task",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [460, 300]
+      "position": [
+        460,
+        300
+      ]
     },
     {
       "parameters": {
@@ -42,7 +48,10 @@
       "name": "Librarian Retrieve",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [680, 300]
+      "position": [
+        680,
+        300
+      ]
     },
     {
       "parameters": {
@@ -52,7 +61,10 @@
       "name": "Build Artist Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [900, 300]
+      "position": [
+        900,
+        300
+      ]
     },
     {
       "parameters": {
@@ -69,7 +81,10 @@
       "name": "Artist Brief",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1120, 300]
+      "position": [
+        1120,
+        300
+      ]
     },
     {
       "parameters": {
@@ -79,7 +94,10 @@
       "name": "Build Generate Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1340, 300]
+      "position": [
+        1340,
+        300
+      ]
     },
     {
       "parameters": {
@@ -96,7 +114,10 @@
       "name": "Artist Generate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1560, 300]
+      "position": [
+        1560,
+        300
+      ]
     },
     {
       "parameters": {
@@ -106,7 +127,10 @@
       "name": "Build Write & Approve Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1780, 300]
+      "position": [
+        1780,
+        300
+      ]
     },
     {
       "parameters": {
@@ -123,7 +147,10 @@
       "name": "Write & Approve",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2000, 300]
+      "position": [
+        2000,
+        300
+      ]
     },
     {
       "parameters": {
@@ -133,7 +160,10 @@
       "name": "Build Save Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2220, 300]
+      "position": [
+        2220,
+        300
+      ]
     },
     {
       "parameters": {
@@ -148,7 +178,10 @@
       "name": "Save Product",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2440, 300]
+      "position": [
+        2440,
+        300
+      ]
     },
     {
       "parameters": {
@@ -158,7 +191,10 @@
       "name": "Build Compositor Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2660, 300]
+      "position": [
+        2660,
+        300
+      ]
     },
     {
       "parameters": {
@@ -175,7 +211,10 @@
       "name": "Compositor Render",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2880, 300]
+      "position": [
+        2880,
+        300
+      ]
     },
     {
       "parameters": {
@@ -185,48 +224,186 @@
       "name": "Format Summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [3100, 300]
+      "position": [
+        3320,
+        300
+      ]
+    },
+    {
+      "id": "canva-autofill",
+      "name": "Canva Autofill",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3100,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8765/canva/autofill",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"image_path\": $('Compositor Render').item.json.front_image_path, \"task_id\": $('Build Artist Payload').item.json.task_id } }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
     }
   ],
   "connections": {
     "Receive Bookmark Request": {
-      "main": [[{"node": "Create Task",                      "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Create Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Create Task": {
-      "main": [[{"node": "Librarian Retrieve",               "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Librarian Retrieve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Librarian Retrieve": {
-      "main": [[{"node": "Build Artist Payload",             "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Build Artist Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Artist Payload": {
-      "main": [[{"node": "Artist Brief",                     "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Artist Brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Artist Brief": {
-      "main": [[{"node": "Build Generate Payload",           "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Build Generate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Generate Payload": {
-      "main": [[{"node": "Artist Generate",                  "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Artist Generate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Artist Generate": {
-      "main": [[{"node": "Build Write & Approve Payload",    "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Build Write & Approve Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Write & Approve Payload": {
-      "main": [[{"node": "Write & Approve",                  "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Write & Approve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Write & Approve": {
-      "main": [[{"node": "Build Save Payload",               "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Build Save Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Save Payload": {
-      "main": [[{"node": "Save Product",                     "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Save Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Save Product": {
-      "main": [[{"node": "Build Compositor Payload",         "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Build Compositor Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Build Compositor Payload": {
-      "main": [[{"node": "Compositor Render",                "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Compositor Render",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Compositor Render": {
-      "main": [[{"node": "Format Summary",                   "type": "main", "index": 0}]]
+      "main": [
+        [
+          {
+            "node": "Canva Autofill",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Canva Autofill": {
+      "main": [
+        [
+          {
+            "node": "Format Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {

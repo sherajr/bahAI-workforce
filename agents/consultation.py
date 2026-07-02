@@ -64,6 +64,7 @@ def run_consultation(
     theme: str,
     image_prompt: str,
     citations: list,
+    progress=None,
 ) -> dict:
     """
     Run a four-turn consultation about the generated image.
@@ -79,7 +80,12 @@ def run_consultation(
     """
     transcript = []
 
+    def _progress(msg: str):
+        if progress:
+            progress(msg)
+
     # ── Turn 1: Artist views the image ──────────────────────────────────────
+    _progress("Consultation — turn 1/4: Artist is studying the image...")
     artist_prompt = (
         "You are the Artist agent for bahAI Workforce, a Bahá'í-inspired art and craft "
         "business run by Sheraj. You just created this image as a bookmark design. "
@@ -107,6 +113,7 @@ def run_consultation(
     })
 
     # ── Turn 2: Scribe proposes a direction ─────────────────────────────────
+    _progress("Consultation — turn 2/4: Scribe is proposing quote directions...")
     citation_block = ""
     if citations:
         citation_block = "\n\nAvailable spiritual citations:\n"
@@ -138,6 +145,7 @@ def run_consultation(
     })
 
     # ── Turn 3: Reviewer gives constitution guidance ─────────────────────────
+    _progress("Consultation — turn 3/4: Reviewer is giving constitution guidance...")
     reviewer_input = (
         "You are the Reviewer agent for bahAI Workforce. The team is preparing a Bahá'í-inspired "
         "bookmark listing and you are in consultation — not scoring yet, just guiding.\n\n"
@@ -164,6 +172,7 @@ def run_consultation(
     })
 
     # ── Turn 4: Librarian verifies proposed quotes against actual citations ──
+    _progress("Consultation — turn 4/4: Librarian is verifying quote authenticity...")
     verified_quote = ""
 
     if citations:

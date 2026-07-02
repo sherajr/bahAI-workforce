@@ -24,3 +24,11 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Etsy OAuth tokens (never commit)
+etsy_token.json
+etsy_pkce_state.json
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/
