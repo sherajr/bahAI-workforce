@@ -32,3 +32,4 @@ etsy_pkce_state.json
 # Dashboard
 dashboard/node_modules/
 dashboard/dist/
+dashboard/*.tsbuildinfo

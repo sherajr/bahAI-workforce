@@ -19,6 +19,10 @@ export interface Review {
   overall: number;
   passed: boolean;
   recommendation: string;
+  // Diagnostic only — never factor into `overall`. Absent when the Reviewer's
+  // output didn't include a valid value for it.
+  image_fit?: number;
+  quote_quality?: number;
 }
 
 export interface ConsultationTurn {
@@ -56,9 +60,15 @@ export interface JobStep {
 export interface Job {
   job_id: string;
   kind: string;
-  status: "running" | "done" | "error";
+  status: "running" | "waiting_for_input" | "done" | "error";
   progress: string;
   steps: JobStep[];
+  // Consultation turns streamed live as they happen (round 1, round 2, then
+  // the Reviewer's pause-for-input turn and Sheraj's reply if given) — lets
+  // the dashboard render the consultation as a live chat while the job runs.
+  consultation_live?: ConsultationTurn[];
+  // Set while status is "waiting_for_input": what the Reviewer is asking Sheraj.
+  pending_prompt?: string | null;
   result: PipelineResult | null;
   error: string | null;
   created_at: string;
@@ -83,6 +93,9 @@ export interface ProductRow {
   created_at: string | null;
   image_prompt: string | null;
   theme: string | null;
+  front_image: string | null;
+  back_image: string | null;
+  consultation: string | null;
 }
 
 export interface AgentStatus {
@@ -153,6 +166,45 @@ export interface ImproveResult {
   attempts: number;
   listing: Listing;
   review: Review;
+}
+
+export interface RegenerateQuoteResult {
+  product_id: string;
+  old_quote: string;
+  new_quote: string;
+  source: string;
+  old_score: number;
+  new_score: number;
+  listing: Listing;
+  review: Review;
+  front_image_web: string;
+  back_image_web: string;
+}
+
+export interface RegenerateImageResult {
+  product_id: string;
+  old_score: number;
+  new_score: number;
+  listing: Listing;
+  review: Review;
+  image_web: string;
+  front_image_web: string;
+  back_image_web: string;
+}
+
+// All fields optional — only the ones the user actually changed are sent.
+export interface EditProductPayload {
+  title?: string;
+  description?: string;
+  bookmark_quote?: string;
+  tags?: string[];
+  materials?: string[];
+  price_note?: string;
+}
+
+export interface EditProductResult {
+  product_id: string;
+  listing: Listing;
 }
 
 export interface EtsyPublishResult {

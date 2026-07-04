@@ -20,7 +20,8 @@ TRUST_LEVELS = {
     3: "Bounded autonomy",      # full autonomy within defined domain
 }
 
-AGENT_NAMES = ["operator", "librarian", "artist", "scribe", "reviewer", "producer", "steward"]
+AGENT_NAMES = ["operator", "librarian", "artist", "scribe", "reviewer",
+               "producer", "steward", "consultation", "compositor"]
 
 
 def _connect() -> sqlite3.Connection:
@@ -80,7 +81,8 @@ def init_db():
             );
         """)
         # Migrations — safe to run on existing databases
-        for col in ("image_prompt TEXT", "theme TEXT"):
+        for col in ("image_prompt TEXT", "theme TEXT",
+                    "front_image TEXT", "back_image TEXT", "consultation TEXT"):
             try:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
                 conn.commit()
@@ -105,14 +107,7 @@ def create_task(directive: str, task_type: str, assigned_to: str = None) -> str:
             (task_id, task_type, directive, assigned_to, json.dumps(card))
         )
         conn.commit()
-    _write_task_card(task_id, card)
     return task_id
-
-
-def get_task(task_id: str) -> dict | None:
-    with _connect() as conn:
-        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    return dict(row) if row else None
 
 
 def update_task_status(task_id: str, status: str):
@@ -123,31 +118,6 @@ def update_task_status(task_id: str, status: str):
             (status, completed_at, task_id)
         )
         conn.commit()
-
-
-def update_task_card(task_id: str, updates: dict):
-    """Merge updates into the task card JSON and persist both to DB and file."""
-    with _connect() as conn:
-        row = conn.execute("SELECT card_json FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        card = json.loads(row["card_json"]) if row and row["card_json"] else {}
-        card.update(updates)
-        conn.execute("UPDATE tasks SET card_json = ? WHERE id = ?", (json.dumps(card), task_id))
-        conn.commit()
-    _write_task_card(task_id, card)
-
-
-def _write_task_card(task_id: str, card: dict):
-    tasks_dir = Path(__file__).parent.parent / "tasks"
-    tasks_dir.mkdir(exist_ok=True)
-    (tasks_dir / f"{task_id}.json").write_text(json.dumps(card, indent=2), encoding="utf-8")
-
-
-def load_task_card(task_id: str) -> dict:
-    card_path = Path(__file__).parent.parent / "tasks" / f"{task_id}.json"
-    if card_path.exists():
-        return json.loads(card_path.read_text(encoding="utf-8"))
-    row = get_task(task_id)
-    return json.loads(row["card_json"]) if row and row.get("card_json") else {}
 
 
 # --- Task run logging ---
@@ -246,7 +216,9 @@ def get_all_products() -> list[dict]:
 
 
 def update_product(product_id: str, **kwargs):
-    allowed = {"status", "etsy_listing_id", "image_url", "listing_copy", "reviewer_scores", "revenue", "title", "image_prompt", "theme"}
+    allowed = {"status", "etsy_listing_id", "image_url", "listing_copy", "reviewer_scores",
+               "revenue", "title", "image_prompt", "theme",
+               "front_image", "back_image", "consultation"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return

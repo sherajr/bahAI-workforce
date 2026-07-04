@@ -2,7 +2,7 @@ import type { Review } from "../lib/types";
 import { badgeClasses, badgeFor, principleLabel, scoreBarColor } from "../lib/utils";
 import { BadgePill, Card, CardContent, CardHeader, CardTitle, ProgressBar } from "./ui";
 
-// Seven principle bars + overall badge.
+// Nine principle bars + overall badge.
 export function ScoreCard({ review, badge }: { review: Review; badge?: string }) {
   const overall = review.overall ?? 0;
   const label = badge ?? badgeFor(overall);
@@ -18,6 +18,28 @@ export function ScoreCard({ review, badge }: { review: Review; badge?: string })
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
+        {(review.image_fit !== undefined || review.quote_quality !== undefined) && (
+          <div className="mb-1 flex flex-wrap gap-4 rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+            {review.image_fit !== undefined && (
+              <div className="min-w-[140px] flex-1">
+                <div className="mb-1 flex items-baseline justify-between gap-4">
+                  <span className="text-xs uppercase tracking-wide text-slate-500">Image fit</span>
+                  <span className="font-mono text-xs text-slate-400">{review.image_fit}/10</span>
+                </div>
+                <ProgressBar value={review.image_fit * 10} colorClass={scoreBarColor(review.image_fit)} />
+              </div>
+            )}
+            {review.quote_quality !== undefined && (
+              <div className="min-w-[140px] flex-1">
+                <div className="mb-1 flex items-baseline justify-between gap-4">
+                  <span className="text-xs uppercase tracking-wide text-slate-500">Quote quality</span>
+                  <span className="font-mono text-xs text-slate-400">{review.quote_quality}/10</span>
+                </div>
+                <ProgressBar value={review.quote_quality * 10} colorClass={scoreBarColor(review.quote_quality)} />
+              </div>
+            )}
+          </div>
+        )}
         {entries.length === 0 && (
           <p className="text-sm text-slate-500">No principle scores recorded.</p>
         )}

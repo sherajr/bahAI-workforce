@@ -41,6 +41,7 @@ SCOPES = [
     "asset:write",
     "brandtemplate:meta:read",
     "brandtemplate:content:read",
+    "design:content:write",
 ]
 
 

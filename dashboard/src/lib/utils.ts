@@ -6,7 +6,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// Human labels for the 7 constitution principle keys the Reviewer returns.
+// Human labels for the 9 constitution principle keys the Reviewer returns.
 export const PRINCIPLE_LABELS: Record<string, string> = {
   "1_work_as_worship": "Work as Worship",
   "2_fruit_not_words": "Judge by Fruit, Not Motion",
@@ -15,6 +15,8 @@ export const PRINCIPLE_LABELS: Record<string, string> = {
   "5_moderation": "Moderation",
   "6_deeds_over_words": "Deeds Over Words",
   "7_craft_in_service": "Craft in Service of Social Good",
+  "8_justice": "Justice ('Adl)",
+  "9_independent_investigation": "Independent Investigation of Truth",
 };
 
 export function principleLabel(key: string): string {
@@ -26,7 +28,7 @@ export type Badge = "EXCEPTIONAL" | "APPROVED" | "BORDERLINE" | "REJECTED" | "BE
 export function badgeFor(overall: number): Badge {
   if (overall >= 9.0) return "EXCEPTIONAL";
   if (overall >= 7.0) return "APPROVED";
-  if (overall >= 6.0) return "BORDERLINE";
+  if (overall >= 5.0) return "BORDERLINE";
   return "REJECTED";
 }
 
@@ -59,6 +61,7 @@ export const AGENT_COLORS: Record<string, string> = {
   Reviewer: "border-l-emerald-400 text-emerald-300",
   Librarian: "border-l-amber-400 text-amber-300",
   System: "border-l-rose-400 text-rose-300",
+  Sheraj: "border-l-fuchsia-400 text-fuchsia-300",
 };
 
 export function parseListing(row: ProductRow): Listing | null {

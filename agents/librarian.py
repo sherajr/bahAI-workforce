@@ -15,7 +15,6 @@ The index is built by scripts/ingest_texts.py — run that first.
 
 import os
 import re
-import json
 import requests
 from pathlib import Path
 from dotenv import load_dotenv

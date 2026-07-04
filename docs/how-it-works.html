@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bahAI Workforce — How It Works</title>
+<style>
+  :root{
+    --bg:#0b1120; --panel:#131c31; --panel2:#0f1729; --line:#26324d;
+    --text:#e6ecf7; --dim:#8b9bb8; --amber:#f5b942; --teal:#4fd1c5;
+    --rose:#f08fae; --violet:#a78bfa; --green:#5fd08a;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;line-height:1.5;padding:2.5rem 1.25rem 4rem}
+  .wrap{max-width:880px;margin:0 auto}
+  header{text-align:center;margin-bottom:2.5rem}
+  .star{font-size:2.2rem;color:var(--amber)}
+  h1{font-size:1.7rem;font-weight:600;margin-top:.4rem}
+  header p{color:var(--dim);max-width:560px;margin:.5rem auto 0}
+  h2{font-size:1.05rem;color:var(--amber);letter-spacing:.12em;text-transform:uppercase;margin:2.6rem 0 1rem;text-align:center}
+
+  .flow{display:flex;flex-direction:column;align-items:center;gap:0}
+  .step{width:100%;max-width:640px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1rem 1.2rem;display:flex;gap:1rem;align-items:flex-start}
+  .step .num{flex:none;width:2rem;height:2rem;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.9rem;background:var(--panel2);border:1px solid var(--line)}
+  .step h3{font-size:1rem;font-weight:600}
+  .step h3 .who{font-size:.75rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-left:.5rem;padding:.1rem .5rem;border-radius:99px;background:var(--panel2)}
+  .step p{color:var(--dim);font-size:.9rem;margin-top:.25rem}
+  .arrow{color:var(--dim);font-size:1.2rem;padding:.35rem 0}
+  .loop{border:1px dashed var(--rose);border-radius:16px;padding:.9rem;margin:.2rem 0;max-width:680px;width:100%;display:flex;flex-direction:column;align-items:center}
+  .loop-label{font-size:.75rem;color:var(--rose);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.5rem}
+
+  .c-lib{color:var(--teal)} .c-art{color:var(--violet)} .c-scr{color:var(--green)} .c-rev{color:var(--rose)} .c-sys{color:var(--amber)}
+  .b-lib{border-left:3px solid var(--teal)} .b-art{border-left:3px solid var(--violet)} .b-scr{border-left:3px solid var(--green)} .b-rev{border-left:3px solid var(--rose)} .b-sys{border-left:3px solid var(--amber)}
+
+  .team{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.8rem;max-width:820px;margin:0 auto}
+  .agent{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1rem}
+  .agent .icon{font-size:1.5rem}
+  .agent h3{font-size:.95rem;margin-top:.3rem}
+  .agent p{color:var(--dim);font-size:.82rem;margin-top:.25rem}
+  .agent .model{display:inline-block;margin-top:.5rem;font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;padding:.15rem .5rem;border-radius:99px;background:var(--panel2);color:var(--dim)}
+
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:.8rem;max-width:820px;margin:0 auto}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1rem}
+  .col h3{font-size:.9rem;margin-bottom:.4rem}
+  .col ul{list-style:none}
+  .col li{color:var(--dim);font-size:.85rem;padding:.2rem 0}
+  .col li::before{content:"◆ ";font-size:.6rem;vertical-align:middle;color:var(--amber)}
+  .free h3{color:var(--green)} .paid h3{color:var(--rose)}
+  .foot{text-align:center;color:var(--dim);font-size:.8rem;margin-top:3rem}
+  @media (max-width:560px){.cols{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="star">✦</div>
+  <h1>bahAI Workforce — How It Works</h1>
+  <p>You give the team a theme. Four AI agents consult together, create the artwork
+     and listing, hold each other to the constitution, and hand you a finished bookmark.</p>
+</header>
+
+<h2>The Team</h2>
+<div class="team">
+  <div class="agent b-lib"><div class="icon">📚</div><h3 class="c-lib">Librarian</h3>
+    <p>Finds and verifies real quotes from the Bahá'í writings. Guards against made-up citations.</p>
+    <span class="model">Local · free</span></div>
+  <div class="agent b-art"><div class="icon">🎨</div><h3 class="c-art">Artist</h3>
+    <p>Designs the artwork prompt and generates the image, then looks at the result with its own eyes.</p>
+    <span class="model">xAI · vision</span></div>
+  <div class="agent b-scr"><div class="icon">✍️</div><h3 class="c-scr">Scribe</h3>
+    <p>Writes the Etsy listing — title, description, tags — warm, honest, never overclaiming.</p>
+    <span class="model">Local · free</span></div>
+  <div class="agent b-rev"><div class="icon">⚖️</div><h3 class="c-rev">Reviewer</h3>
+    <p>Scores everything 0–10 against the 9-principle constitution and prescribes exact fixes.</p>
+    <span class="model">xAI · vision</span></div>
+</div>
+
+<h2>One Bookmark, Start to Finish</h2>
+<div class="flow">
+  <div class="step b-sys"><div class="num">1</div><div>
+    <h3>You give a theme <span class="who c-sys">You</span></h3>
+    <p>e.g. "The unity of humanity" — typed into the dashboard's Pipeline tab.</p></div></div>
+  <div class="arrow">▼</div>
+  <div class="step b-lib"><div class="num">2</div><div>
+    <h3>Citations retrieved <span class="who c-lib">Librarian</span></h3>
+    <p>Searches a local index of the actual writings for passages that fit the theme.</p></div></div>
+  <div class="arrow">▼</div>
+  <div class="step b-art"><div class="num">3</div><div>
+    <h3>Artwork created <span class="who c-art">Artist</span></h3>
+    <p>Builds an image prompt from the theme + citations and generates the painting.</p></div></div>
+  <div class="arrow">▼</div>
+  <div class="step b-sys"><div class="num">4</div><div>
+    <h3>Consultation — two rounds <span class="who c-sys">All four</span></h3>
+    <p>Artist, Scribe, Reviewer, and Librarian each speak in turn, guided by cited excerpts
+       from <em>Consultation: A Compilation</em>. Round 1 surfaces the clash of opinions;
+       round 2 turns conjecture into certitude and commits to a quote and direction.
+       The decision becomes binding on everyone.</p></div></div>
+  <div class="arrow">▼</div>
+  <div class="step b-scr"><div class="num">5</div><div>
+    <h3>Listing written <span class="who c-scr">Scribe</span></h3>
+    <p>Writes the full Etsy listing around the team's chosen quote (which is locked — nobody may change it).</p></div></div>
+  <div class="arrow">▼</div>
+
+  <div class="loop">
+    <div class="loop-label">↻ improve until the score is high enough</div>
+    <div class="step b-rev"><div class="num">6</div><div>
+      <h3>Scored against the constitution <span class="who c-rev">Reviewer</span></h3>
+      <p>Looks at the real artwork and the listing, scores all 9 principles,
+         and writes exact find-and-replace fixes.</p></div></div>
+    <div class="arrow">▼</div>
+    <div class="step b-scr"><div class="num">7</div><div>
+      <h3>Fixes applied <span class="who c-scr">Scribe + code</span></h3>
+      <p>The Reviewer's edits are applied mechanically by code (so nothing gets ignored),
+         then an honesty filter strips any claim that can't be verified.</p></div></div>
+  </div>
+
+  <div class="arrow">▼</div>
+  <div class="step b-sys"><div class="num">8</div><div>
+    <h3>Product finished <span class="who c-sys">System</span></h3>
+    <p>Saved to the database, rendered as print-ready 2×6″ front (quote overlay) and back PNGs,
+       and sent to your Canva template. From the Products tab you can download the files,
+       ask the team to improve it, edit it by hand, or publish a draft to Etsy.</p></div></div>
+</div>
+
+<h2>Where the Money Goes</h2>
+<div class="cols">
+  <div class="col free"><h3>Free — runs on your PC</h3><ul>
+    <li>Scribe's writing (local Qwen model)</li>
+    <li>Librarian's search &amp; verification</li>
+    <li>Database, dashboard, bookmark rendering</li>
+  </ul></div>
+  <div class="col paid"><h3>Paid — xAI API</h3><ul>
+    <li>Image generation (one per bookmark)</li>
+    <li>Reviewer scoring (needs to see the art)</li>
+    <li>Artist's visual check of the artwork</li>
+  </ul></div>
+</div>
+
+<p class="foot">✦ &nbsp;The Steward tracks revenue vs. estimated API cost per product on the Products tab. &nbsp;✦</p>
+
+</div>
+</body>
+</html>

@@ -6,6 +6,7 @@ import { getActiveJobId, getSettings, setActiveJobId } from "../lib/settings";
 import type { Job } from "../lib/types";
 import { badgeClasses } from "../lib/utils";
 import { BookmarkPreview } from "./BookmarkPreview";
+import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
 import { ListingDetail } from "./ListingDetail";
 import { ScoreCard } from "./ScoreCard";
@@ -31,11 +32,12 @@ export function PipelinePanel() {
     queryKey: ["job", jobId],
     queryFn: () => api.getPipelineStatus(jobId as string),
     enabled: !!jobId,
-    refetchInterval: (query) => (query.state.data?.status === "running" ? 2500 : false),
+    refetchInterval: (query) =>
+      ["running", "waiting_for_input"].includes(query.state.data?.status ?? "") ? 2500 : false,
   });
 
   const job = jobQuery.data;
-  const running = start.isPending || job?.status === "running";
+  const running = start.isPending || job?.status === "running" || job?.status === "waiting_for_input";
   const result = job?.status === "done" ? job.result : null;
 
   // Once a run finishes, the products list is stale.
@@ -105,7 +107,7 @@ export function PipelinePanel() {
         </CardContent>
       </Card>
 
-      {job && job.status === "running" && (
+      {job && (job.status === "running" || job.status === "waiting_for_input") && (
         <Card>
           <CardHeader className="flex flex-row items-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
@@ -136,6 +138,17 @@ export function PipelinePanel() {
             </p>
           </CardContent>
         </Card>
+      )}
+
+      {/* Live view only while running/paused — once done, the full result below
+          (transcript + editing log) supersedes it. */}
+      {(job?.status === "running" || job?.status === "waiting_for_input") &&
+        job.consultation_live && job.consultation_live.length > 0 && (
+          <ConsultationTranscript turns={job.consultation_live} />
+        )}
+
+      {job?.status === "waiting_for_input" && job.pending_prompt && (
+        <ConsultationPause jobId={job.job_id} prompt={job.pending_prompt} />
       )}
 
       {job?.status === "error" && (

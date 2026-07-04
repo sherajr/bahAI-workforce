@@ -25,6 +25,22 @@ GOLD   = (212, 175, 55, 210)
 WHITE  = (255, 255, 255, 255)
 SHADOW = (0,   0,   0,  200)
 
+# Print target: a bookmark face is 2"x6". The xAI image model has a fixed
+# native output resolution (832x1248 as generated) with no size/quality
+# parameter available — a direct API request for a larger size is rejected
+# outright ("Argument not supported: size"), and no higher-resolution model
+# tier exists. A bare crop of that source into front/back quarters (416x1248)
+# is only ~208 real dpi at 2x6" despite being saved with 300dpi metadata — a
+# false claim baked into the file. Upscaling to true 300dpi pixel dimensions
+# BEFORE compositing (so the quote text and star are drawn crisp at final
+# size, not blurred by a later resize) closes that gap. This is interpolation
+# for correct print dimensions, not genuinely new photographic detail — the
+# source artwork's real resolution is still capped by the generator.
+PRINT_DPI = 300
+FACE_SIZE_IN = (2, 6)
+FACE_TARGET_PX = (PRINT_DPI * FACE_SIZE_IN[0], PRINT_DPI * FACE_SIZE_IN[1])  # (600, 1800)
+_RESAMPLE = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+
 
 def _nine_pointed_star(cx: int, cy: int, r_outer: float, r_inner: float) -> list:
     """Return polygon vertices for a 9-pointed star centred at (cx, cy)."""
@@ -182,6 +198,11 @@ def render_bookmark_pair(image_path: str, quote: str) -> dict:
     back_img.paste(left_q,  (0, 0))
     back_img.paste(right_q, (q, 0))
 
+    # Upscale both faces to true 300dpi print dimensions before compositing
+    # text/star — see PRINT_DPI comment above.
+    front_img = front_img.resize(FACE_TARGET_PX, _RESAMPLE)
+    back_img  = back_img.resize(FACE_TARGET_PX, _RESAMPLE)
+
     uid = uuid.uuid4().hex[:8]
     front_path = str(OUTPUTS_DIR / f"bookmark-front-{uid}.png")
     back_path  = str(OUTPUTS_DIR / f"bookmark-back-{uid}.png")
@@ -196,6 +217,7 @@ def render_bookmark(image_path: str, quote: str, output_path: str = None) -> str
     """Single-image fallback: treat the whole image as a 1:3 front face."""
     img = Image.open(image_path).convert("RGBA")
     img = _normalise_ratio(img, 1, 3)
+    img = img.resize(FACE_TARGET_PX, _RESAMPLE)
     result = _composite_front(img, quote).convert("RGB")
     if not output_path:
         output_path = str(OUTPUTS_DIR / f"bookmark-final-{uuid.uuid4().hex[:8]}.png")
