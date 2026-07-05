@@ -7,11 +7,12 @@ import type {
   RegenerateImageResult, RegenerateQuoteResult,
 } from "../lib/types";
 import {
-  badgeClasses, badgeFor, formatDate, parseListing, parseReview, usd,
+  badgeClasses, badgeFor, formatDate, isQuoteCard, parseCardCopy, parseListing, parseReview, usd,
 } from "../lib/utils";
 import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
 import { ListingDetail } from "./ListingDetail";
+import { QuoteCardDetail } from "./QuoteCardPreview";
 import { ScoreCard } from "./ScoreCard";
 import { BadgePill, Button, Card, CardContent, ErrorNote } from "./ui";
 
@@ -60,6 +61,8 @@ function PaneImage({
 function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => void }) {
   const review = parseReview(product);
   const overall = review?.overall ?? 0;
+  const quoteCard = isQuoteCard(product);
+  const cardCopy = parseCardCopy(product);
   // Final product renders (stored by the pipeline / backfill); fall back to the
   // legacy filename guess, then to the raw artwork for very old products.
   const front = imageUrl(product.front_image) || frontImageUrl(product.image_url);
@@ -74,7 +77,9 @@ function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => v
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
       className="group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70 text-left transition-colors hover:border-amber-400/40"
     >
-      <div className="flex h-56 gap-px overflow-hidden bg-slate-950">
+      {/* Quote cards are landscape (3.5×2): stack front over back instead of
+          the bookmarks' side-by-side portrait panes. */}
+      <div className={`flex h-56 gap-px overflow-hidden bg-slate-950 ${quoteCard ? "flex-col" : ""}`}>
         <PaneImage
           key={`f-${front || artwork}`}
           src={front}
@@ -92,6 +97,11 @@ function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => v
         )}
       </div>
       <div className="flex flex-1 flex-col gap-2 p-4">
+        {quoteCard && (
+          <div className="text-[10px] uppercase tracking-widest text-sky-300">
+            Quote card{cardCopy?.language_name ? ` · English + ${cardCopy.language_name}` : " · English"}
+          </div>
+        )}
         <div className="line-clamp-2 text-sm font-medium text-slate-100">
           {product.title ?? product.theme ?? product.id}
         </div>
@@ -109,7 +119,10 @@ function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => v
 
 function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const listing = parseListing(product);
+  const quoteCard = isQuoteCard(product);
+  const cardCopy = parseCardCopy(product);
+  // For quote cards listing_copy holds card JSON, not an Etsy listing.
+  const listing = quoteCard ? null : parseListing(product);
   const review = parseReview(product);
   const [notes, setNotes] = useState("");
   const [revenue, setRevenue] = useState("");
@@ -205,8 +218,23 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
 
         <div className="space-y-5">
           {review && <ScoreCard review={review} />}
+          {quoteCard && cardCopy && (
+            <QuoteCardDetail
+              quote={cardCopy.quote}
+              citation={cardCopy.citation}
+              quoteGrounded={cardCopy.quote_grounded}
+              languageName={cardCopy.language_name}
+              translationText={cardCopy.translation_text}
+              disclaimerNative={cardCopy.translation_disclaimer_native}
+              disclaimerEn={cardCopy.translation_disclaimer_en}
+            />
+          )}
           {listing && <ListingDetail listing={listing} />}
 
+          {/* Everything below acts on the listing/Etsy machinery — quote
+              cards have neither (they're given away, not sold), and the API
+              rejects these actions for cards anyway. */}
+          {!quoteCard && (<>
           <Card>
             <CardContent className="space-y-3 pt-4">
               <div className="flex items-center justify-between">
@@ -392,6 +420,7 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
               {record.isError && <ErrorNote>{(record.error as Error).message}</ErrorNote>}
             </CardContent>
           </Card>
+          </>)}
         </div>
       </div>
     </div>
@@ -606,7 +635,7 @@ export function ProductsGallery() {
       {products.data?.length === 0 && (
         <Card>
           <CardContent className="pt-5 text-sm text-slate-400">
-            No bookmarks yet. Head to the Pipeline tab and give the team its first theme.
+            No products yet. Head to the Pipeline tab and give the team its first theme.
           </CardContent>
         </Card>
       )}

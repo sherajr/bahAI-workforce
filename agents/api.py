@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 # Load .env before any submodule imports so all os.getenv() calls see the values
 load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"), override=True)
 
-from agents.librarian import retrieve
+from agents.librarian import retrieve, retrieve_ruhi_book1
 from agents.state import (
     init_db, create_task, update_task_status, log_run, get_all_agent_statuses,
     create_product, update_product, get_all_products,
@@ -422,12 +422,21 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
                     passed_review=passed)
 
     # ── Step 1: Consultation ─────────────────────────────────────────────────
+    def _preview_front(quote: str, transcript: list) -> str:
+        """LLM-free front-face render for the pause — Sheraj steers from the
+        actual printed look, not a text description of it."""
+        from agents.compositor import render_bookmark_pair
+        return _web_image_path(render_bookmark_pair(req.image_url, quote)["front_path"])
+
     consultation = {"transcript": [], "context": ""}
     if req.image_url:
         try:
             consultation = run_consultation(
                 req.image_url, req.theme, req.image_prompt, req.citations or [],
                 progress=progress, on_turn=on_turn, request_human_input=request_human_input,
+                render_preview=_preview_front,
+                preview_note=("The image above is the bookmark's front face as it would "
+                              "print right now, with the team's verified quote."),
             )
             if req.task_id:
                 vq = (consultation.get("verified_quote") or "").strip()
@@ -783,6 +792,501 @@ def pipeline_run(req: PipelineRunRequest):
     return {"job_id": job_id, "status": "running"}
 
 
+# --- Pipeline: Quote Cards (giveaway product line — parallel to bookmarks) ---
+#
+# A quote card is NOT sold: no listing, no Etsy, no pricing. The deliverable
+# is a verified quote + welcoming artwork + optional AI-labeled translation,
+# rendered as a 3.5"x2" front/back PNG pair. See docs/fable5-briefing-quote-cards.md.
+
+class CardPipelineRequest(BaseModel):
+    theme: str
+    language: Optional[str] = None   # LANGUAGES code ("es"/"zh"/"ar") or None for English-only
+    target_score: float = 9.0
+    max_attempts: int = 3
+
+
+@app.get("/card/languages")
+def card_languages():
+    """Translation languages the card pipeline offers (config in translator.py)."""
+    from agents.translator import LANGUAGES
+    return [
+        {"code": code, "name": cfg["name"], "native_name": cfg["native_name"]}
+        for code, cfg in LANGUAGES.items()
+    ]
+
+
+_SENTENCE_END_RE = re.compile(r'[.!?](?=\s|$)')
+
+
+def _trim_card_quote(text: str, limit: int = 150) -> str:
+    """
+    Trim a passage to a card-appropriate excerpt at a SENTENCE boundary —
+    always a complete sentence, never a mid-sentence hard cut. A card that
+    trails off with no closing punctuation ("...and verities will come to")
+    reads as a broken render, not a deliberate excerpt — worse than a longer
+    but complete quote. Takes as many whole sentences as fit within `limit`;
+    if even the first sentence alone exceeds it, takes that one sentence in
+    full anyway and lets the Card Compositor's own auto-shrink (or its
+    raise-if-it-still-doesn't-fit guard) handle the length, rather than
+    truncating it into a broken fragment here.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    ends = [m.end() for m in _SENTENCE_END_RE.finditer(text)]
+    if not ends:
+        return text  # no sentence punctuation at all — return whole passage rather than guess a cut
+    cut = next((e for e in ends if e > limit), None)
+    if cut is None:
+        cut = ends[-1]
+    else:
+        fits = [e for e in ends if e <= limit]
+        if fits:
+            cut = fits[-1]
+    return text[:cut].strip()
+
+
+def _best_matching_citation(quote: str, citations: list[dict]) -> dict:
+    """
+    Bag-of-words overlap: which of the (up to 3) retrieved Ruhi Book 1
+    passages does the consultation's proposed quote most closely track?
+    Used to replace the LLM's own wording with that passage's VERBATIM text —
+    see the comment at its call site in _run_card_pipeline for why this
+    exists: live testing caught the Librarian blending two different
+    retrieved passages into one composite quote and crediting the whole
+    thing to only one of their sources, with its own round-2 verdict
+    overriding round-1's correct 'ORIGINAL COMPOSITION' self-assessment.
+    Never trust that self-report for a claim this consequential — verify
+    deterministically instead, the same discipline as _sanitize_claims.
+    """
+    def norm(s: str) -> set:
+        return set(re.sub(r"[^a-z0-9 ]", " ", s.lower()).split())
+
+    quote_words = norm(quote)
+    best, best_score = citations[0], -1
+    for c in citations:
+        score = len(quote_words & norm(c.get("text", "")))
+        if score > best_score:
+            best, best_score = c, score
+    return best
+
+
+def _librarian_source_from(transcript: list, citations: list) -> str:
+    """
+    The citation line printed on the card: the Librarian's own SOURCE:
+    attribution from the latest consultation turn, falling back to the top
+    retrieved passage's source metadata.
+    """
+    for turn in reversed(transcript or []):
+        if turn.get("agent") == "Librarian":
+            m = re.search(r"SOURCE:\s*(.+)", turn.get("message", ""))
+            if m:
+                return m.group(1).strip()
+    if citations:
+        return str(citations[0].get("source") or "").strip()
+    return ""
+
+
+def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
+                       request_human_input=None) -> dict:
+    """
+    The whole quote-card pipeline in one background job:
+    task → Librarian → Artist (card brief + generate) → consultation (card
+    framing, includes the post-round-2 pause for Sheraj) → optional
+    translation → Card Compositor → Reviewer (card rubric, sees the rendered
+    front) → simple revision loop (re-pick quote or repaint artwork — there is
+    no listing text to edit) → save product.
+    """
+    from agents.artist import build_card_image_prompt, generate_image
+    from agents.card_compositor import render_quote_card
+    from agents.consultation import run_consultation, run_card_revision_consultation
+    from agents.reviewer import score_quote_card
+    from agents.translator import translate_quote, LANGUAGES
+
+    lang_name = LANGUAGES[req.language]["name"] if req.language else None
+
+    progress("Creating task...")
+    task_id = create_task(req.theme, "card_design", assigned_to="operator")
+
+    # Quote cards may ONLY ever quote Ruhi Institute Book 1, "Reflections on
+    # the Life of the Spirit" (owner decision, 2026-07) — retrieve_ruhi_book1
+    # searches that restricted index, never the full 7-text corpus the
+    # bookmark pipeline uses. Unlike the bookmark path (which tolerates empty
+    # retrieval by letting the consultation's Librarian draw on "well-known
+    # writings" generally), an empty result here must fail the job outright:
+    # falling through to open-ended sourcing would silently break the
+    # restriction the moment retrieval hiccups.
+    progress("Librarian is searching Ruhi Book 1 for passages...")
+    citations = retrieve_ruhi_book1(req.theme, n_results=3) or []
+    log_run(task_id, "librarian", "retrieve", req.theme[:200],
+            f"{len(citations)} passages retrieved", passed_review=len(citations) > 0)
+    if not citations:
+        raise RuntimeError(
+            "No passage found in the Ruhi Book 1 index for this theme, or the index "
+            "isn't built yet — run scripts/ingest_ruhi_book1.py. Quote cards only ever "
+            "draw from Reflections on the Life of the Spirit, so this can't fall back "
+            "to the general library."
+        )
+
+    progress("Artist is composing the card image brief (local Qwen3)...")
+    image_prompt = build_card_image_prompt(req.theme, citations)
+    log_run(task_id, "artist", "card_brief", req.theme[:200], image_prompt[:200],
+            passed_review=bool(image_prompt.strip()))
+
+    progress("Artist is generating the artwork (xAI)...")
+    gen = generate_image(image_prompt, "2:3")
+    image_path = gen.get("image_url", "")
+    log_run(task_id, "artist", "generate", image_prompt[:200], image_path[:200],
+            passed_review=bool(image_path) and Path(image_path).exists())
+
+    # ── Consultation (card framing) ──────────────────────────────────────────
+    def _preview_front(quote: str, transcript: list) -> str:
+        """LLM-free front-face render for the pause. Translation doesn't exist
+        yet at this point in the pipeline, so the preview is English-only —
+        the preview_note below says so rather than letting Sheraj assume the
+        final card looks exactly like this."""
+        preview = render_quote_card(image_path, quote,
+                                    _librarian_source_from(transcript, citations))
+        return _web_image_path(preview["front_path"])
+
+    consultation = {"transcript": [], "context": "", "brief": {}}
+    try:
+        consultation = run_consultation(
+            image_path, req.theme, image_prompt, citations,
+            progress=progress, on_turn=on_turn,
+            request_human_input=request_human_input, product="quote_card",
+            render_preview=_preview_front,
+            preview_note=(
+                "The image above is the card's front face as it would print right now."
+                + (f" The {lang_name} translation isn't added yet — it goes on right "
+                   "after this step, with its AI-assisted label." if lang_name else "")
+            ),
+        )
+        vq = (consultation.get("verified_quote") or "").strip()
+        log_run(task_id, "consultation", "consult", req.theme[:200],
+                f"{len(consultation['transcript'])} turns completed",
+                passed_review=bool(vq and len(vq) > 10))
+    except Exception as e:
+        consultation["transcript"] = [{"agent": "System", "role": "error",
+                                       "message": f"Consultation skipped: {e}"}]
+        log_run(task_id, "consultation", "consult", req.theme[:200],
+                f"failed: {e}"[:400], passed_review=False)
+
+    editing_log = []
+
+    # Honour the consultation's image decision (same contract as bookmarks:
+    # regenerate ONCE so the shipped card reflects what the team agreed).
+    brief = consultation.get("brief") or {}
+    adjustment = (brief.get("image_adjustment") or "").strip()
+    if adjustment and image_path:
+        progress(f"Artist is repainting per the consultation: {adjustment[:120]}...")
+        try:
+            revised_prompt = (f"{image_prompt}\n\n"
+                              f"IMPORTANT adjustment agreed in team consultation: {adjustment}")
+            regen = generate_image(revised_prompt, "2:3")
+            new_path = regen.get("image_url", "")
+            if new_path and Path(new_path).exists():
+                image_path, image_prompt = new_path, revised_prompt
+                editing_log.append(
+                    {"agent": "Artist", "role": "image revision (consultation)",
+                     "message": f"Repainted the artwork per the team's agreed adjustment:\n{adjustment}"})
+                log_run(task_id, "artist", "regenerate",
+                        adjustment[:200], new_path[:200], passed_review=True)
+        except Exception as e:
+            editing_log.append(
+                {"agent": "Artist", "role": "image revision (consultation)",
+                 "message": f"Regeneration failed ({e}) — continuing with the original artwork."})
+            log_run(task_id, "artist", "regenerate", adjustment[:200],
+                    f"failed: {e}"[:400], passed_review=False)
+
+    # ── The quote (and its honesty flags) ────────────────────────────────────
+    # The consultation's own wording is NEVER printed as-is: whatever quote
+    # (or fragment of one) it proposed is used only to pick WHICH of the
+    # retrieved Ruhi Book 1 passages the team meant — the printed text and
+    # citation are always that passage's own verbatim (trimmed) text and true
+    # source metadata. This is deterministic by construction (every passage
+    # in `citations` came from retrieve_ruhi_book1, so this can never
+    # surface a quote from outside the book), and it closes a real failure
+    # mode caught live: a Librarian round can blend two different retrieved
+    # passages into one composite line and credit the whole thing to just
+    # one of them — round 2 once reversed round 1's own correct "ORIGINAL
+    # COMPOSITION" verdict to "GROUNDED" for exactly this kind of blend.
+    proposed = (consultation.get("verified_quote") or "").strip()
+    if proposed and citations:
+        matched = _best_matching_citation(proposed, citations)
+    elif citations:
+        matched = citations[0]
+    else:
+        raise RuntimeError(
+            "No verified quote available: consultation produced none and no passages "
+            "were retrieved. Build the index (scripts/ingest_ruhi_book1.py) or retry."
+        )
+    quote = _trim_card_quote(matched["text"])
+    quote_grounded = True  # always true — it's a verbatim excerpt of an indexed Book 1 passage
+    citation_src = str(matched.get("source") or "").strip()
+
+    # ── Optional translation (Grok; labeled AI-assisted by code, not the LLM) ─
+    def _translate(q: str) -> Optional[dict]:
+        if not req.language:
+            return None
+        progress(f"Translating the quote into {lang_name} (xAI Grok)...")
+        try:
+            tr = translate_quote(q, req.language)
+        except Exception as first_err:
+            progress(f"Translation attempt failed ({first_err}) — retrying once...")
+            tr = translate_quote(q, req.language)  # second failure raises → job errors honestly
+        log_run(task_id, "translator", "translate", q[:200],
+                tr["text"][:200], passed_review=True)
+        return tr
+
+    try:
+        translation = _translate(quote)
+    except Exception as e:
+        log_run(task_id, "translator", "translate", quote[:200],
+                f"failed: {e}"[:400], passed_review=False)
+        raise RuntimeError(f"Translation into {lang_name} failed twice: {e}") from e
+
+    # ── Render → Score → Revise loop ─────────────────────────────────────────
+    # No listing text exists, so revision levers are re-picking the quote
+    # ("requote") or regenerating the artwork ("repaint") — chosen by the
+    # Reviewer's machine-readable `action`, never inferred from prose.
+    def _render(q: str, tr: Optional[dict]) -> dict:
+        progress("Card Compositor is rendering the front and back faces...")
+        r = render_quote_card(image_path, q, citation_src, translation=tr)
+        log_run(task_id, "compositor", "render_card", image_path[:200],
+                r["front_path"][:200],
+                passed_review=bool(r["front_path"]) and Path(r["front_path"]).exists())
+        return r
+
+    def _score(q: str, tr: Optional[dict], rendered: dict, prev=None, note=None) -> dict:
+        progress("Reviewer is scoring the card (seeing the rendered front face)...")
+        return score_quote_card(
+            req.theme, q, citation_src, quote_grounded,
+            front_image_path=rendered["front_path"], translation=tr,
+            consultation_transcript=consultation.get("transcript"),
+            consultation_decision=brief or None,
+            previous_review=prev, revision_note=note,
+        )
+
+    latest_citations = citations  # updated after each requote so the team always sees current candidates
+    revision_history = []  # [{attempt, action, guidance, overall, prev_overall}, ...] this run
+
+    def _team_decide(rendered: dict, review: dict, attempt: int) -> dict:
+        """
+        The whole team weighs in on the Reviewer's scored concerns before the
+        pipeline commits to a revision — previously the Reviewer's own
+        action/action_guidance drove requote/repaint unilaterally ("the last
+        part just has the reviewer saying stuff" — owner feedback, 2026-07).
+        Skipped when the card already meets target: no need to convene the
+        team just to say "ship".
+        """
+        if review.get("overall", 0) >= req.target_score:
+            return {"action": "ship", "action_guidance": ""}
+        decision = run_card_revision_consultation(
+            req.theme, quote, citation_src, rendered["front_path"], latest_citations,
+            review, progress=progress, on_turn=on_turn, attempt=attempt,
+            history=revision_history,
+        )
+        editing_log.extend(decision["transcript"])
+        log_run(task_id, "consultation", f"card_revision_consult_{attempt}",
+                req.theme[:200], decision["action"], passed_review=True)
+        return decision
+
+    rendered = _render(quote, translation)
+    review = _score(quote, translation, rendered)
+    log_run(task_id, "reviewer", "card_score_1", req.theme[:200],
+            json.dumps({"overall": review.get("overall")})[:200],
+            passed_review=review.get("passed"))
+    editing_log.append(
+        {"agent": "Reviewer", "role": "card score — attempt 1 (editing)",
+         "message": f"Overall {review.get('overall', 0)}/10.\n"
+                    f"Recommendation: {review.get('recommendation', '')}"})
+
+    best = {"quote": quote, "grounded": quote_grounded, "citation": citation_src,
+            "translation": translation, "rendered": rendered, "review": review,
+            "image_path": image_path, "image_prompt": image_prompt}
+    cur_review = review
+    attempt = 1
+    stalled = 0
+
+    decision = (_team_decide(rendered, review, attempt=1)
+                if attempt < req.max_attempts else {"action": "ship", "action_guidance": ""})
+    cur_action, cur_guidance = decision["action"], decision["action_guidance"]
+
+    while best["review"].get("overall", 0) < req.target_score and attempt < req.max_attempts:
+        action = cur_action
+        guidance = cur_guidance
+        if action not in ("requote", "repaint"):
+            editing_log.append({"agent": "System", "role": "editing stopped",
+                                "message": "The team's consultation reached no further revision "
+                                           f"action — keeping the best card ({best['review'].get('overall', 0)}/10)."})
+            break
+        attempt += 1
+
+        if action == "requote":
+            progress(f"Re-picking the quote per the Reviewer: {guidance[:100] or req.theme}...")
+            try:
+                passages = retrieve_ruhi_book1(guidance.strip() or req.theme, n_results=3) or []
+            except Exception:
+                passages = []
+            if passages:
+                latest_citations = passages  # keep the team's view of "other candidates" current
+            pick = next((p for p in passages
+                         if _trim_card_quote(p["text"]) != quote), None)
+            if not pick:
+                editing_log.append({"agent": "System", "role": "editing stopped",
+                                    "message": "No different passage found for the Reviewer's "
+                                               "steer — keeping the best card."})
+                break
+            quote = _trim_card_quote(pick["text"])
+            quote_grounded = True
+            citation_src = str(pick.get("source") or "").strip() or citation_src
+            log_run(task_id, "librarian", f"requote_{attempt}", guidance[:200], quote[:200],
+                    passed_review=True)
+            try:
+                translation = _translate(quote)
+            except Exception as e:
+                log_run(task_id, "translator", "translate", quote[:200],
+                        f"failed: {e}"[:400], passed_review=False)
+                editing_log.append({"agent": "System", "role": "editing stopped",
+                                    "message": f"Translation of the re-picked quote failed ({e}) — "
+                                               "keeping the best card."})
+                break
+            revision_note = f'Quote re-picked per your steer: now "{quote[:120]}" ({citation_src})'
+        else:  # repaint
+            progress(f"Artist is repainting per the Reviewer: {guidance[:100]}...")
+            try:
+                new_prompt = (f"{image_prompt}\n\nIMPORTANT change requested in review: "
+                              f"{guidance or 'better express the theme'}")
+                regen = generate_image(new_prompt, "2:3")
+                new_path = regen.get("image_url", "")
+                if not (new_path and Path(new_path).exists()):
+                    raise RuntimeError("no image returned")
+                image_path, image_prompt = new_path, new_prompt
+                log_run(task_id, "artist", f"repaint_{attempt}", guidance[:200],
+                        new_path[:200], passed_review=True)
+            except Exception as e:
+                log_run(task_id, "artist", f"repaint_{attempt}", guidance[:200],
+                        f"failed: {e}"[:400], passed_review=False)
+                editing_log.append({"agent": "System", "role": "editing stopped",
+                                    "message": f"Repaint failed ({e}) — keeping the best card."})
+                break
+            revision_note = f"Artwork regenerated per your steer: {guidance[:150]}"
+
+        rendered = _render(quote, translation)
+        new_review = _score(quote, translation, rendered, prev=cur_review, note=revision_note)
+        log_run(task_id, "reviewer", f"card_score_{attempt}", req.theme[:200],
+                json.dumps({"overall": new_review.get("overall")})[:200],
+                passed_review=new_review.get("passed"))
+        prev_overall = cur_review.get("overall", 0)
+        new_overall = new_review.get("overall", 0)
+        editing_log.append(
+            {"agent": "Reviewer", "role": f"card score — attempt {attempt} (editing)",
+             "message": f"Overall {new_overall}/10 (was {prev_overall}/10 — "
+                        f"{'improved' if new_overall > prev_overall else 'did not improve'}).\n"
+                        f"Applied: {revision_note}\n"
+                        f"Recommendation: {new_review.get('recommendation', '')}"})
+
+        revision_history.append({"attempt": attempt, "action": action, "guidance": guidance,
+                                  "overall": new_overall, "prev_overall": prev_overall})
+        cur_review = new_review
+        decision = (_team_decide(rendered, new_review, attempt=attempt)
+                    if attempt < req.max_attempts else {"action": "ship", "action_guidance": ""})
+        cur_action, cur_guidance = decision["action"], decision["action_guidance"]
+        best_overall = best["review"].get("overall", 0)
+        if new_overall >= best_overall:
+            # Ties adopt the newer card — it incorporated more feedback
+            # (same invariant as the listing loop). Only strict regressions
+            # count toward the 2-strike stall.
+            best = {"quote": quote, "grounded": quote_grounded, "citation": citation_src,
+                    "translation": translation, "rendered": rendered, "review": new_review,
+                    "image_path": image_path, "image_prompt": image_prompt}
+            if new_overall > best_overall:
+                stalled = 0
+        else:
+            stalled += 1
+        if stalled >= 2:
+            editing_log.append({"agent": "System", "role": "editing stopped",
+                                "message": f"Two revisions in a row scored worse than the best — "
+                                           f"keeping the best card ({best['review'].get('overall', 0)}/10)."})
+            break
+
+    # ── Save ─────────────────────────────────────────────────────────────────
+    progress("Saving the quote card...")
+    tr = best["translation"]
+    card_copy = {
+        "product_kind": "quote_card",
+        "quote": best["quote"],
+        "quote_grounded": best["grounded"],
+        "citation": best["citation"],
+        "language": req.language,
+        "language_name": (tr or {}).get("name"),
+        "translation_text": (tr or {}).get("text"),
+        "translation_disclaimer_native": (tr or {}).get("disclaimer_native"),
+        "translation_disclaimer_en": (tr or {}).get("disclaimer_en"),
+    }
+    title = f"Quote card — {req.theme[:70]}" + (f" ({lang_name})" if lang_name else "")
+    product_id = create_product(
+        task_id=task_id, title=title, image_url=best["image_path"],
+        listing_copy=json.dumps(card_copy), image_prompt=best["image_prompt"],
+        theme=req.theme, product_type="quote_card",
+    )
+    full_transcript = consultation.get("transcript", []) + editing_log
+    update_product(product_id,
+                   reviewer_scores=json.dumps(best["review"]),
+                   consultation=json.dumps(full_transcript),
+                   front_image=best["rendered"]["front_path"],
+                   back_image=best["rendered"]["back_path"])
+    update_task_status(task_id, "completed")
+
+    overall = best["review"].get("overall", 0)
+    return {
+        "task_id": task_id,
+        "product_id": product_id,
+        "product_type": "quote_card",
+        "theme": req.theme,
+        "language": req.language,
+        "language_name": lang_name,
+        "quote": best["quote"],
+        "quote_grounded": best["grounded"],
+        "citation": best["citation"],
+        "translation": tr,
+        "image_prompt": best["image_prompt"],
+        "image_path": best["image_path"],
+        "image_web": _web_image_path(best["image_path"]),
+        "front_image_path": best["rendered"]["front_path"],
+        "front_image_web": _web_image_path(best["rendered"]["front_path"]),
+        "back_image_path": best["rendered"]["back_path"],
+        "back_image_web": _web_image_path(best["rendered"]["back_path"]),
+        "compositor_error": None,
+        "review": best["review"],
+        "attempts": attempt,
+        "target_reached": overall >= req.target_score,
+        "badge": _badge(overall),
+        "consultation": full_transcript,
+    }
+
+
+@app.post("/pipeline/run-card")
+def pipeline_run_card(req: CardPipelineRequest):
+    """
+    Dashboard entry point for the Quote Cards pipeline (parallel to
+    /pipeline/run, which stays bookmark-only). Returns {job_id} immediately;
+    poll GET /pipeline/status/{job_id}.
+    """
+    from agents.translator import LANGUAGES
+    if not req.theme.strip():
+        raise HTTPException(status_code=422, detail="theme is required")
+    if req.language and req.language not in LANGUAGES:
+        raise HTTPException(status_code=422,
+                            detail=f"Unknown language '{req.language}' — offered: {sorted(LANGUAGES)}")
+    job_id = _start_job(
+        "card-pipeline",
+        lambda progress, on_turn, ask: _run_card_pipeline(req, progress, on_turn, ask),
+    )
+    return {"job_id": job_id, "status": "running"}
+
+
 # --- Products endpoints ---
 
 @app.get("/products")
@@ -821,6 +1325,7 @@ def improve_product(product_id: str, req: ImproveRequest):
         raise HTTPException(status_code=404, detail="Product not found")
 
     product = dict(row)
+    _require_bookmark(product)
     image_url    = product.get("image_url", "")
     image_prompt = product.get("image_prompt", "")
     theme        = product.get("theme", "")
@@ -937,6 +1442,21 @@ def _load_product_or_404(product_id: str) -> dict:
     return dict(row)
 
 
+def _require_bookmark(product: dict):
+    """
+    Guard for bookmark-only actions (improve/regenerate/publish): running them
+    on a quote card would push it through listing/bookmark machinery it doesn't
+    have (e.g. re-rendering a 3.5x2 card as a 2x6 bookmark). The dashboard
+    hides these actions for cards; this makes the API honest about it too.
+    """
+    if (product.get("product_type") or "bookmark") != "bookmark":
+        raise HTTPException(
+            status_code=422,
+            detail="This action applies to bookmark products only — quote cards have no "
+                   "listing to improve or publish; re-run the card pipeline instead.",
+        )
+
+
 class RegenerateQuoteRequest(BaseModel):
     guidance: str = ""   # e.g. "make it about detachment instead of unity"
 
@@ -955,6 +1475,7 @@ def regenerate_quote(product_id: str, req: RegenerateQuoteRequest):
     from agents.reviewer import score as reviewer_score
 
     product = _load_product_or_404(product_id)
+    _require_bookmark(product)
     listing = json.loads(product.get("listing_copy") or "{}")
     image_url    = product.get("image_url", "")
     image_prompt = product.get("image_prompt", "")
@@ -1046,6 +1567,7 @@ def regenerate_image(product_id: str, req: RegenerateImageRequest):
                             detail="guidance is required — describe what should change about the artwork")
 
     product = _load_product_or_404(product_id)
+    _require_bookmark(product)
     listing = json.loads(product.get("listing_copy") or "{}")
     old_image_prompt = product.get("image_prompt", "")
     theme = product.get("theme") or listing.get("title", "")
@@ -1160,7 +1682,7 @@ def regenerate_all(product_id: str, req: RegenerateAllRequest):
     from its theme plus fresh guidance, overwriting this product in place.
     Returns {job_id} immediately; poll GET /pipeline/status/{job_id}.
     """
-    _load_product_or_404(product_id)  # fail fast with 404 before starting the job
+    _require_bookmark(_load_product_or_404(product_id))  # fail fast before starting the job
     job_id = _start_job(
         "redo-product",
         lambda progress, on_turn, ask: _redo_product(product_id, req, progress, on_turn, ask),
@@ -1191,6 +1713,9 @@ def edit_product(product_id: str, req: ProductEditRequest):
         raise HTTPException(status_code=404, detail="Product not found")
 
     product = dict(row)
+    # Manual listing edits are bookmark-only: editing a card's stored text
+    # would silently diverge from the already-rendered PNGs.
+    _require_bookmark(product)
     listing_copy = product.get("listing_copy", "{}")
     listing = json.loads(listing_copy) if listing_copy else {}
 
@@ -1433,6 +1958,7 @@ def etsy_publish(body: dict):
     if not row:
         raise HTTPException(status_code=404, detail="Product not found")
     product = dict(row)
+    _require_bookmark(product)
 
     if product.get("etsy_listing_id"):
         return {

@@ -1,6 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import type { Listing, ProductRow, Review } from "./types";
+import type { CardCopy, Listing, ProductRow, Review } from "./types";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -17,6 +17,13 @@ export const PRINCIPLE_LABELS: Record<string, string> = {
   "7_craft_in_service": "Craft in Service of Social Good",
   "8_justice": "Justice ('Adl)",
   "9_independent_investigation": "Independent Investigation of Truth",
+  // Quote-card rubric keys (reviewer.score_quote_card) — cards are scored on
+  // a purpose-built scale, not the 9 Etsy-listing principles.
+  quote_citation: "Quote & Citation Accuracy",
+  translation: "Translation Honesty & Quality",
+  artwork_fit: "Artwork Fit",
+  newcomer_accessibility: "Newcomer Accessibility",
+  legibility: "Print Legibility",
 };
 
 export function principleLabel(key: string): string {
@@ -68,6 +75,19 @@ export function parseListing(row: ProductRow): Listing | null {
   if (!row.listing_copy) return null;
   try {
     return JSON.parse(row.listing_copy) as Listing;
+  } catch {
+    return null;
+  }
+}
+
+export function isQuoteCard(row: ProductRow): boolean {
+  return row.product_type === "quote_card";
+}
+
+export function parseCardCopy(row: ProductRow): CardCopy | null {
+  if (!isQuoteCard(row) || !row.listing_copy) return null;
+  try {
+    return JSON.parse(row.listing_copy) as CardCopy;
   } catch {
     return null;
   }

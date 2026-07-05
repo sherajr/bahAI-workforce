@@ -64,6 +64,45 @@ def build_image_prompt(theme: str, citations: list[dict] | None = None) -> str:
     ], temperature=0.8, max_tokens=300).strip()
 
 
+def build_card_image_prompt(theme: str, citations: list[dict] | None = None) -> str:
+    """
+    Image prompt for a QUOTE CARD — a giveaway outreach piece for someone who
+    has never encountered the Faith. Differs from the bookmark brief on
+    purpose: welcoming and universally beautiful, no esoteric symbolism or
+    numeric motif requirements, and composed so two landscape bands (the
+    card's front and back faces) can be cropped from the portrait output.
+    Runs on local Qwen (lean prompt — see CLAUDE.md rule 1).
+    """
+    system_prompt = build_system_prompt("artist", "design")
+
+    citation_block = ""
+    if citations:
+        citation_block = "\n\nSpiritual citations to inspire the image:\n"
+        for c in (citations or [])[:2]:
+            citation_block += f'  — "{c.get("text", "")[:180]}" ({c.get("source", "")})\n'
+
+    user_message = (
+        f"Write an image generation prompt for a small spiritual gift card.\n\n"
+        f"Theme: {theme}\n"
+        f"{citation_block}\n\n"
+        "Requirements:\n"
+        "- The viewer may know NOTHING about the Bahá'í Faith: the image must feel "
+        "welcoming and beautiful on its own — nature, light, gardens, sky, water — "
+        "no religious iconography that needs explaining, no esoteric symbols\n"
+        "- Serene and luminous; gentle dawn light, rich but soft jewel tones\n"
+        "- Composition: beauty spread across the WHOLE frame with a calm, luminous "
+        "middle region — no single critical detail at the extreme top or bottom edge\n"
+        "- NO text, letters, or words anywhere in the image\n"
+        "- Painterly fine art style, suitable for printing at business-card size\n\n"
+        "Output ONLY the image generation prompt. No explanation, no preamble."
+    )
+
+    return call_llm("design", [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_message},
+    ], temperature=0.8, max_tokens=300).strip()
+
+
 def _save_image_locally(image_bytes: bytes, prefix: str = "bookmark") -> Path:
     import uuid
     filename = f"{prefix}-{uuid.uuid4().hex[:8]}.jpg"

@@ -1,4 +1,5 @@
 import type { ConsultationTurn } from "../lib/types";
+import { imageUrl } from "../lib/api";
 import { AGENT_COLORS, cn } from "../lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui";
 
@@ -26,6 +27,13 @@ export function ConsultationTranscript({ turns }: { turns: ConsultationTurn[] })
                 <span className={cn("text-sm font-semibold", textColor)}>{t.agent}</span>
                 <span className="text-xs text-slate-500">{t.role}</span>
               </div>
+              {t.image && (
+                <img
+                  src={imageUrl(t.image)}
+                  alt="Front face preview"
+                  className="mb-2 mt-1 max-h-72 rounded-lg border border-slate-700 object-contain shadow-md"
+                />
+              )}
               <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-300">
                 {t.message}
               </p>

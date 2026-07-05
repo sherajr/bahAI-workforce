@@ -3,9 +3,9 @@
 // Every call reports into the activity-log event bus below.
 
 import type {
-  AgentStatus, CanvaStatus, EditProductPayload, EditProductResult, EtsyPublishResult, EtsyStatus,
-  ImproveResult, Job, JobStep, JobSummary, PipelineResult, ProductRow, RegenerateImageResult,
-  RegenerateQuoteResult, StewardReport, TrustReport,
+  AgentStatus, CanvaStatus, CardLanguage, EditProductPayload, EditProductResult,
+  EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobStep, JobSummary, PipelineResult,
+  ProductRow, RegenerateImageResult, RegenerateQuoteResult, StewardReport, TrustReport,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -159,6 +159,21 @@ export const api = {
     });
     return res;
   },
+  runCardPipeline: async (theme: string, language: string | null, targetScore = 9.0, maxAttempts = 3) => {
+    const res = await post<{ job_id: string; status: string }>("/pipeline/run-card", {
+      theme,
+      language,
+      target_score: targetScore,
+      max_attempts: maxAttempts,
+    });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "RUN", path: "card-pipeline", status: "", ms: 0,
+      detail: `Started quote card "${theme}"${language ? ` with ${language} translation` : " (English only)"} — job ${res.job_id}`,
+    });
+    return res;
+  },
+  getCardLanguages: () => get<CardLanguage[]>("/card/languages"),
   getPipelineStatus: async (jobId: string) => {
     const job = await request<Job>("GET", `/pipeline/status/${jobId}`, undefined, { silent: true });
     logJobProgress(job);

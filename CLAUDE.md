@@ -17,14 +17,23 @@ logic offline with mocks first, then verify live against the real SQLite DB
 (`agents.state.get_all_products()`) and real LLM calls (Ollama local, xAI Grok).
 FastAPI's `TestClient` works well for endpoint checks without starting a server.
 
-## The one pipeline that matters
+## The two pipelines
 
-`_run_full_pipeline` in `agents/api.py` is the entry point for everything:
+`_run_full_pipeline` in `agents/api.py` is the bookmark entry point:
 create task → Librarian retrieves citations → Artist builds prompt + generates
 image (xAI) → `_pipeline_write_approve_sync` (consultation → Scribe writes →
 Reviewer scores → mechanical-edit revision loop) → save product → Compositor
 renders front/back PNGs → Canva autofill. The dashboard polls
 `/pipeline/status/{job_id}`; jobs run in a thread pool (`_start_job`).
+
+`_run_card_pipeline` (same file) is the QUOTE CARD entry point — a giveaway
+product, never sold: Librarian → Artist (card brief) → consultation with
+`product="quote_card"` → optional translation (`translator.py`, Grok path) →
+`card_compositor.render_quote_card` (3.5×2in, multi-script) →
+`reviewer.score_quote_card` (sees the RENDERED front face) → requote/repaint
+revision loop driven by the review's machine-readable `action` field.
+Products carry `product_type`; bookmark-only endpoints reject cards via
+`_require_bookmark`.
 
 ## Hard rules (violating these reintroduces fixed production bugs)
 
@@ -48,6 +57,26 @@ renders front/back PNGs → Canva autofill. The dashboard polls
 7. **The consultation's round-2 decision is binding.** `reviewer.score()`
    receives `consultation_decision`; overrides must be named
    "REOPENING team decision: ..." — never silently contradicted.
+8. **Translation disclaimers are code-appended, never LLM-written.** A quote
+   card translation is always labeled AI-assisted/unofficial: fixed strings in
+   `translator.LANGUAGES`, printed on the card by the compositor and stored in
+   metadata. Same class of honesty rule as `_sanitize_claims`.
+9. **A new card language ships only after a human-viewed render.** PIL draws
+   missing glyphs as tofu without erroring, and unshaped Arabic renders as
+   disjointed LTR letters — `card_compositor` shapes RTL per line with
+   arabic-reshaper + python-bidi, and every font in `LANGUAGES.font_paths` was
+   verified by eye. Adding a language = config entry + a viewed sample PNG.
+10. **Bookmark consultation prompts are frozen via `_PRODUCT_FRAMES`.** The
+    "bookmark" frame values in `consultation.py` reproduce the original prompt
+    strings character-for-character; card wording changes go in the
+    "quote_card" frame, never inline in the shared prompt bodies.
+11. **Quote cards may only quote Ruhi Book 1.** `librarian.retrieve_ruhi_book1()`
+    (backed by `agents/ruhi_book1_source.py` + `scripts/ingest_ruhi_book1.py`'s
+    own ChromaDB collection) is the ONLY retrieval path `_run_card_pipeline`
+    may call — never `retrieve()` (the general 7-text index the bookmark
+    pipeline uses). An empty result must raise, never fall back to the
+    general index or let the consultation's Librarian free-associate a quote
+    from memory.
 
 ## Gotchas
 

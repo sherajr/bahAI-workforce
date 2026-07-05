@@ -27,7 +27,7 @@ flowchart TD
     T[1 · Create task] --> L[2 · Librarian retrieves citations\nvector search over Bahá'í writings]
     L --> AB[3 · Artist builds image prompt]
     AB --> AG[4 · Artist generates artwork\nxAI image API → outputs/]
-    AG --> CON[5 · Consultation — 2 rounds × 4 agents\nArtist → Scribe → Reviewer → Librarian\neach turn grounded in a cited scripture excerpt]
+    AG --> CON[5 · Consultation — 3 rounds × 4 agents\nArtist → Scribe → Reviewer → Librarian\nSheraj's one pause sits between rounds 2 and 3\neach turn grounded in a cited scripture excerpt]
     CON -->|"decision brief + verified quote (locked)"| W[6 · Scribe writes the Etsy listing\nlocal Qwen, lean prompt]
     W --> S[7 · Reviewer scores 0–10\nagainst the 9-principle constitution\nGrok + vision on the real artwork]
     S -->|"below target & attempts left"| R[8 · Revise\nmechanical find/replace edits first,\nlight LLM pass only if needed,\nthen honesty scrub]
@@ -42,6 +42,61 @@ Key loop invariants (step 7–8): always revise the **latest** listing with the
 only strict score regressions count toward the 2-strike stall stop; the
 consultation's round-2 decision is binding on the Reviewer (overrides must say
 "REOPENING team decision").
+
+At the pause between rounds 2 and 3 (both pipelines — Sheraj is asked exactly
+once), the Reviewer's ask-for-input turn carries a **rendered front-face
+preview** (`render_preview` callback into `run_consultation` — pure
+compositor, no LLM) so Sheraj steers from the actual printed look. For cards
+the preview is English-only (translation happens after the pause) and the
+message says so. A preview failure skips the image, never blocks the pause.
+Round 3 then runs as a full extra four-turn cycle carrying Sheraj's guidance
+(if any) into every turn — the team's dialogue keeps going after the human's
+review instead of stopping the moment a human has spoken — before the brief
+is synthesised.
+
+## The quote-card pipeline (giveaway product line)
+
+`_run_card_pipeline` in `agents/api.py` (`POST /pipeline/run-card`) — parallel
+to the bookmark pipeline, never sold, no listing/Etsy. Differences that matter:
+
+- **The printed quote may ONLY come from Ruhi Institute Book 1, "Reflections
+  on the Life of the Spirit"** (owner decision, 2026-07) — not the general
+  7-text index. `agents/ruhi_book1_source.py` is the curated, hand-transcribed
+  list of every quotable passage in that book (67 entries); `scripts/ingest_ruhi_book1.py`
+  embeds it into its own ChromaDB collection (`ruhi_book1_quotes`, same
+  `vector_store/`, separate from `bahai_texts`); `librarian.retrieve_ruhi_book1()`
+  is the only retrieval function the card pipeline may call. If that index
+  returns nothing, the card job fails outright — it never falls back to the
+  general index, which would silently break the restriction.
+- Consultation reuses `run_consultation(product="quote_card")` — same 2-round
+  structure, card-specific framing via `_PRODUCT_FRAMES` (the newcomer to the
+  Faith, not the Etsy buyer, is the standard of judgment; shorter quote spec;
+  `source_scope` tells the Librarian turn the citations shown are already
+  Book-1-restricted and must not be substituted from memory).
+- Optional translation (`agents/translator.py`, Grok): Spanish/Mandarin/Arabic;
+  the AI-assisted disclaimer is appended IN CODE in the target language and
+  printed on the card — never trusted to the LLM.
+- `agents/card_compositor.py` renders 3.5″×2″ faces at a true 1050×600px/300dpi
+  (front: vignette + English quote + translation + citation + disclaimer;
+  back: clean art). Arabic is shaped per line with arabic-reshaper + python-bidi;
+  CJK/Arabic fonts come from `translator.LANGUAGES` config.
+- The Reviewer scores a purpose-built rubric (`reviewer.score_quote_card`,
+  seeing the RENDERED FRONT): quote/citation, translation, artwork fit,
+  newcomer accessibility, print legibility. Rather than the Reviewer picking
+  the next move alone, `consultation.run_card_revision_consultation` then
+  convenes a short group discussion (Artist reacts to the render, Librarian
+  proposes an alternative passage if the quote is the weak point, Reviewer
+  casts the final call after hearing them) — same "differing opinions"
+  discipline as the pre-render consultation, condensed to three turns since
+  the card is already scored. The Reviewer's own verdict is the fallback if
+  any turn fails. Either way the outcome is the same machine-readable
+  `action` ("ship" | "requote" | "repaint") that drives the revision loop
+  mechanically — group input informs the call, it never replaces the schema
+  the pipeline executes on.
+- Storage: same `products` table with `product_type='quote_card'`;
+  `listing_copy` holds the card JSON (quote, citation, translation,
+  disclaimers). Bookmark-only endpoints (improve/regenerate/publish/manual
+  edit) reject cards via `_require_bookmark`.
 
 ## Who talks to which model
 
@@ -86,7 +141,7 @@ erDiagram
 
 | Tab | Component | Endpoints used |
 |---|---|---|
-| Pipeline | `PipelinePanel.tsx` | `POST /pipeline/run`, `GET /pipeline/status/{id}`, `GET /pipeline/jobs` |
+| Pipeline | `PipelinePanel.tsx` | `POST /pipeline/run`, `POST /pipeline/run-card`, `GET /card/languages`, `GET /pipeline/status/{id}`, `GET /pipeline/jobs` |
 | Products | `ProductsGallery.tsx` | `GET /products`, `POST /products/{id}/improve`, `PATCH /products/{id}` (manual edit), `POST /products/{id}/revenue`, `POST /etsy/publish` |
 | Trust | `TrustPanel.tsx` | `GET /trust/report`, `GET /agents` |
 | Settings | `SettingsPanel.tsx` | `GET /canva/status`, `GET /etsy/status` |

@@ -25,21 +25,24 @@ VECTOR_STORE_PATH = str(Path(__file__).parent.parent / "vector_store")
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
+RUHI_BOOK1_COLLECTION = "ruhi_book1_quotes"
+
 _chroma_client = None
-_collection = None
+_collections: dict = {}   # collection name -> Collection (or None if missing)
 
 
-def _get_collection():
-    global _chroma_client, _collection
-    if _collection is not None:
-        return _collection
+def _get_collection(name: str = "bahai_texts"):
+    global _chroma_client
+    if name in _collections:
+        return _collections[name]
     import chromadb
-    _chroma_client = chromadb.PersistentClient(path=VECTOR_STORE_PATH)
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=VECTOR_STORE_PATH)
     try:
-        _collection = _chroma_client.get_collection("bahai_texts")
+        _collections[name] = _chroma_client.get_collection(name)
     except Exception:
-        _collection = None
-    return _collection
+        _collections[name] = None
+    return _collections[name]
 
 
 def _embed(text: str) -> list[float]:
@@ -52,13 +55,16 @@ def _embed(text: str) -> list[float]:
     return resp.json()["embedding"]
 
 
-def retrieve(query: str, n_results: int = 3) -> list[dict]:
+def retrieve(query: str, n_results: int = 3, collection_name: str = "bahai_texts") -> list[dict]:
     """
     Find the top-N most relevant passages from the local index.
     Returns list of dicts with: text, source, section, link, score.
     Returns empty list if the index hasn't been built yet.
+    collection_name selects which ChromaDB collection to search — the default
+    "bahai_texts" is the full 7-text index the bookmark pipeline uses; see
+    retrieve_ruhi_book1() for the Quote Card pipeline's restricted index.
     """
-    collection = _get_collection()
+    collection = _get_collection(collection_name)
     if collection is None:
         return []
 
@@ -83,6 +89,20 @@ def retrieve(query: str, n_results: int = 3) -> list[dict]:
             "score": round(1 - dist, 4),  # cosine similarity (approximate)
         })
     return passages
+
+
+def retrieve_ruhi_book1(query: str, n_results: int = 3) -> list[dict]:
+    """
+    Quote Card pipeline ONLY — searches the restricted index built from
+    agents/ruhi_book1_source.py (Ruhi Institute Book 1, "Reflections on the
+    Life of the Spirit") instead of the full 7-text corpus. Owner decision,
+    2026-07: quote cards may only ever print a quote from this one book.
+    Build/rebuild the index with scripts/ingest_ruhi_book1.py. Returns []
+    if that index hasn't been built yet — callers must treat this as a hard
+    stop, not fall back to the general index (that would silently violate
+    the restriction).
+    """
+    return retrieve(query, n_results=n_results, collection_name=RUHI_BOOK1_COLLECTION)
 
 
 def verify(claim_text: str) -> dict:

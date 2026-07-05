@@ -21,7 +21,7 @@ TRUST_LEVELS = {
 }
 
 AGENT_NAMES = ["operator", "librarian", "artist", "scribe", "reviewer",
-               "producer", "steward", "consultation", "compositor"]
+               "producer", "steward", "consultation", "compositor", "translator"]
 
 
 def _connect() -> sqlite3.Connection:
@@ -82,7 +82,8 @@ def init_db():
         """)
         # Migrations — safe to run on existing databases
         for col in ("image_prompt TEXT", "theme TEXT",
-                    "front_image TEXT", "back_image TEXT", "consultation TEXT"):
+                    "front_image TEXT", "back_image TEXT", "consultation TEXT",
+                    "product_type TEXT DEFAULT 'bookmark'"):
             try:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
                 conn.commit()
@@ -195,13 +196,14 @@ def create_product(
     listing_copy: str = None,
     image_prompt: str = None,
     theme: str = None,
+    product_type: str = "bookmark",
 ) -> str:
     product_id = str(uuid.uuid4())[:8]
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO products (id, task_id, title, image_url, listing_copy, image_prompt, theme)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (product_id, task_id, title, image_url, listing_copy, image_prompt, theme)
+            "INSERT INTO products (id, task_id, title, image_url, listing_copy, image_prompt, theme,"
+            " product_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (product_id, task_id, title, image_url, listing_copy, image_prompt, theme, product_type)
         )
         conn.commit()
     return product_id
@@ -218,7 +220,7 @@ def get_all_products() -> list[dict]:
 def update_product(product_id: str, **kwargs):
     allowed = {"status", "etsy_listing_id", "image_url", "listing_copy", "reviewer_scores",
                "revenue", "title", "image_prompt", "theme",
-               "front_image", "back_image", "consultation"}
+               "front_image", "back_image", "consultation", "product_type"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return

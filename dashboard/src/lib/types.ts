@@ -29,6 +29,40 @@ export interface ConsultationTurn {
   agent: string; // Artist | Scribe | Reviewer | Librarian | System
   role: string;
   message: string;
+  // Optional rendered image attached to the turn — currently the front-face
+  // preview on the Reviewer's ask-for-input turn at the post-round-2 pause.
+  image?: string | null;
+}
+
+// A language the card pipeline can translate into (GET /card/languages).
+export interface CardLanguage {
+  code: string;
+  name: string;
+  native_name: string;
+}
+
+// translator.translate_quote()'s dict, as returned inside a card PipelineResult.
+export interface CardTranslation {
+  code: string;
+  name: string;
+  native_name: string;
+  rtl: boolean;
+  text: string;
+  disclaimer_native: string;
+  disclaimer_en: string;
+}
+
+// listing_copy JSON for product_type === "quote_card" rows.
+export interface CardCopy {
+  product_kind: "quote_card";
+  quote: string;
+  quote_grounded: boolean;
+  citation: string;
+  language: string | null;
+  language_name: string | null;
+  translation_text: string | null;
+  translation_disclaimer_native: string | null;
+  translation_disclaimer_en: string | null;
 }
 
 export interface PipelineResult {
@@ -43,13 +77,22 @@ export interface PipelineResult {
   back_image_path: string;
   back_image_web: string;
   compositor_error: string | null;
-  listing: Listing;
+  // Bookmark runs only — absent on quote-card runs.
+  listing?: Listing;
+  canva?: { skipped?: boolean; reason?: string; design_url?: string | null };
+  // Quote-card runs only — absent on bookmark runs.
+  product_type?: string;
+  language?: string | null;
+  language_name?: string | null;
+  quote?: string;
+  quote_grounded?: boolean;
+  citation?: string;
+  translation?: CardTranslation | null;
   review: Review;
   attempts: number;
   target_reached: boolean;
   badge: string;
   consultation: ConsultationTurn[];
-  canva: { skipped?: boolean; reason?: string; design_url?: string | null };
 }
 
 export interface JobStep {
@@ -96,6 +139,7 @@ export interface ProductRow {
   front_image: string | null;
   back_image: string | null;
   consultation: string | null;
+  product_type: string | null; // "bookmark" (default) | "quote_card"
 }
 
 export interface AgentStatus {

@@ -6,6 +6,11 @@ Artist, Scribe, Reviewer — consult together in the spirit of Bahá'í consulta
 then produce a finished product: artwork, a print-ready front/back bookmark pair,
 and an Etsy listing scored against a 9-principle constitution.
 
+A second product line, **Quote Cards** (3.5″×2″ giveaway outreach cards — never
+sold, optionally carrying an AI-labeled translation in Spanish, Mandarin, or
+Arabic), runs through a parallel pipeline: same agents, card-specific framing,
+no Etsy. See `docs/fable5-briefing-quote-cards.md` for the design brief.
+
 **How the app works, visually: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).**
 
 ## Running it
@@ -30,8 +35,10 @@ plus API keys in `.env` (xAI for Grok + image generation; Canva and Etsy optiona
 | `agents/librarian.py` | Vector search over Bahá'í writings (ChromaDB); citation verification |
 | `agents/artist.py` | Image prompt building + xAI image generation |
 | `agents/scribe.py` | Writes/revises the Etsy listing; mechanical edit application; honesty scrubbing |
-| `agents/reviewer.py` | Scores listings 0–10 against the constitution (Grok + vision) |
+| `agents/reviewer.py` | Scores listings 0–10 against the constitution (Grok + vision); card rubric (`score_quote_card`) |
 | `agents/compositor.py` | Renders the 2×6-inch front (quote overlay) and back bookmark PNGs |
+| `agents/translator.py` | Quote-card translations (Spanish/Mandarin/Arabic via Grok) — always labeled AI-assisted |
+| `agents/card_compositor.py` | Renders the 3.5×2-inch quote-card faces (multi-script text, RTL shaping) |
 | `agents/router.py` | LLM routing: local Ollama by default, paid Grok for review/copy tasks |
 | `agents/state.py` | SQLite persistence (`workforce.db`): tasks, runs, agents, products |
 | `agents/canva.py` / `agents/etsy.py` | OAuth + publishing integrations |

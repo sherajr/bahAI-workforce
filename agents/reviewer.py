@@ -316,6 +316,196 @@ def score(
     return _parse_review(raw)
 
 
+def score_quote_card(
+    theme: str,
+    quote: str,
+    citation_source: str,
+    quote_grounded: bool,
+    front_image_path: str = None,
+    translation: dict = None,
+    consultation_transcript: list = None,
+    consultation_decision: dict = None,
+    previous_review: dict = None,
+    revision_note: str = None,
+) -> dict:
+    """
+    Score a QUOTE CARD — the giveaway outreach product. Deliberately NOT the
+    9-principle Etsy rubric: there is no listing. Four (five with a
+    translation) purpose-built criteria on the same calibrated 1-10 scale,
+    with the same 'Fix:' note discipline the listing Reviewer uses.
+
+    The vision call sends the RENDERED FRONT FACE, not the raw artwork —
+    print legibility can only be judged on the actual composited card.
+
+    Returns {scores, overall, passed, recommendation, action, action_guidance}.
+    `action` is the machine-readable revision lever ("ship" | "requote" |
+    "repaint") — the card revision loop acts on it mechanically, the same
+    discipline as the listing pipeline's `edits` array: compliance never
+    depends on interpreting prose.
+    """
+    system_prompt = build_system_prompt("reviewer", "review")
+
+    consultation_block = ""
+    if consultation_transcript:
+        consultation_block = (
+            "\n\nCONSULTATION TRANSCRIPT — the team consulted in two rounds before this card:\n"
+        )
+        for turn in consultation_transcript:
+            consultation_block += (
+                f"\n[{turn.get('agent', '?')} — {turn.get('role', '')}]:\n"
+                f"{turn.get('message', '')[:600]}\n"
+            )
+
+    decision_block = ""
+    if consultation_decision:
+        d = consultation_decision
+        decision_parts = [p for p in (
+            f"Agreed direction: {d['agreed_direction']}" if d.get("agreed_direction") else "",
+            f"Agreed tone: {d['tone']}" if d.get("tone") else "",
+            ("Agreed visual elements: " + "; ".join(d["key_elements"])) if d.get("key_elements") else "",
+        ) if p]
+        if decision_parts:
+            decision_block = (
+                "\n\nTHE TEAM'S SETTLED CONSULTATION DECISION (round 2):\n"
+                + "\n".join(f"  {p}" for p in decision_parts) + "\n"
+                "Score and recommend WITHIN this decision — do not silently contradict it. "
+                "If the finished card demonstrably diverges from a factual premise the team "
+                "agreed on, say so explicitly as 'REOPENING team decision: <what changed>' "
+                "rather than scoring against it as if it were never discussed.\n"
+            )
+
+    translation_block = ""
+    if translation:
+        translation_block = (
+            f"\n\nTRANSLATION ({translation.get('name', '')}) printed beneath the English:\n"
+            f"{translation.get('text', '')}\n"
+            f"The card also prints this fixed disclaimer in {translation.get('name', '')}: "
+            f"\"{translation.get('disclaimer_native', '')}\" — the translation is honestly "
+            "labeled as AI-assisted and unofficial; judge the translation's FIDELITY and "
+            "register, not the labeling.\n"
+        )
+
+    previous_block = ""
+    if previous_review:
+        previous_block = (
+            "\n\nRE-SCORING A REVISION — your previous review of this card:\n"
+            f"  Previous overall: {previous_review.get('overall', 0)}/10\n"
+            f"  You recommended: {previous_review.get('recommendation', '')}\n"
+            f"  What the pipeline then did: {revision_note or 'n/a'}\n"
+            "Judge the new card on its merits — if your concern was addressed, the affected "
+            "score MUST move; if it was not, say so plainly. Never repeat a previous number "
+            "out of habit.\n"
+        )
+
+    grounding_line = (
+        "The Librarian's verdict on this quote: GROUNDED IN SOURCES (verified against indexed texts)."
+        if quote_grounded else
+        "The Librarian could NOT ground this quote in a specific indexed source — weigh that "
+        "heavily under quote_citation and say so in the note."
+    )
+
+    # score_quote_card is card-only (bookmarks use score()), so the Book-1
+    # sourcing constraint always applies here — see CARD_QUOTE_SOURCING_NOTE's
+    # own comment for why the Reviewer needs this spelled out explicitly.
+    from agents.consultation import CARD_QUOTE_SOURCING_NOTE
+    sourcing_note = f"\n{CARD_QUOTE_SOURCING_NOTE}\n"
+
+    translation_score_line = (
+        '    "translation":      {"score": 6, "note": "fidelity to the English, register, natural phrasing; if below 7 end with Fix: ..."},\n'
+        if translation else ""
+    )
+
+    user_message = (
+        "Score this QUOTE CARD — a 3.5×2 inch giveaway card (front: artwork under a vignette "
+        "with the quote printed; back: clean artwork). It is NOT sold; it exists to share one "
+        "beautiful idea from the Bahá'í writings with someone who may have never encountered "
+        "the Faith. That person is the standard of judgment throughout.\n\n"
+        f"Theme: {theme}\n\n"
+        f"Printed quote:\n{quote}\n\n"
+        f"Citation printed on the card: {citation_source or '(none)'}\n"
+        f"{grounding_line}"
+        f"{sourcing_note}"
+        f"{translation_block}"
+        f"{consultation_block}"
+        f"{decision_block}"
+        f"{previous_block}\n\n"
+        "Score each criterion 1–10 on the same strict calibrated scale as all reviews here "
+        "(9–10 exceptional and rare; 7–8 good; 5–6 mediocre, revise; below 5 genuinely weak). "
+        "For EVERY criterion below 7 the note must END with 'Fix: <one concrete achievable "
+        "change>'.\n\n"
+        "Criteria:\n"
+        "  quote_citation: is the quote accurate, well-chosen for the theme, and correctly "
+        "attributed? An ungrounded quote caps this at 4.\n"
+        + ("  translation: is the translation faithful and complete, in a natural, reverent "
+           "register a native reader would trust? Flag ANY added, dropped, or distorted meaning.\n"
+           if translation else "")
+        + "  artwork_fit: does the ACTUAL rendered card artwork genuinely express the theme "
+        "and reward a closer look, front and back?\n"
+        "  newcomer_accessibility: the heart of this product — would someone with ZERO "
+        "background find this card welcoming, clear, and beautiful? Anything esoteric, "
+        "jargon-dependent, or insider-coded scores low, however devotionally excellent. "
+        "Judge this against what the pool can actually supply (verbatim 19th-century "
+        "scripture, some archaic register unavoidable) — do not require modern phrasing "
+        "the sourcing rule forbids.\n"
+        "  legibility: judge the attached image — the real front face. Is every piece of "
+        "text comfortably readable at business-card size (quote, translation if any, "
+        "citation, disclaimer)? Crowding, low contrast, or tiny type scores low.\n\n"
+        "Decide ONE next action for the pipeline (machine-executed — choose exactly one):\n"
+        "  \"ship\"    — the card is ready (typical when overall ≥ target).\n"
+        "  \"requote\" — a genuinely different, available passage from the pool would help "
+        "(fit or length — not register, see above): put the search phrase in action_guidance.\n"
+        "  \"repaint\" — the weakness is the ARTWORK: the pipeline regenerates it; put the "
+        "imperative change in action_guidance.\n"
+        "Text layout problems alone (legibility) usually mean \"requote\" toward a SHORTER "
+        "quote. Never pick an action your guidance doesn't support.\n\n"
+        "Return ONLY this JSON — field order matters, keep it exactly:\n"
+        "{\n"
+        '  "scores": {\n'
+        '    "quote_citation":   {"score": 6, "note": "one or two sentences; if below 7 end with Fix: ..."},\n'
+        f"{translation_score_line}"
+        '    "artwork_fit":      {"score": 6, "note": "..."},\n'
+        '    "newcomer_accessibility": {"score": 6, "note": "..."},\n'
+        '    "legibility":       {"score": 7, "note": "..."}\n'
+        "  },\n"
+        '  "action": "ship",\n'
+        '  "action_guidance": "empty string when shipping; otherwise the concrete steer",\n'
+        '  "overall": 6.2,\n'
+        '  "passed": false,\n'
+        '  "recommendation": "one or two sentences a human reads on the dashboard"\n'
+        "}"
+    )
+
+    raw = None
+    if front_image_path and Path(front_image_path).exists():
+        try:
+            raw = call_grok_vision(
+                front_image_path,
+                "The attached image is the ACTUAL rendered front face of the quote card — "
+                "the physical thing a stranger would be handed. Judge what you see.\n\n"
+                + user_message,
+                system=system_prompt,
+                temperature=0.15,
+                max_tokens=1600,
+                json_mode=True,
+            ).strip()
+        except Exception:
+            raw = None
+    if raw is None:
+        raw = call_llm("reviewer", [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_message},
+        ], temperature=0.15, max_tokens=1600, json_mode=True).strip()
+
+    review = _parse_review(raw)
+    action = str(review.get("action") or "").strip().lower()
+    if action not in ("ship", "requote", "repaint"):
+        # Malformed/missing action — treat as ship-nothing: let the score
+        # decide, but never invent a revision lever the Reviewer didn't pick.
+        review["action"] = "ship" if review.get("passed") else "requote"
+    review["action_guidance"] = str(review.get("action_guidance") or "").strip()
+    return review
+
+
 def _parse_review(raw: str) -> dict:
     if raw.startswith("```"):
         raw = raw.split("```")[1]
