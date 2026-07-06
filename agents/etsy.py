@@ -19,7 +19,6 @@ import base64
 import hashlib
 import json
 import os
-import re
 import secrets
 import time
 from pathlib import Path
@@ -46,8 +45,21 @@ PKCE_STATE_FILE = _PROJECT_ROOT / "etsy_pkce_state.json"
 
 SCOPES = ["listings_w", "listings_r", "shops_r"]
 
-DEFAULT_PRICE    = 5.99   # USD, used when price_note can't be parsed
+# Deterministic pricing policy (fair exchange / Moderation): the one
+# real-money number in the system is set HERE by the owner, never parsed out
+# of model prose. The Scribe's price_note stays a display-only suggestion on
+# the dashboard. Override per environment with ETSY_BOOKMARK_PRICE.
+BOOKMARK_PRICE   = float(os.getenv("ETSY_BOOKMARK_PRICE", "5.99"))
 DEFAULT_QUANTITY = 25     # made-to-order stock level
+
+# Honesty disclosure (constitution principle 3) — code-appended to every
+# published listing, never left to the Scribe: the buyer must know the artwork
+# is AI-generated before purchase. Same discipline as the card pipeline's
+# translation disclaimers (translator.LANGUAGES) and scribe._sanitize_claims.
+AI_ART_DISCLOSURE = (
+    "Artwork created with AI image-generation tools, art-directed and curated by Sheraj "
+    "— a digitally designed, made-to-order print."
+)
 
 
 # ── PKCE ─────────────────────────────────────────────────────────────────────
@@ -216,17 +228,6 @@ def _find_bookmark_taxonomy_id() -> int:
 
 # ── Listing helpers ───────────────────────────────────────────────────────────
 
-def _parse_price(price_note: str) -> float:
-    """Pull the first dollar amount out of the Scribe's price_note. Falls back to DEFAULT_PRICE."""
-    if not price_note:
-        return DEFAULT_PRICE
-    match = re.search(r"\$?\s*(\d+(?:\.\d{1,2})?)", price_note)
-    if not match:
-        return DEFAULT_PRICE
-    price = float(match.group(1))
-    return price if 0.20 <= price <= 250 else DEFAULT_PRICE
-
-
 def _clean_tags(tags: list) -> list:
     """Etsy allows at most 13 tags, each 20 chars or fewer."""
     cleaned = []
@@ -241,9 +242,21 @@ def _clean_tags(tags: list) -> list:
 
 def _resolve_front_image(product: dict) -> Optional[Path]:
     """
-    Find the best image file for the listing: prefer the Compositor's front render
-    (outputs/<stem>-front.png), else the original generated artwork.
+    Find the best image file for the listing. The product row's front_image
+    column holds the Compositor's actual quote-overlaid front render — use it
+    first. (A previous version only guessed filenames like <stem>-front.png,
+    which never matched the Compositor's real bookmark-front-<uid>.png naming,
+    so Etsy silently got the raw 2:3 artwork instead of the front face.)
+    Falls back to the original generated artwork for very old rows.
     """
+    front = product.get("front_image") or ""
+    if front:
+        p = Path(front)
+        if not p.is_absolute():
+            p = _PROJECT_ROOT / p
+        if p.exists():
+            return p
+
     image_url = product.get("image_url") or ""
     if not image_url:
         return None
@@ -284,12 +297,16 @@ def publish_draft_listing(product: dict) -> dict:
     if quote and quote not in description:
         description = f'{description}\n\nBookmark quote:\n"{quote}"'
     description += "\n\nSize: 2\" × 6\" premium cardstock bookmark, printed to order."
+    # Code-appended AI-artwork disclosure — never trusted to the Scribe's copy
+    # (which may or may not mention it after manual edits).
+    if AI_ART_DISCLOSURE not in description:
+        description += f"\n\n{AI_ART_DISCLOSURE}"
 
     payload = {
         "quantity":     DEFAULT_QUANTITY,
         "title":        title,
         "description":  description,
-        "price":        _parse_price(listing.get("price_note", "")),
+        "price":        BOOKMARK_PRICE,
         "who_made":     "i_did",
         "when_made":    "made_to_order",
         "taxonomy_id":  _find_bookmark_taxonomy_id(),

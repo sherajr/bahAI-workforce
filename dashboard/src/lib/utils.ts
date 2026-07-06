@@ -39,6 +39,16 @@ export function badgeFor(overall: number): Badge {
   return "REJECTED";
 }
 
+/**
+ * Badge for a saved product: a product that shipped below its target score
+ * (revision loop stalled or ran out of attempts) wears BEST EFFORT so it never
+ * looks like a clean pass. target_reached null/undefined = saved before the
+ * pipeline tracked this — fall back to the score-range badge.
+ */
+export function badgeForProduct(row: ProductRow, overall: number): Badge {
+  return row.target_reached === 0 ? "BEST EFFORT" : badgeFor(overall);
+}
+
 export function badgeClasses(badge: Badge): string {
   switch (badge) {
     case "EXCEPTIONAL":

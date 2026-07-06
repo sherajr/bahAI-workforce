@@ -47,8 +47,14 @@ export function ListingDetail({ listing }: { listing: Listing }) {
           )}
           {listing.price_note && (
             <div>
-              <div className="text-xs uppercase tracking-widest text-slate-500">Price</div>
+              <div className="text-xs uppercase tracking-widest text-slate-500">
+                Price note (Scribe's suggestion)
+              </div>
               <div className="mt-1 text-slate-300">{listing.price_note}</div>
+              <div className="mt-0.5 text-xs text-slate-600">
+                Display only — the actual Etsy price comes from your pricing policy, never from
+                this text.
+              </div>
             </div>
           )}
         </div>

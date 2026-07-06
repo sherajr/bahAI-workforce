@@ -5,6 +5,7 @@ import { PipelinePanel } from "./components/PipelinePanel";
 import { ProductsGallery } from "./components/ProductsGallery";
 import { TrustPanel } from "./components/TrustPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { SecretaryPanel } from "./components/SecretaryPanel";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("pipeline");
@@ -12,6 +13,7 @@ export default function App() {
     <Layout tab={tab} onTabChange={setTab}>
       {tab === "pipeline" && <PipelinePanel />}
       {tab === "products" && <ProductsGallery />}
+      {tab === "secretary" && <SecretaryPanel />}
       {tab === "trust" && <TrustPanel />}
       {tab === "settings" && <SettingsPanel />}
     </Layout>

@@ -22,6 +22,9 @@ _HONESTY_RULES = (
     "\nHonesty rules (Trustworthiness — non-negotiable):\n"
     "- This is a digitally designed, made-to-order art print on cardstock. NEVER call it "
     "handcrafted, handmade, hand-painted, or one-of-a-kind.\n"
+    "- The artwork is created with AI image-generation tools, art-directed and curated by "
+    "Sheraj. NEVER imply it was hand-illustrated, hand-drawn, or painted by a person — the "
+    "buyer must be able to tell what they are buying.\n"
     "- NEVER make numeric claims about the artwork — no counts of petals, rays, arches or "
     "stars, and no references to the numbers 9 or 19. The final image is not guaranteed to "
     "contain exact counts, so describe the motifs without numbers.\n"
@@ -85,7 +88,8 @@ def write_listing(
         f"{citation_block}"
         f"{consult_block}\n"
         "Product details:\n"
-        "- Designed by Sheraj, a Bahá'í artist\n"
+        "- Artwork created with AI image-generation tools, art-directed and curated by "
+        "Sheraj, a Bahá'í designer\n"
         "- 2\" × 6\" printed on premium cardstock, available laminated\n"
         "- Designed in Canva, printed to order — each one is made with care\n"
         "- Ships within 3–5 business days\n"
@@ -102,7 +106,8 @@ def write_listing(
         + quote_field +
         '  "tags": ["up to 13 Etsy tags", "single words or 2-3 word phrases only"],\n'
         '  "materials": ["Premium cardstock", "Soy-based inks"],\n'
-        '  "price_note": "Suggested retail price with brief reasoning"\n'
+        '  "price_note": "Suggested retail price with brief reasoning (a suggestion shown to '
+        'Sheraj only — the actual shop price is set by his pricing policy, not this text)"\n'
         "}"
     )
 

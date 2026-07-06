@@ -38,6 +38,7 @@ def score(
     previous_review: dict = None,
     changes_applied: list = None,
     consultation_decision: dict = None,
+    quote_grounded: bool = None,
 ) -> dict:
     """
     Score the image prompt + Etsy listing against the 9 constitution principles.
@@ -51,6 +52,10 @@ def score(
     consultation.py's _synthesize_brief) — the settled outcome of consultation,
     which this scoring pass must treat as binding rather than silently
     relitigating (see the decision_block below).
+    quote_grounded, when not None, is the PIPELINE's own deterministic verdict
+    on the printed quote (api._check_quote_grounding) — more reliable than any
+    self-report in the transcript, so it is stated explicitly rather than
+    leaving the Reviewer to fish the Librarian's claim out of the dialogue.
     Returns: {scores, overall, passed, recommendation}
     """
     system_prompt = build_system_prompt("reviewer", "review")
@@ -59,6 +64,17 @@ def score(
     if librarian_issues:
         issues_block = "\n\nLibrarian flagged the following concerns:\n"
         issues_block += "\n".join(f"  - {i}" for i in librarian_issues)
+
+    grounding_block = ""
+    if quote_grounded is not None:
+        grounding_block = (
+            "\n\nPIPELINE GROUNDING VERDICT on bookmark_quote (a deterministic check against "
+            "the retrieved passages — trust this over any claim in the transcript): "
+            + ("GROUNDED — traceable to a retrieved, indexed passage.\n" if quote_grounded else
+               "NOT GROUNDED — could not be traced to a source; it is the team's own phrase. "
+               "The listing must not present it as a verified scriptural quotation — weigh "
+               "this under quote_quality and Trustworthiness.\n")
+        )
 
     consultation_block = ""
     if consultation_transcript:
@@ -145,6 +161,7 @@ def score(
         f"rendered accurately):\n{_clip(image_prompt, 500)}\n\n"
         f"Etsy listing:\n{_clip(json.dumps(listing, indent=2), 6000)}\n"
         f"{issues_block}"
+        f"{grounding_block}"
         f"{consultation_block}"
         f"{decision_block}"
         f"{previous_block}\n\n"
@@ -261,9 +278,11 @@ def score(
         "genuinely match the theme and Bahá'í aesthetic? A generic or mismatched image scores "
         "low even if the listing text is excellent.\n"
         "  quote_quality: is the printed bookmark_quote authentic and well-formatted? Use the "
-        "Librarian's verdict in the consultation transcript above (GROUNDED IN SOURCES vs "
-        "ORIGINAL COMPOSITION) plus whether it reads cleanly at 2-4 lines — an ungrounded or "
-        "awkwardly-formatted quote scores low even if everything else is strong.\n\n"
+        "PIPELINE GROUNDING VERDICT above when one is given (it is deterministic and outranks "
+        "the transcript); otherwise the Librarian's verdict in the consultation transcript "
+        "(GROUNDED IN SOURCES vs ORIGINAL COMPOSITION). Add whether it reads cleanly at 2-4 "
+        "lines — an ungrounded or awkwardly-formatted quote scores low even if everything "
+        "else is strong.\n\n"
         "Return ONLY this JSON — no other text:\n"
         "{\n"
         '  "scores": {\n'

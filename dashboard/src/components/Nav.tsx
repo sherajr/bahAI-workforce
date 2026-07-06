@@ -1,12 +1,13 @@
-import { Sparkles, Images, Handshake, Settings } from "lucide-react";
+import { Sparkles, Images, Handshake, Settings, MessageCircleHeart } from "lucide-react";
 import { cn } from "../lib/utils";
 import { NineStar } from "./NineStar";
 
-export type Tab = "pipeline" | "products" | "trust" | "settings";
+export type Tab = "pipeline" | "products" | "secretary" | "trust" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Sparkles }[] = [
   { id: "pipeline", label: "Pipeline", icon: Sparkles },
   { id: "products", label: "Products", icon: Images },
+  { id: "secretary", label: "Secretary", icon: MessageCircleHeart },
   { id: "trust", label: "Trust", icon: Handshake },
   { id: "settings", label: "Settings", icon: Settings },
 ];

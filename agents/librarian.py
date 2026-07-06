@@ -6,9 +6,9 @@ Two modes:
    the local ChromaDB index of the 7 source Bahá'í texts.
 2. VERIFY: given a piece of text that may contain a spiritual claim or quote,
    check it against the index and flag hallucinations or paraphrases.
-
-Falls back to live reference.bahai.org search if the local index doesn't
-cover what's needed (i.e., for texts outside the 7 core works).
+   Used by api._check_quote_grounding as the deterministic backstop for the
+   consultation Librarian's GROUNDED self-verdict when no retrieved citations
+   are available to compare against.
 
 The index is built by scripts/ingest_texts.py — run that first.
 """
@@ -182,26 +182,6 @@ def verify(claim_text: str) -> dict:
         "issues": issues,
         "supporting_passages": passages[:3],
     }
-
-
-def live_search(query: str) -> str:
-    """
-    Fallback: search reference.bahai.org for the query.
-    Returns raw excerpt text for the Librarian LLM to interpret.
-    This should only be called when the local index doesn't cover what's needed.
-    """
-    search_url = f"https://www.bahai.org/search/#q={requests.utils.quote(query)}&lang=en"
-    try:
-        from bs4 import BeautifulSoup
-        headers = {"User-Agent": "bahAI-Workforce-Librarian/1.0 (personal research tool)"}
-        resp = requests.get(search_url, headers=headers, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Extract visible text from search result snippets
-        snippets = soup.select(".search-result-excerpt, .excerpt, p")
-        texts = [s.get_text(strip=True) for s in snippets[:5] if len(s.get_text(strip=True)) > 40]
-        return "\n\n".join(texts) if texts else f"No excerpts found. Visit: {search_url}"
-    except Exception as e:
-        return f"Live search failed: {e}. Visit manually: {search_url}"
 
 
 def format_citation(passage: dict) -> str:

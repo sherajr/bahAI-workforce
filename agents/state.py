@@ -21,7 +21,8 @@ TRUST_LEVELS = {
 }
 
 AGENT_NAMES = ["operator", "librarian", "artist", "scribe", "reviewer",
-               "producer", "steward", "consultation", "compositor", "translator"]
+               "producer", "steward", "consultation", "compositor", "translator",
+               "secretary"]
 
 
 def _connect() -> sqlite3.Connection:
@@ -79,11 +80,20 @@ def init_db():
                 revenue REAL DEFAULT 0.0,
                 created_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS spend (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                est_cost REAL NOT NULL,
+                ts TEXT DEFAULT (datetime('now'))
+            );
         """)
         # Migrations — safe to run on existing databases
         for col in ("image_prompt TEXT", "theme TEXT",
                     "front_image TEXT", "back_image TEXT", "consultation TEXT",
-                    "product_type TEXT DEFAULT 'bookmark'"):
+                    "product_type TEXT DEFAULT 'bookmark'",
+                    "target_reached INTEGER", "attempts INTEGER",
+                    "recipient_feedback TEXT"):
             try:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
                 conn.commit()
@@ -209,6 +219,48 @@ def create_product(
     return product_id
 
 
+def record_spend(kind: str, est_cost: float):
+    """
+    Meter one paid API call (Moderation, principle 5): the Steward reports
+    actual metered spend, not a flat per-product guess. Creates the table on
+    demand so scripts that never ran init_db still meter. Never raises —
+    metering must never break the call it measures.
+    """
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS spend (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       kind TEXT NOT NULL,
+                       est_cost REAL NOT NULL,
+                       ts TEXT DEFAULT (datetime('now'))
+                   )"""
+            )
+            conn.execute("INSERT INTO spend (kind, est_cost) VALUES (?, ?)",
+                         (kind, float(est_cost)))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def get_spend_summary() -> dict:
+    """Metered API spend: all-time total, current-month total, per-kind breakdown."""
+    try:
+        with _connect() as conn:
+            total = conn.execute("SELECT COALESCE(SUM(est_cost), 0) FROM spend").fetchone()[0]
+            month = conn.execute(
+                "SELECT COALESCE(SUM(est_cost), 0) FROM spend "
+                "WHERE ts >= date('now', 'start of month')"
+            ).fetchone()[0]
+            by_kind = {
+                row[0]: round(row[1], 4)
+                for row in conn.execute("SELECT kind, SUM(est_cost) FROM spend GROUP BY kind")
+            }
+    except Exception:
+        return {"total": 0.0, "month": 0.0, "by_kind": {}}
+    return {"total": round(total, 2), "month": round(month, 2), "by_kind": by_kind}
+
+
 def get_all_products() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
@@ -220,7 +272,8 @@ def get_all_products() -> list[dict]:
 def update_product(product_id: str, **kwargs):
     allowed = {"status", "etsy_listing_id", "image_url", "listing_copy", "reviewer_scores",
                "revenue", "title", "image_prompt", "theme",
-               "front_image", "back_image", "consultation", "product_type"}
+               "front_image", "back_image", "consultation", "product_type",
+               "target_reached", "attempts", "recipient_feedback"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return

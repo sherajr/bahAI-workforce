@@ -29,6 +29,11 @@ Thumbs.db
 etsy_token.json
 etsy_pkce_state.json
 
+# Secretary private data — Sheraj's personal life. Hard rule: NOTHING personal
+# lives outside this directory (see CLAUDE.md). Added in the same commit that
+# created private/.
+private/
+
 # Dashboard
 dashboard/node_modules/
 dashboard/dist/

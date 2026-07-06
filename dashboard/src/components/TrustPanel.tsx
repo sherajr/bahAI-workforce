@@ -33,12 +33,22 @@ export function TrustPanel() {
         <CardContent className="space-y-4">
           <p className="text-sm text-slate-400">
             Trust is earned through clean, reviewed work: agents advance at an 80% clean rate over
-            5+ runs, and step back after 2 consecutive failures.
+            5+ runs, and step back after 2 consecutive failures. Trust has a real consequence:
+            until the Reviewer reaches Human-on-the-loop (level 2), publishing an Etsy draft asks
+            for your confirmation first.
           </p>
           {agents.isError && (
             <ErrorNote>Could not load agents: {(agents.error as Error).message}</ErrorNote>
           )}
-          {agents.data?.map((a) => (
+          {/* Only agents that have actually done reviewed work — listing
+              never-run roles here would be a promise without a deed. */}
+          {agents.data && agents.data.every((a) => a.total_runs === 0) && (
+            <p className="text-sm text-slate-500">
+              No agent has completed a reviewed run yet — run the pipeline once and trust
+              scores will appear here.
+            </p>
+          )}
+          {agents.data?.filter((a) => a.total_runs > 0).map((a) => (
             <div key={a.name} className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <span className="text-sm font-semibold capitalize text-slate-100">{a.name}</span>

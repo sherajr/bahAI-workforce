@@ -12,7 +12,7 @@ import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
-from agents.router import call_llm
+from agents.router import call_llm, record_api_spend
 from agents.system_prompt_builder import build_system_prompt
 
 load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"))
@@ -138,6 +138,7 @@ def generate_image(prompt: str, aspect_ratio: str = "2:3") -> dict:
         timeout=120,
     )
     resp.raise_for_status()
+    record_api_spend("image_gen")
     data = resp.json()
 
     item = data["data"][0]

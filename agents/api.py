@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -67,6 +68,10 @@ def _web_image_path(local_path: str) -> str:
 @app.on_event("startup")
 def on_startup():
     init_db()
+    # Secretary's reminder scheduler — all state in private/secretary.db, so a
+    # restart resumes exactly where it left off.
+    from agents import scheduler
+    scheduler.start()
     cid = os.getenv("CANVA_CLIENT_ID", "")
     print(f"bahAI Workforce API ready. SQLite DB initialised.")
     print(f"CANVA_CLIENT_ID loaded: {bool(cid)} ({cid[:8] if cid else 'EMPTY'})")
@@ -363,6 +368,62 @@ def _apply_review_feedback(listing: dict, review: dict, verified_quote: str,
     return revised, ("; ".join(note_parts) or "no actionable feedback"), changes
 
 
+# Common function words excluded from the grounding overlap check so that a
+# quote can't pass just by sharing "the/and/unto" with a passage.
+_GROUNDING_STOPWORDS = frozenset(
+    "the and that this with from unto thee thou thy thine hath have has for are not all our "
+    "your his her its will shall which what when they them been were may can doth does did "
+    "you but was is it in of to on at by an as be or so no".split()
+)
+
+
+def _check_quote_grounding(quote: str, citations: list[dict]) -> tuple[bool, str]:
+    """
+    Deterministic backstop for the consultation Librarian's GROUNDED verdict
+    (principles 3 and 9): never ship "Librarian-verified" on the model's
+    self-report alone — the same discipline as _best_matching_citation in the
+    card pipeline and scribe._sanitize_claims.
+
+    With retrieved citations (the normal case — the Librarian was told to
+    adapt from exactly these passages): at least 60% of the quote's distinct
+    content words must appear in a single passage. "Condense" keeps source
+    words and passes easily; a quote the Librarian actually invented shares
+    only scattered vocabulary and fails.
+
+    With no citations (retrieval was down; the Librarian drew from memory):
+    librarian.verify() checks the full text index by embedding similarity.
+    Any failure — including the index being unavailable — returns False:
+    unverifiable is not the same as verified.
+
+    Returns (traceable, human-readable reason for the log).
+    """
+    words = {w for w in re.sub(r"[^a-z0-9 ]", " ", quote.lower()).split()
+             if len(w) >= 3 and w not in _GROUNDING_STOPWORDS}
+    if not words:
+        return False, "quote has no checkable content words"
+
+    if citations:
+        best_frac, best_src = 0.0, ""
+        for c in citations:
+            passage_words = set(re.sub(r"[^a-z0-9 ]", " ", str(c.get("text") or "").lower()).split())
+            frac = len(words & passage_words) / len(words)
+            if frac > best_frac:
+                best_frac, best_src = frac, str(c.get("source") or "")
+        if best_frac >= 0.6:
+            return True, f"{best_frac:.0%} of content words traceable to: {best_src}"
+        return False, (f"only {best_frac:.0%} of the quote's content words appear in any "
+                       "retrieved passage")
+
+    try:
+        from agents.librarian import verify
+        verdict = verify(quote)
+        if verdict.get("verified"):
+            return True, "verified against the full text index (embedding similarity)"
+        return False, "; ".join(verdict.get("issues") or ["no close match in the text index"])
+    except Exception as e:
+        return False, f"could not verify against the text index ({e})"
+
+
 def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_turn=None,
                                  request_human_input=None) -> dict:
     """
@@ -488,6 +549,28 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
     verified_quote = consultation.get("verified_quote", "")
     quote_grounded = consultation.get("quote_grounded", False)
 
+    # Deterministic grounding backstop: the Librarian's GROUNDED verdict is a
+    # self-report, and this quote gets locked for the rest of the run — check
+    # it against the actual retrieved passages before letting "verified" stick.
+    if verified_quote and quote_grounded:
+        traceable, why = _check_quote_grounding(verified_quote, req.citations or [])
+        if not traceable:
+            quote_grounded = False
+            consultation["transcript"].append({
+                "agent": "System", "role": "grounding check",
+                "message": ("The Librarian called this quote GROUNDED, but the deterministic "
+                            f"check could not trace it to a source ({why}). The listing will "
+                            "present it as the team's phrase, not a verified quotation."),
+            })
+            consultation["context"] += (
+                "\n\nCORRECTION (deterministic grounding check): the quote above could NOT be "
+                "traced to a verified source — do not describe it as a verified scriptural "
+                "quotation; call it the team's guiding phrase instead."
+            )
+        if req.task_id:
+            log_run(req.task_id, "librarian", "grounding_check", verified_quote[:200],
+                    why[:400], passed_review=traceable)
+
     _progress(f"Scribe is writing the listing (attempt 1/{req.max_attempts})...")
     listing = write_listing(
         req.theme, image_prompt, req.citations or [], image_path,
@@ -504,7 +587,8 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
     review  = reviewer_score(req.theme, image_prompt, listing,
                               consultation_transcript=consult_transcript,
                               image_path=image_path,
-                              consultation_decision=consult_decision)
+                              consultation_decision=consult_decision,
+                              quote_grounded=quote_grounded if verified_quote else None)
     _log("scribe",   "write",   listing)
     _log("reviewer", "score_1", review)
 
@@ -563,7 +647,8 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
                                  image_path=image_path,
                                  previous_review=cur_review,
                                  changes_applied=changes,
-                                 consultation_decision=consult_decision)
+                                 consultation_decision=consult_decision,
+                                 quote_grounded=quote_grounded if verified_quote else None)
         prev_overall = cur_review.get("overall", 0)
         new_overall = review.get("overall", 0)
         trend = "improved" if new_overall > prev_overall else "did not improve"
@@ -747,8 +832,12 @@ def _run_full_pipeline(req: PipelineRunRequest, progress, on_turn=None, request_
     )
     # Persist the consultation transcript so later re-scoring (e.g. the Improve
     # button) can present the same Principle-4 evidence the original score saw.
+    # target_reached/attempts persist too: a stalled best-effort ship must stay
+    # distinguishable from a clean pass after the in-memory job record is gone.
     update_product(product_id, reviewer_scores=json.dumps(review),
-                   consultation=json.dumps(gen["consultation"]))
+                   consultation=json.dumps(gen["consultation"]),
+                   target_reached=1 if gen["target_reached"] else 0,
+                   attempts=gen["attempts"])
 
     finish = _render_and_publish(product_id, task_id, image_path, listing, progress)
 
@@ -803,6 +892,17 @@ class CardPipelineRequest(BaseModel):
     language: Optional[str] = None   # LANGUAGES code ("es"/"zh"/"ar") or None for English-only
     target_score: float = 9.0
     max_attempts: int = 3
+
+
+# Honesty disclosure for the card's ARTWORK (principle 3) — a fixed string
+# stored in the card's metadata and shown on the dashboard, same discipline as
+# the translation disclaimers. Whether it also gets printed on the card back
+# is a design decision for Sheraj (hard rule 9: any card-face change ships
+# only after a human-viewed render), so it is metadata-only for now.
+CARD_ART_DISCLOSURE = (
+    "Artwork created with AI image-generation tools, art-directed and curated by Sheraj. "
+    "The quote is a verbatim excerpt from Ruhi Institute Book 1."
+)
 
 
 @app.get("/card/languages")
@@ -990,8 +1090,11 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
                 editing_log.append(
                     {"agent": "Artist", "role": "image revision (consultation)",
                      "message": f"Repainted the artwork per the team's agreed adjustment:\n{adjustment}"})
+                # passed_review stays None: generating a file is mechanical
+                # success, not a quality verdict — trust only moves on judged
+                # outcomes (principle 8).
                 log_run(task_id, "artist", "regenerate",
-                        adjustment[:200], new_path[:200], passed_review=True)
+                        adjustment[:200], new_path[:200])
         except Exception as e:
             editing_log.append(
                 {"agent": "Artist", "role": "image revision (consultation)",
@@ -1088,8 +1191,10 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
             history=revision_history,
         )
         editing_log.extend(decision["transcript"])
+        # passed_review=None — holding a consultation is process, not a judged
+        # outcome; trust only moves on quality verdicts (principle 8).
         log_run(task_id, "consultation", f"card_revision_consult_{attempt}",
-                req.theme[:200], decision["action"], passed_review=True)
+                req.theme[:200], decision["action"])
         return decision
 
     rendered = _render(quote, translation)
@@ -1141,8 +1246,9 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
             quote = _trim_card_quote(pick["text"])
             quote_grounded = True
             citation_src = str(pick.get("source") or "").strip() or citation_src
-            log_run(task_id, "librarian", f"requote_{attempt}", guidance[:200], quote[:200],
-                    passed_review=True)
+            # passed_review=None — finding a different passage is mechanical;
+            # whether it HELPED is judged by the re-score that follows.
+            log_run(task_id, "librarian", f"requote_{attempt}", guidance[:200], quote[:200])
             try:
                 translation = _translate(quote)
             except Exception as e:
@@ -1163,8 +1269,9 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
                 if not (new_path and Path(new_path).exists()):
                     raise RuntimeError("no image returned")
                 image_path, image_prompt = new_path, new_prompt
+                # passed_review=None — same reasoning as requote above.
                 log_run(task_id, "artist", f"repaint_{attempt}", guidance[:200],
-                        new_path[:200], passed_review=True)
+                        new_path[:200])
             except Exception as e:
                 log_run(task_id, "artist", f"repaint_{attempt}", guidance[:200],
                         f"failed: {e}"[:400], passed_review=False)
@@ -1224,6 +1331,9 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
         "translation_text": (tr or {}).get("text"),
         "translation_disclaimer_native": (tr or {}).get("disclaimer_native"),
         "translation_disclaimer_en": (tr or {}).get("disclaimer_en"),
+        # Fixed string, never LLM-written — same honesty class as the
+        # translation disclaimers above.
+        "artwork_disclosure": CARD_ART_DISCLOSURE,
     }
     title = f"Quote card — {req.theme[:70]}" + (f" ({lang_name})" if lang_name else "")
     product_id = create_product(
@@ -1232,14 +1342,15 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
         theme=req.theme, product_type="quote_card",
     )
     full_transcript = consultation.get("transcript", []) + editing_log
+    overall = best["review"].get("overall", 0)
     update_product(product_id,
                    reviewer_scores=json.dumps(best["review"]),
                    consultation=json.dumps(full_transcript),
                    front_image=best["rendered"]["front_path"],
-                   back_image=best["rendered"]["back_path"])
+                   back_image=best["rendered"]["back_path"],
+                   target_reached=1 if overall >= req.target_score else 0,
+                   attempts=attempt)
     update_task_status(task_id, "completed")
-
-    overall = best["review"].get("overall", 0)
     return {
         "task_id": task_id,
         "product_id": product_id,
@@ -1409,6 +1520,7 @@ def improve_product(product_id: str, req: ImproveRequest):
             title=best_listing.get("title", theme),
             listing_copy=json.dumps(best_listing),
             reviewer_scores=json.dumps(best_review),
+            target_reached=1 if best_review.get("overall", 0) >= req.target_score else 0,
         )
 
     return {
@@ -1455,6 +1567,46 @@ def _require_bookmark(product: dict):
             detail="This action applies to bookmark products only — quote cards have no "
                    "listing to improve or publish; re-run the card pipeline instead.",
         )
+
+
+@app.get("/products/{product_id}/print-sheet")
+def get_print_sheet(product_id: str):
+    """
+    Render a cut-tolerant, multi-up print sheet for this product's saved
+    front/back faces: a single 2-page Letter PDF (page 1 = fronts grid,
+    page 2 = backs grid), regenerated fresh from the CURRENT front_image/
+    back_image every call so it always reflects the latest artwork.
+    Card size and grid count are derived automatically from the face
+    images themselves -- see agents/print_sheet.py.
+    """
+    from agents.print_sheet import build_print_sheet
+
+    product = _load_product_or_404(product_id)
+    front_path = product.get("front_image")
+    back_path = product.get("back_image")
+    if not front_path or not back_path:
+        raise HTTPException(
+            status_code=422,
+            detail="This product doesn't have both a front and back image saved yet.",
+        )
+    if not Path(front_path).exists() or not Path(back_path).exists():
+        raise HTTPException(
+            status_code=404,
+            detail="The saved front/back image files are missing on disk.",
+        )
+
+    out_path = OUTPUTS_DIR / f"print-sheet-{product_id}.pdf"
+    try:
+        build_print_sheet(front_path, back_path, str(out_path))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not build the print sheet: {e}")
+
+    safe_title = re.sub(r"[^A-Za-z0-9]+", "-", product.get("title") or "card").strip("-") or "card"
+    return FileResponse(
+        path=str(out_path),
+        media_type="application/pdf",
+        filename=f"{safe_title}-print-sheet.pdf",
+    )
 
 
 class RegenerateQuoteRequest(BaseModel):
@@ -1659,6 +1811,7 @@ def _redo_product(product_id: str, req: RegenerateAllRequest, progress,
         product_id, title=listing.get("title", base_theme), image_url=image_path,
         listing_copy=json.dumps(listing), image_prompt=image_prompt, theme=base_theme,
         reviewer_scores=json.dumps(review), consultation=json.dumps(gen["consultation"]),
+        target_reached=1 if gen["target_reached"] else 0, attempts=gen["attempts"],
     )
 
     finish = _render_and_publish(product_id, task_id, image_path, listing, progress)
@@ -1948,6 +2101,7 @@ def etsy_publish(body: dict):
     Nothing goes live — drafts are reviewed and activated by Sheraj inside Etsy.
     """
     from agents.etsy import publish_draft_listing
+    from agents.state import get_agent_status
     product_id = body.get("product_id", "")
     if not product_id:
         raise HTTPException(status_code=422, detail="product_id is required")
@@ -1959,6 +2113,25 @@ def etsy_publish(body: dict):
         raise HTTPException(status_code=404, detail="Product not found")
     product = dict(row)
     _require_bookmark(product)
+
+    # Trust gate (principle 8 — trust must have a real consequence, not just a
+    # display number): publishing toward the outside world requires the
+    # Reviewer to have earned at least Human-on-the-loop (level 2). Below
+    # that, Sheraj must explicitly confirm — the dashboard turns this response
+    # into a confirm step and retries with confirm=true.
+    if not body.get("confirm"):
+        reviewer = get_agent_status("reviewer") or {}
+        level = int(reviewer.get("trust_level") or 0)
+        if level < 2:
+            level_name = reviewer.get("trust_level_name", "Shadow/Advisory")
+            return {
+                "requires_confirmation": True,
+                "trust_level": level,
+                "trust_level_name": level_name,
+                "reason": (f"The Reviewer's trust level is {level} ({level_name}) — below "
+                           "Human-on-the-loop (2). Its scores haven't yet earned unattended "
+                           "publishing, so please confirm this draft yourself."),
+            }
 
     if product.get("etsy_listing_id"):
         return {
@@ -1991,21 +2164,61 @@ def etsy_publish(body: dict):
 
 # --- Steward: revenue and cost accounting ---
 
-# Rough per-product API cost: ~$0.05 image generation + ~$0.01 Grok tokens
-ESTIMATED_COST_PER_PRODUCT = 0.06
+# Soft monthly cloud-spend ceiling (Moderation, principle 5) — crossing it
+# never blocks a run, it turns the Steward's dashboard tile red so the excess
+# is visible instead of silent. Override with MONTHLY_SPEND_CEILING_USD.
+MONTHLY_SPEND_CEILING = float(os.getenv("MONTHLY_SPEND_CEILING_USD", "15"))
+
+# Per-call metering (state.record_spend) shipped on this date. Products
+# created BEFORE it have no ledger entries, so pretending they cost $0 would
+# be a false report (the Steward "reports what the numbers say"). They get a
+# flat estimate instead, clearly labeled. Derivation of the flat rate, from
+# the same per-call figures in router.EST_COST_USD: one image generation
+# (~$0.05) + ~5 Grok vision calls across consultation and review (~$0.05)
+# + ~2 Grok chat calls (~$0.01) ≈ $0.11 per product.
+METERING_EPOCH = "2026-07-06"
+LEGACY_COST_PER_PRODUCT = 0.11
 
 @app.get("/steward/report")
 def steward_report():
-    """Simple profit-and-loss view across all products."""
+    """
+    Profit-and-loss view across all products. Costs are a labeled hybrid:
+    runs since METERING_EPOCH are METERED — every paid Grok/vision/image call
+    records itself via state.record_spend (see router.record_api_spend), so a
+    repaint-heavy run costs visibly more than a clean one — while products
+    from before metering existed carry a flat LEGACY_COST_PER_PRODUCT
+    estimate rather than a misleading $0.
+    """
+    from agents.state import get_spend_summary
     products = get_all_products()
     total_revenue = sum(float(p.get("revenue") or 0) for p in products)
-    total_cost = round(len(products) * ESTIMATED_COST_PER_PRODUCT, 2)
+    spend = get_spend_summary()
+
+    legacy = [p for p in products if (p.get("created_at") or "") < METERING_EPOCH]
+    legacy_cost = round(len(legacy) * LEGACY_COST_PER_PRODUCT, 2)
+    this_month = datetime.utcnow().strftime("%Y-%m")
+    legacy_month_cost = round(
+        LEGACY_COST_PER_PRODUCT
+        * sum(1 for p in legacy if (p.get("created_at") or "").startswith(this_month)), 2)
+
+    total_cost = round(spend["total"] + legacy_cost, 2)
+    month_cost = round(spend["month"] + legacy_month_cost, 2)
+    by_kind = dict(spend["by_kind"])
+    if legacy_cost:
+        by_kind["legacy_estimate"] = legacy_cost
+
     return {
         "total_products":  len(products),
         "total_revenue":   round(total_revenue, 2),
         "estimated_costs": total_cost,
         "estimated_profit": round(total_revenue - total_cost, 2),
-        "cost_per_product": ESTIMATED_COST_PER_PRODUCT,
+        "cost_per_product": round(total_cost / len(products), 2) if products else 0.0,
+        "month_spend":     month_cost,
+        "monthly_ceiling": MONTHLY_SPEND_CEILING,
+        "over_ceiling":    month_cost > MONTHLY_SPEND_CEILING,
+        "spend_by_kind":   by_kind,
+        "legacy_products": len(legacy),
+        "legacy_estimated_costs": legacy_cost,
         "products": [
             {
                 "id":      p["id"],
@@ -2038,6 +2251,26 @@ def record_revenue(product_id: str, body: dict):
     return {"product_id": product_id, "revenue": amount}
 
 
+@app.post("/products/{product_id}/feedback")
+def record_feedback(product_id: str, body: dict):
+    """
+    Record what actually happened when a product met a real person — the
+    ground truth the Reviewer's newcomer_accessibility guess never had
+    (principle 7). Sheraj notes a recipient's reaction after handing out a
+    quote card (or a buyer's comment on a bookmark); empty text clears it.
+    """
+    text = str(body.get("text") or "").strip()
+    from agents.state import _connect
+    with _connect() as conn:
+        row = conn.execute("SELECT id, task_id FROM products WHERE id = ?", (product_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Product not found")
+    update_product(product_id, recipient_feedback=text)
+    log_run(dict(row).get("task_id") or product_id, "steward", "recipient_feedback",
+            product_id, text[:400] or "(cleared)")
+    return {"product_id": product_id, "recipient_feedback": text}
+
+
 # --- Trust report ---
 
 TRUST_BADGES = {
@@ -2065,6 +2298,11 @@ def trust_report():
         raw_scores = p.get("reviewer_scores")
         scores = json.loads(raw_scores) if isinstance(raw_scores, str) and raw_scores else {}
         overall = scores.get("overall", 0.0)
+        # A product that shipped below its target score (stall or max-attempts
+        # exhaustion) wears BEST EFFORT, never a badge that looks like a clean
+        # pass — principle 2. NULL target_reached = predates tracking.
+        target_reached = p.get("target_reached")
+        badge = "BEST EFFORT" if target_reached == 0 else _badge(overall)
         rows.append({
             "product_id":     p.get("id"),
             "title":          p.get("title"),
@@ -2072,7 +2310,9 @@ def trust_report():
             "created_at":     p.get("created_at"),
             "overall":        overall,
             "passed":         scores.get("passed", False),
-            "badge":          _badge(overall),
+            "badge":          badge,
+            "target_reached": target_reached,
+            "attempts":       p.get("attempts"),
             "recommendation": scores.get("recommendation", ""),
             "principle_scores": scores.get("scores", {}),
         })
@@ -2085,6 +2325,183 @@ def trust_report():
         "average_score":   average,
         "products":        rows,
     }
+
+
+# --- Google Calendar OAuth (the Secretary's; mirrors the Etsy flow) ---
+
+@app.get("/gcal/oauth/start")
+def gcal_oauth_start():
+    """Step 1 of Google OAuth. Open in a browser — one-time approval."""
+    from agents.gcal import build_auth_url
+    from fastapi.responses import RedirectResponse, HTMLResponse
+    if not os.getenv("GOOGLE_CLIENT_ID"):
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>⚠️ Google credentials missing</h2>
+            <p>Add Google credentials to <strong>.env</strong> first (one-time, ~5 minutes):</p>
+            <ol>
+              <li>Go to <a href="https://console.cloud.google.com/projectcreate" target="_blank">console.cloud.google.com</a> and create a project (any name, e.g. "bahAI Secretary")</li>
+              <li>In <em>APIs &amp; Services → Library</em>, search "Google Calendar API" and click <strong>Enable</strong></li>
+              <li>In <em>APIs &amp; Services → OAuth consent screen</em>: choose <strong>External</strong>, fill in the app name and your email, and add yourself (sherajr22@gmail.com) as a <strong>Test user</strong></li>
+              <li>In <em>APIs &amp; Services → Credentials → Create credentials → OAuth client ID</em>: choose <strong>Web application</strong> and add this authorized redirect URI: <code>http://localhost:8765/gcal/oauth/callback</code></li>
+              <li>Copy the Client ID into <code>GOOGLE_CLIENT_ID</code> and the secret into <code>GOOGLE_CLIENT_SECRET</code> in <code>.env</code></li>
+              <li>Restart the API, then revisit this page</li>
+            </ol>
+            </body></html>
+        """, status_code=400)
+    return RedirectResponse(url=build_auth_url())
+
+
+@app.get("/gcal/oauth/callback")
+def gcal_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """Google redirects here after approval. Exchanges the code and creates her calendar."""
+    from agents.gcal import exchange_code, SECRETARY_CALENDAR_NAME
+    from fastapi.responses import HTMLResponse
+
+    if error or not code or not state:
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Google authorisation failed</h2>
+            <p>{error or 'No authorisation code returned.'}</p>
+            <p><a href="/gcal/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+    try:
+        exchange_code(code, state)
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>✅ Google Calendar connected!</h2>
+            <p>Your Secretary created her own calendar, <strong>"{SECRETARY_CALENDAR_NAME}"</strong>,
+            and can now see your schedule. You can close this tab and go back to the dashboard.</p>
+            </body></html>
+        """)
+    except Exception as e:
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Token exchange failed</h2><p>{e}</p>
+            <p><a href="/gcal/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+
+@app.get("/gcal/status")
+def gcal_status():
+    from agents.gcal import is_authorised, her_calendar_id
+    return {
+        "configured": bool(os.getenv("GOOGLE_CLIENT_ID")),
+        "authorised": is_authorised(),
+        "secretary_calendar": her_calendar_id(),
+    }
+
+
+# --- Secretary (Phase 1: chat + private memory) ---
+#
+# Privacy hard rule: everything below returns personal content ONLY to the
+# dashboard's Secretary tab. Never log message content to log_run, job
+# progress, or stdout.
+
+class SecretaryChatRequest(BaseModel):
+    message: str
+
+
+@app.post("/secretary/chat")
+def secretary_chat(req: SecretaryChatRequest):
+    from agents import secretary
+    text = (req.message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty message")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(status_code=503,
+                            detail="ANTHROPIC_API_KEY is not set — add it to .env to enable the Secretary")
+    try:
+        return secretary.chat(text, channel="dashboard")
+    except Exception as e:
+        # Surface the failure class, not the conversation content
+        raise HTTPException(status_code=502, detail=f"Secretary is unavailable: {type(e).__name__}")
+
+
+@app.get("/secretary/history")
+def secretary_history(limit: int = 50):
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"messages": secretary_store.get_recent_messages(min(limit, 200))}
+
+
+@app.get("/secretary/status")
+def secretary_status():
+    from agents import secretary_store
+    from agents.gcal import is_authorised as gcal_authorised
+    from agents.router import ANTHROPIC_MODEL
+    secretary_store.init_db()
+    return {
+        "enabled": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "model": ANTHROPIC_MODEL,
+        "notes": len(secretary_store.list_memory_notes()),
+        "open_tasks": len(secretary_store.get_open_tasks()),
+        "gcal_configured": bool(os.getenv("GOOGLE_CLIENT_ID")),
+        "gcal_authorised": gcal_authorised(),
+        "pending_reminders": len(secretary_store.get_pending_reminders()),
+        "pending_approvals": len(secretary_store.get_pending_actions()),
+    }
+
+
+@app.get("/secretary/upcoming")
+def secretary_upcoming(days: int = 14):
+    """Merged, tagged calendar view + verified Bahá'í dates + pending reminders."""
+    from datetime import date, timedelta
+    from agents import badi_dates, secretary_store
+    from agents import gcal
+    secretary_store.init_db()
+    events = []
+    if gcal.is_authorised():
+        try:
+            events = gcal.list_events(days_ahead=min(days, 60))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Calendar unreachable: {type(e).__name__}")
+    today = date.today()
+    badi = [{"date": e["date"].isoformat(), "name": e["name"], "kind": e["kind"],
+             "work_suspended": e["work_suspended"]}
+            for e in badi_dates.events_between(today, today + timedelta(days=min(days, 60)))]
+    return {
+        "events": events,
+        "badi_events": badi,
+        "reminders": secretary_store.get_pending_reminders(),
+        "badi_source": badi_dates.OFFICIAL_CALENDAR_URL,
+    }
+
+
+@app.get("/secretary/notifications")
+def secretary_notifications(after_id: int = 0):
+    """Scheduler fires/failures for the dashboard (titles only — hard rule 8)."""
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"notifications": secretary_store.get_notifications(after_id=after_id)}
+
+
+@app.get("/secretary/approvals")
+def secretary_approvals():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"pending": secretary_store.get_pending_actions()}
+
+
+class ApprovalRequest(BaseModel):
+    approve: bool
+
+
+@app.post("/secretary/approvals/{action_id}")
+def secretary_resolve_approval(action_id: int, req: ApprovalRequest):
+    """Sheraj's per-event confirmation for writes to calendars she doesn't own."""
+    from agents import secretary, secretary_store
+    secretary_store.init_db()
+    if not req.approve:
+        secretary_store.resolve_pending_action(action_id, "rejected")
+        return {"result": "rejected"}
+    return {"result": secretary.execute_pending_action(action_id)}
 
 
 # --- Health check ---

@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"))
 
+from agents.state import record_spend
+
 OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-16k:latest")
 XAI_KEY = os.getenv("XAI_API_KEY", "")
@@ -24,10 +26,27 @@ XAI_BASE = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-2-1212")
 XAI_VISION_MODEL = os.getenv("XAI_VISION_MODEL", XAI_MODEL)
 
+# Anthropic (Claude Sonnet) — the Secretary's model and hers alone. The
+# existing Artist/Scribe/Reviewer/Librarian routing stays on Ollama/Grok;
+# never add pipeline task types here.
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
+
 # Task types routed to Grok; everything else goes local.
 # Sheraj's directive (2026-07): only the Reviewer and Artist use the paid xAI API
 # (they need vision); the Scribe and Librarian run on the local model.
 GROK_TASK_TYPES = {"copy", "copywriting", "review", "creative_writing", "complex_analysis", "reviewer"}
+
+# Flat per-call cost estimates (USD) for the Steward's metered P&L. Rough but
+# consistent — refine against real xAI invoices; the point is that repaint-heavy
+# runs cost visibly more than clean ones (Moderation, principle 5).
+EST_COST_USD = {"grok_chat": 0.005, "grok_vision": 0.01, "image_gen": 0.05,
+                "claude_chat": 0.01}
+
+
+def record_api_spend(kind: str):
+    """Meter one paid API call into the spend table. Never raises."""
+    record_spend(kind, EST_COST_USD.get(kind, 0.0))
 
 
 def call_llm(task_type: str, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096,
@@ -66,7 +85,7 @@ def _call_ollama(messages: list[dict], temperature: float, max_tokens: int,
 
 
 def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attempt: int = 0,
-               model: str = None, json_mode: bool = False) -> str:
+               model: str = None, json_mode: bool = False, kind: str = "grok_chat") -> str:
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": model or XAI_MODEL,
@@ -79,14 +98,17 @@ def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attem
     try:
         resp = requests.post(f"{XAI_BASE}/chat/completions", headers=headers, json=payload, timeout=210)
         resp.raise_for_status()
+        record_api_spend(kind)
         return resp.json()["choices"][0]["message"]["content"]
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 400 and json_mode:
             # Model/endpoint doesn't accept response_format — retry unconstrained
-            return _call_grok(messages, temperature, max_tokens, _attempt, model=model, json_mode=False)
+            return _call_grok(messages, temperature, max_tokens, _attempt, model=model,
+                              json_mode=False, kind=kind)
         if _attempt < 2 and e.response is not None and e.response.status_code in (429, 500, 502, 503):
             time.sleep(3 * (_attempt + 1))
-            return _call_grok(messages, temperature, max_tokens, _attempt + 1, model=model, json_mode=json_mode)
+            return _call_grok(messages, temperature, max_tokens, _attempt + 1, model=model,
+                              json_mode=json_mode, kind=kind)
         raise
 
 
@@ -113,7 +135,49 @@ def call_grok_vision(image_path: str, prompt: str, system: str = None,
             {"type": "text", "text": prompt},
         ],
     })
-    return _call_grok(messages, temperature, max_tokens, model=XAI_VISION_MODEL, json_mode=json_mode)
+    return _call_grok(messages, temperature, max_tokens, model=XAI_VISION_MODEL,
+                      json_mode=json_mode, kind="grok_vision")
+
+
+def call_claude(messages: list[dict], system: str = None, max_tokens: int = 2048,
+                _attempt: int = 0) -> str:
+    """
+    Claude Sonnet via the official Anthropic SDK — the Secretary's brain.
+    Every call is metered as "claude_chat" (hard rule: her spend shows in the
+    Steward report from day one). Sonnet 5 rejects temperature/top_p; thinking
+    is disabled for chat so replies stay fast and the whole budget goes to the
+    answer.
+    """
+    import anthropic  # lazy: pipelines that never use the Secretary don't need it
+
+    if not ANTHROPIC_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set — add it to .env to enable the Secretary")
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    try:
+        response = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=max_tokens,
+            system=system or anthropic.NOT_GIVEN,
+            thinking={"type": "disabled"},
+            messages=messages,
+        )
+    except anthropic.RateLimitError:
+        if _attempt < 2:
+            time.sleep(3 * (_attempt + 1))
+            return call_claude(messages, system=system, max_tokens=max_tokens,
+                               _attempt=_attempt + 1)
+        raise
+    except anthropic.APIStatusError as e:
+        if e.status_code >= 500 and _attempt < 2:
+            time.sleep(3 * (_attempt + 1))
+            return call_claude(messages, system=system, max_tokens=max_tokens,
+                               _attempt=_attempt + 1)
+        raise
+    record_api_spend("claude_chat")
+    if response.stop_reason == "refusal":
+        return "I wasn't able to answer that one. Could you rephrase it for me?"
+    return "".join(b.text for b in response.content if b.type == "text")
 
 
 def get_embedding(text: str) -> list[float]:

@@ -5,7 +5,9 @@
 import type {
   AgentStatus, CanvaStatus, CardLanguage, EditProductPayload, EditProductResult,
   EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobStep, JobSummary, PipelineResult,
-  ProductRow, RegenerateImageResult, RegenerateQuoteResult, StewardReport, TrustReport,
+  GcalStatus, PendingApproval, ProductRow, RegenerateImageResult, RegenerateQuoteResult,
+  SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus,
+  SecretaryUpcoming, StewardReport, TrustReport,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -254,6 +256,50 @@ export const api = {
     });
     return res;
   },
+  downloadPrintSheet: async (id: string, title?: string | null) => {
+    const started = performance.now();
+    const ts = new Date().toLocaleTimeString();
+    const path = `/products/${id}/print-sheet`;
+    const res = await fetch(`${BASE}${path}`);
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const data = await res.json();
+        detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data);
+      } catch {
+        /* keep statusText */
+      }
+      pushActivity({ ts, method: "GET", path, status: res.status, ms: Math.round(performance.now() - started) });
+      throw new Error(`${res.status}: ${detail}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(title ?? "card").trim().replace(/\s+/g, "-") || "card"}-print-sheet.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    pushActivity({
+      ts, method: "PRINT", path, status: "OK", ms: Math.round(performance.now() - started),
+      detail: `Downloaded printable sheet for product ${id}.`,
+    });
+  },
+  recordFeedback: async (id: string, text: string) => {
+    const res = await post<{ product_id: string; recipient_feedback: string }>(
+      `/products/${id}/feedback`,
+      { text }
+    );
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "FEEDBACK", path: id, status: "OK", ms: 0,
+      detail: text
+        ? `Recorded recipient feedback for ${id}: "${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"`
+        : `Cleared recipient feedback for ${id}.`,
+    });
+    return res;
+  },
 
   // Trust + agents
   getTrustReport: () => get<TrustReport>("/trust/report"),
@@ -262,16 +308,69 @@ export const api = {
   // Integrations
   getCanvaStatus: () => get<CanvaStatus>("/canva/status"),
   getEtsyStatus: () => get<EtsyStatus>("/etsy/status"),
-  publishToEtsy: async (productId: string) => {
-    const res = await post<EtsyPublishResult>("/etsy/publish", { product_id: productId });
+  publishToEtsy: async (productId: string, confirm = false) => {
+    const res = await post<EtsyPublishResult>("/etsy/publish", {
+      product_id: productId,
+      confirm,
+    });
     pushActivity({
       ts: new Date().toLocaleTimeString(),
-      method: "ETSY", path: productId, status: res.skipped ? "SKIPPED" : "OK", ms: 0,
-      detail: res.skipped
-        ? `Etsy publish skipped: ${res.reason}`
-        : `Draft listing ${res.etsy_listing_id ?? ""} created on Etsy${res.image_uploaded ? "" : " (image upload failed)"}.`,
+      method: "ETSY", path: productId,
+      status: res.skipped ? "SKIPPED" : res.requires_confirmation ? "PARTIAL" : "OK", ms: 0,
+      detail: res.requires_confirmation
+        ? `Etsy publish paused for confirmation: ${res.reason}`
+        : res.skipped
+          ? `Etsy publish skipped: ${res.reason}`
+          : `Draft listing ${res.etsy_listing_id ?? ""} created on Etsy${res.image_uploaded ? "" : " (image upload failed)"}.`,
     });
     return res;
+  },
+
+  // Secretary — content stays inside the Secretary tab; the activity log only
+  // ever sees the method/path, never what was said.
+  secretaryChat: (message: string) =>
+    post<SecretaryChatResult>("/secretary/chat", { message }),
+  getSecretaryHistory: (limit = 50) =>
+    request<{ messages: SecretaryMessage[] }>(
+      "GET", `/secretary/history?limit=${limit}`, undefined, { silent: true }
+    ),
+  getSecretaryStatus: () =>
+    request<SecretaryStatus>("GET", "/secretary/status", undefined, { silent: true }),
+  getSecretaryUpcoming: (days = 14) =>
+    request<SecretaryUpcoming>("GET", `/secretary/upcoming?days=${days}`, undefined, { silent: true }),
+  getSecretaryApprovals: () =>
+    request<{ pending: PendingApproval[] }>("GET", "/secretary/approvals", undefined, { silent: true }),
+  resolveSecretaryApproval: async (id: number, approve: boolean) => {
+    const res = await post<{ result: string }>(`/secretary/approvals/${id}`, { approve });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "SECRETARY", path: `approval #${id}`,
+      status: "OK", ms: 0,
+      detail: approve ? `Approved secretary action #${id}.` : `Rejected secretary action #${id}.`,
+    });
+    return res;
+  },
+  getGcalStatus: () =>
+    request<GcalStatus>("GET", "/gcal/status", undefined, { silent: true }),
+  // Scheduler fires/failures -> Activity Log (titles only, hard rule 8).
+  // Returns the highest notification id seen, for the next poll.
+  pollSecretaryNotifications: async (afterId: number) => {
+    const res = await request<{ notifications: SecretaryNotification[] }>(
+      "GET", `/secretary/notifications?after_id=${afterId}`, undefined, { silent: true }
+    );
+    let last = afterId;
+    for (const n of res.notifications) {
+      last = Math.max(last, n.id);
+      pushActivity({
+        ts: new Date(n.created_at).toLocaleTimeString(),
+        method: n.kind === "scheduler_error" ? "ERROR" : "REMIND",
+        path: "secretary",
+        status: n.kind === "scheduler_error" ? "ERR" : "OK",
+        ms: 0,
+        detail: n.title,
+      });
+    }
+    return { notifications: res.notifications, lastId: last };
   },
 
   // Steward

@@ -59,6 +59,7 @@ export function QuoteCardDetail({
   translationText,
   disclaimerNative,
   disclaimerEn,
+  artworkDisclosure,
 }: {
   quote: string;
   citation?: string | null;
@@ -67,6 +68,7 @@ export function QuoteCardDetail({
   translationText?: string | null;
   disclaimerNative?: string | null;
   disclaimerEn?: string | null;
+  artworkDisclosure?: string | null;
 }) {
   return (
     <Card>
@@ -106,6 +108,15 @@ export function QuoteCardDetail({
               <p className="mt-2 text-xs text-slate-500">Printed on the card: {disclaimerNative}</p>
             )}
             {disclaimerEn && <p className="mt-1 text-xs text-slate-500">{disclaimerEn}</p>}
+          </div>
+        )}
+
+        {artworkDisclosure && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-sky-400/40 bg-sky-400/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-sky-300">
+              AI-generated artwork
+            </span>
+            <p className="text-xs text-slate-500">{artworkDisclosure}</p>
           </div>
         )}
       </CardContent>

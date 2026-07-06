@@ -1,13 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Download, ExternalLink, Loader2, X } from "lucide-react";
+import { CheckCircle2, Download, ExternalLink, Loader2, Printer, X } from "lucide-react";
 import { api, frontImageUrl, imageUrl } from "../lib/api";
 import type {
   EditProductPayload, EditProductResult, EtsyPublishResult, ImproveResult, Job, ProductRow,
   RegenerateImageResult, RegenerateQuoteResult,
 } from "../lib/types";
 import {
-  badgeClasses, badgeFor, formatDate, isQuoteCard, parseCardCopy, parseListing, parseReview, usd,
+  badgeClasses, badgeForProduct, formatDate, isQuoteCard, parseCardCopy, parseListing,
+  parseReview, usd,
 } from "../lib/utils";
 import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
@@ -106,7 +107,9 @@ function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => v
           {product.title ?? product.theme ?? product.id}
         </div>
         <div className="mt-auto flex items-center justify-between">
-          <BadgePill className={badgeClasses(badgeFor(overall))}>{badgeFor(overall)}</BadgePill>
+          <BadgePill className={badgeClasses(badgeForProduct(product, overall))}>
+            {badgeForProduct(product, overall)}
+          </BadgePill>
           <span className="font-mono text-xs text-slate-400">{overall.toFixed(1)}/10</span>
         </div>
         <div className="text-xs text-slate-600">{formatDate(product.created_at)}</div>
@@ -163,7 +166,20 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
   });
 
   const publish = useMutation<EtsyPublishResult, Error, void>({
-    mutationFn: () => api.publishToEtsy(product.id),
+    // Trust gate: while the Reviewer is below Human-on-the-loop (level 2),
+    // the API pauses the publish and asks for explicit confirmation.
+    mutationFn: async () => {
+      const first = await api.publishToEtsy(product.id);
+      if (!first.requires_confirmation) return first;
+      const ok = window.confirm(`${first.reason}\n\nCreate the Etsy draft anyway?`);
+      if (!ok) {
+        return {
+          skipped: true,
+          reason: "Cancelled — the Reviewer hasn't earned unattended publishing yet.",
+        };
+      }
+      return api.publishToEtsy(product.id, true);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
   });
 
@@ -174,6 +190,10 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
       queryClient.invalidateQueries({ queryKey: ["steward"] });
       setRevenue("");
     },
+  });
+
+  const printSheet = useMutation<void, Error, void>({
+    mutationFn: () => api.downloadPrintSheet(product.id, product.title),
   });
 
   return (
@@ -216,6 +236,17 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
           )}
         </div>
 
+        {product.front_image && product.back_image && (
+          <div className="mb-5 flex items-center justify-center gap-3">
+            <Button loading={printSheet.isPending} onClick={() => printSheet.mutate()}>
+              <Printer className="h-4 w-4" />
+              {printSheet.isPending ? "Building sheet..." : "Download printable sheet"}
+            </Button>
+            <span className="text-xs text-slate-500">Letter page, ready to cut</span>
+          </div>
+        )}
+        {printSheet.isError && <ErrorNote>{printSheet.error.message}</ErrorNote>}
+
         <div className="space-y-5">
           {review && <ScoreCard review={review} />}
           {quoteCard && cardCopy && (
@@ -227,8 +258,10 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
               translationText={cardCopy.translation_text}
               disclaimerNative={cardCopy.translation_disclaimer_native}
               disclaimerEn={cardCopy.translation_disclaimer_en}
+              artworkDisclosure={cardCopy.artwork_disclosure}
             />
           )}
+          {quoteCard && <FeedbackCard product={product} />}
           {listing && <ListingDetail listing={listing} />}
 
           {/* Everything below acts on the listing/Etsy machinery — quote
@@ -427,6 +460,48 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
   );
 }
 
+/** The ground-truth loop for the giveaway line (constitution principle 7):
+ * the Reviewer guesses newcomer accessibility; this records what actually
+ * happened when Sheraj handed the card to a real person. */
+function FeedbackCard({ product }: { product: ProductRow }) {
+  const queryClient = useQueryClient();
+  const [text, setText] = useState(product.recipient_feedback ?? "");
+
+  const save = useMutation({
+    mutationFn: () => api.recordFeedback(product.id, text.trim()),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+  });
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 pt-4">
+        <h3 className="text-sm font-semibold text-slate-100">How did it land?</h3>
+        <p className="text-sm text-slate-400">
+          After you give this card to someone, note their reaction here — it's the only real
+          test of "newcomer accessibility" the team's own scores can't provide.
+        </p>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder='e.g. "Gave it to a coworker — she asked what the Faith was and kept the card."'
+          rows={3}
+          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-600"
+        />
+        <Button
+          variant="secondary"
+          loading={save.isPending}
+          disabled={(product.recipient_feedback ?? "") === text.trim()}
+          onClick={() => save.mutate()}
+        >
+          Save feedback
+        </Button>
+        {save.isSuccess && <p className="text-sm text-emerald-300">Saved.</p>}
+        {save.isError && <ErrorNote>{(save.error as Error).message}</ErrorNote>}
+      </CardContent>
+    </Card>
+  );
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block space-y-1">
@@ -613,16 +688,38 @@ export function ProductsGallery() {
   return (
     <div className="mx-auto max-w-6xl space-y-5">
       {steward.data && (
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Stat label="Products" value={String(steward.data.total_products)} />
-          <Stat label="Revenue" value={usd(steward.data.total_revenue)} />
-          <Stat label="Est. API costs" value={usd(steward.data.estimated_costs)} />
-          <Stat
-            label="Est. profit"
-            value={usd(steward.data.estimated_profit)}
-            accent={steward.data.estimated_profit >= 0 ? "text-emerald-300" : "text-rose-300"}
-          />
-        </div>
+        <>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <Stat label="Products" value={String(steward.data.total_products)} />
+            <Stat label="Revenue" value={usd(steward.data.total_revenue)} />
+            <Stat label="API costs (est.)" value={usd(steward.data.estimated_costs)} />
+            <Stat
+              label="Spend this month"
+              value={usd(steward.data.month_spend)}
+              accent={steward.data.over_ceiling ? "text-rose-300" : undefined}
+            />
+            <Stat
+              label="Est. profit"
+              value={usd(steward.data.estimated_profit)}
+              accent={steward.data.estimated_profit >= 0 ? "text-emerald-300" : "text-rose-300"}
+            />
+          </div>
+          {steward.data.legacy_estimated_costs > 0 && (
+            <p className="text-xs text-slate-500">
+              Includes {usd(steward.data.legacy_estimated_costs)} estimated for{" "}
+              {steward.data.legacy_products} product
+              {steward.data.legacy_products === 1 ? "" : "s"} made before per-call metering;
+              every run from now on is metered exactly.
+            </p>
+          )}
+          {steward.data.over_ceiling && (
+            <p className="text-xs text-rose-300">
+              This month's API spend ({usd(steward.data.month_spend)}) has passed the{" "}
+              {usd(steward.data.monthly_ceiling)} moderation ceiling — worth a look before the
+              next big run.
+            </p>
+          )}
+        </>
       )}
 
       {products.isLoading && <p className="text-sm text-slate-500">Loading products...</p>}

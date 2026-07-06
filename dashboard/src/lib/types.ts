@@ -63,6 +63,8 @@ export interface CardCopy {
   translation_text: string | null;
   translation_disclaimer_native: string | null;
   translation_disclaimer_en: string | null;
+  // Fixed, code-written AI-artwork disclosure (absent on cards saved before it existed).
+  artwork_disclosure?: string | null;
 }
 
 export interface PipelineResult {
@@ -140,6 +142,12 @@ export interface ProductRow {
   back_image: string | null;
   consultation: string | null;
   product_type: string | null; // "bookmark" (default) | "quote_card"
+  // 1 = review target reached; 0 = shipped as best effort (stall/max attempts);
+  // null = saved before this was tracked.
+  target_reached?: number | null;
+  attempts?: number | null;
+  // Sheraj's note on how the product landed with a real person.
+  recipient_feedback?: string | null;
 }
 
 export interface AgentStatus {
@@ -159,7 +167,9 @@ export interface TrustReportRow {
   created_at: string;
   overall: number;
   passed: boolean;
-  badge: string;
+  badge: string; // "BEST EFFORT" when the product shipped below its target score
+  target_reached?: number | null;
+  attempts?: number | null;
   recommendation: string;
   principle_scores: Record<string, PrincipleScore>;
 }
@@ -175,9 +185,18 @@ export interface TrustReport {
 export interface StewardReport {
   total_products: number;
   total_revenue: number;
+  // Hybrid costs: runs since metering shipped are metered per call
+  // (state.record_spend); older products carry a flat labeled estimate
+  // (legacy_estimated_costs) instead of a misleading $0.
   estimated_costs: number;
   estimated_profit: number;
   cost_per_product: number;
+  month_spend: number;
+  monthly_ceiling: number;
+  over_ceiling: boolean;
+  spend_by_kind: Record<string, number>;
+  legacy_products: number;
+  legacy_estimated_costs: number;
   products: {
     id: string;
     title: string | null;
@@ -260,4 +279,92 @@ export interface EtsyPublishResult {
   image_error?: string | null;
   skipped?: boolean;
   reason?: string;
+  // Trust gate: the Reviewer hasn't earned Human-on-the-loop yet, so the
+  // dashboard must ask Sheraj to confirm and retry with confirm=true.
+  requires_confirmation?: boolean;
+  trust_level?: number;
+  trust_level_name?: string;
+}
+
+// ── Secretary (Phase 1: chat + private memory) ────────────────────────────────
+// Privacy: message content renders ONLY inside the Secretary tab.
+
+export interface SecretaryMessage {
+  role: "user" | "assistant";
+  content: string;
+  channel: string;
+  ts: string;
+}
+
+export interface SecretaryChatResult {
+  reply: string;
+  remembered: string[];
+  tasks_added: string[];
+  actions: string[];
+}
+
+export interface SecretaryStatus {
+  enabled: boolean;
+  model: string;
+  notes: number;
+  open_tasks: number;
+  gcal_configured: boolean;
+  gcal_authorised: boolean;
+  pending_reminders: number;
+  pending_approvals: number;
+}
+
+export interface SecretaryEvent {
+  id: string;
+  summary: string;
+  start: string;
+  end: string;
+  all_day: boolean;
+  location: string;
+  calendar_id: string;
+  calendar_name: string;
+  tags: string[];
+  editable_by_secretary: boolean;
+}
+
+export interface BadiEvent {
+  date: string;
+  name: string;
+  kind: "holy_day" | "feast";
+  work_suspended: boolean;
+}
+
+export interface SecretaryReminder {
+  id: number;
+  message: string;
+  fire_at: string;
+  recurrence: string | null;
+  wake_me: number;
+}
+
+export interface SecretaryUpcoming {
+  events: SecretaryEvent[];
+  badi_events: BadiEvent[];
+  reminders: SecretaryReminder[];
+  badi_source: string;
+}
+
+export interface SecretaryNotification {
+  id: number;
+  kind: string;
+  title: string;
+  created_at: string;
+}
+
+export interface PendingApproval {
+  id: number;
+  kind: string;
+  description: string;
+  created_at: string;
+}
+
+export interface GcalStatus {
+  configured: boolean;
+  authorised: boolean;
+  secretary_calendar: string | null;
 }
