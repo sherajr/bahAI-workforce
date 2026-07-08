@@ -1,5 +1,5 @@
 import { forwardRef, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import { cn } from "../lib/utils";
 
 // Minimal styled primitives (shadcn-style aesthetic, zero extra dependencies).
@@ -86,3 +86,37 @@ export const ErrorNote = ({ children }: { children: ReactNode }) => (
     {children}
   </div>
 );
+
+export function Modal({
+  open, onClose, title, children, widthClassName,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+  widthClassName?: string;
+}) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
+      onClick={onClose}
+    >
+      <div
+        className={cn(
+          "max-h-[85vh] w-full overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950 p-6",
+          widthClassName ?? "max-w-lg"
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <h2 className="font-display text-lg text-slate-100">{title}</h2>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}

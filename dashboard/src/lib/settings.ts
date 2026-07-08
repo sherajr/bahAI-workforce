@@ -35,6 +35,17 @@ export function setActiveJobId(id: string | null) {
   else localStorage.removeItem(JOB_KEY);
 }
 
+// Separate slot for the Post to X tab's active job — distinct from the
+// Pipeline tab's above so starting one doesn't clobber the other's reattach.
+const X_POST_JOB_KEY = "bahai.workforce.activeXPostJob";
+export function getActiveXPostJobId(): string | null {
+  return localStorage.getItem(X_POST_JOB_KEY);
+}
+export function setActiveXPostJobId(id: string | null) {
+  if (id) localStorage.setItem(X_POST_JOB_KEY, id);
+  else localStorage.removeItem(X_POST_JOB_KEY);
+}
+
 function clamp(n: number, lo: number, hi: number): number {
   return isNaN(n) ? lo : Math.min(hi, Math.max(lo, n));
 }

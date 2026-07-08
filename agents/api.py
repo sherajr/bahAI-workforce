@@ -30,8 +30,8 @@ import uvicorn
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -892,6 +892,11 @@ class CardPipelineRequest(BaseModel):
     language: Optional[str] = None   # LANGUAGES code ("es"/"zh"/"ar") or None for English-only
     target_score: float = 9.0
     max_attempts: int = 3
+    # Redo-everything steer (regenerate-card-all only; empty for a normal new
+    # card run). Folded into the retrieval query and image brief ONLY — the
+    # stored theme/title stay the clean original so repeated redos don't
+    # accumulate "NEW DIRECTION" text into permanent storage.
+    guidance: str = ""
 
 
 # Honesty disclosure for the card's ARTWORK (principle 3) — a fixed string
@@ -988,7 +993,7 @@ def _librarian_source_from(transcript: list, citations: list) -> str:
 
 
 def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
-                       request_human_input=None) -> dict:
+                       request_human_input=None, existing_product_id: str = None) -> dict:
     """
     The whole quote-card pipeline in one background job:
     task → Librarian → Artist (card brief + generate) → consultation (card
@@ -996,6 +1001,10 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
     translation → Card Compositor → Reviewer (card rubric, sees the rendered
     front) → simple revision loop (re-pick quote or repaint artwork — there is
     no listing text to edit) → save product.
+
+    existing_product_id: set only by the "redo everything" redirect action —
+    overwrites that product's row in place (same in-place-redo contract as
+    bookmarks' _redo_product) instead of creating a new one.
     """
     from agents.artist import build_card_image_prompt, generate_image
     from agents.card_compositor import render_quote_card
@@ -1004,6 +1013,11 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
     from agents.translator import translate_quote, LANGUAGES
 
     lang_name = LANGUAGES[req.language]["name"] if req.language else None
+    # Redo-everything guidance steers retrieval/artwork only — req.theme
+    # itself (used for title, stored theme, and every requote step below)
+    # stays clean so a redo never bakes "NEW DIRECTION from Sheraj" text
+    # into permanent storage the way appending it to req.theme would.
+    retrieval_query = f"{req.theme}\n\n{req.guidance}" if req.guidance.strip() else req.theme
 
     progress("Creating task...")
     task_id = create_task(req.theme, "card_design", assigned_to="operator")
@@ -1017,8 +1031,8 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
     # falling through to open-ended sourcing would silently break the
     # restriction the moment retrieval hiccups.
     progress("Librarian is searching Ruhi Book 1 for passages...")
-    citations = retrieve_ruhi_book1(req.theme, n_results=3) or []
-    log_run(task_id, "librarian", "retrieve", req.theme[:200],
+    citations = retrieve_ruhi_book1(retrieval_query, n_results=3) or []
+    log_run(task_id, "librarian", "retrieve", retrieval_query[:200],
             f"{len(citations)} passages retrieved", passed_review=len(citations) > 0)
     if not citations:
         raise RuntimeError(
@@ -1029,7 +1043,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
         )
 
     progress("Artist is composing the card image brief (local Qwen3)...")
-    image_prompt = build_card_image_prompt(req.theme, citations)
+    image_prompt = build_card_image_prompt(retrieval_query, citations)
     log_run(task_id, "artist", "card_brief", req.theme[:200], image_prompt[:200],
             passed_review=bool(image_prompt.strip()))
 
@@ -1336,11 +1350,19 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
         "artwork_disclosure": CARD_ART_DISCLOSURE,
     }
     title = f"Quote card — {req.theme[:70]}" + (f" ({lang_name})" if lang_name else "")
-    product_id = create_product(
-        task_id=task_id, title=title, image_url=best["image_path"],
-        listing_copy=json.dumps(card_copy), image_prompt=best["image_prompt"],
-        theme=req.theme, product_type="quote_card",
-    )
+    if existing_product_id:
+        product_id = existing_product_id
+        update_product(
+            product_id, title=title, image_url=best["image_path"],
+            listing_copy=json.dumps(card_copy), image_prompt=best["image_prompt"],
+            theme=req.theme, product_type="quote_card",
+        )
+    else:
+        product_id = create_product(
+            task_id=task_id, title=title, image_url=best["image_path"],
+            listing_copy=json.dumps(card_copy), image_prompt=best["image_prompt"],
+            theme=req.theme, product_type="quote_card",
+        )
     full_transcript = consultation.get("transcript", []) + editing_log
     overall = best["review"].get("overall", 0)
     update_product(product_id,
@@ -1396,6 +1418,264 @@ def pipeline_run_card(req: CardPipelineRequest):
         lambda progress, on_turn, ask: _run_card_pipeline(req, progress, on_turn, ask),
     )
     return {"job_id": job_id, "status": "running"}
+
+
+# --- Pipeline: Post to X (@peaceAntz) — giveaway outreach, never sold, never
+# auto-posted. A background job like /pipeline/run and /pipeline/run-card:
+# the consultation's round-2 pause genuinely blocks the worker thread
+# awaiting Sheraj's guidance, so this can no longer answer synchronously.
+
+class XPostRequest(BaseModel):
+    topic: str
+    include_quote: bool = True  # False: original reflection, no locked/attributed quote
+
+
+def _run_x_post_job(req: XPostRequest, progress, on_turn=None, request_human_input=None) -> dict:
+    """
+    Runs the full pipeline (Librarian -> locked quote -> Artist -> consultation
+    with round-2 pause -> Scribe -> Reviewer QA loop) and saves the drafted
+    tweet to pending_x_posts for approval. Returns the job's `result` payload.
+    """
+    from agents.state import create_pending_x_post
+    from agents.x_post import run_x_post_pipeline
+
+    result = run_x_post_pipeline(req.topic, include_quote=req.include_quote, progress=progress,
+                                 on_turn=on_turn, request_human_input=request_human_input)
+    review = result["review"]
+    post_id = create_pending_x_post(
+        topic=result["topic"],
+        tweet_text=result["tweet_text"],
+        quote_locked=result["quote_locked"],
+        quote_author=result["quote_author"],
+        constitution_score=review.get("overall", 0.0),
+        image_path=result["image_path"],
+        image_prompt=result.get("image_prompt"),
+        include_quote=result["include_quote"],
+        inspired_by=result.get("inspired_by", ""),
+    )
+    return {
+        "id": post_id,
+        "topic": result["topic"],
+        "tweet_text": result["tweet_text"],
+        "image_path": result["image_path"],
+        "image_web": _web_image_path(result["image_path"]) if result["image_path"] else None,
+        "include_quote": result["include_quote"],
+        "quote_locked": result["quote_locked"],
+        "quote_author": result["quote_author"],
+        "citation": result["citation"],
+        "inspired_by": result.get("inspired_by", ""),
+        "attempts": result["attempts"],
+        "review": review,
+        "consultation": result["consultation"],
+    }
+
+
+@app.post("/x-post")
+def x_post_create(req: XPostRequest):
+    """
+    Dashboard entry point: run the whole pipeline — including the team's
+    consultation and its round-2 pause for Sheraj's guidance — as a
+    background job. Returns {job_id} immediately; poll
+    GET /pipeline/status/{job_id} and POST .../respond for the pause, same
+    as the bookmark and card pipelines.
+    """
+    if not req.topic.strip():
+        raise HTTPException(status_code=422, detail="topic is required")
+    job_id = _start_job(
+        "x-post",
+        lambda progress, on_turn, ask: _run_x_post_job(req, progress, on_turn, ask),
+    )
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/x-post/pending")
+def x_post_pending():
+    from agents.state import get_pending_x_posts
+    rows = get_pending_x_posts("pending")
+    for r in rows:
+        r["image_web"] = _web_image_path(r.get("image_path")) if r.get("image_path") else None
+    return rows
+
+
+@app.get("/x-post/drafts")
+def x_post_drafts():
+    """
+    Posts Sheraj liked but wanted to think over before approving — set aside
+    via POST /x-post/{id}/save-draft, out of the Pending approval list until
+    she comes back to them.
+    """
+    from agents.state import get_pending_x_posts
+    rows = get_pending_x_posts("draft")
+    for r in rows:
+        r["image_web"] = _web_image_path(r.get("image_path")) if r.get("image_path") else None
+    return rows
+
+
+@app.get("/x-post/posted")
+def x_post_posted():
+    """
+    Permanent record of what actually got posted — the history Sheraj asked
+    for. Discarded drafts are deleted outright (see x_post_discard) and never
+    appear here; this only ever grows with real (or dry-run) posts.
+    """
+    from agents.state import get_pending_x_posts
+    from agents.x_post import X_HANDLE
+    rows = get_pending_x_posts("approved")
+    for r in rows:
+        r["image_web"] = _web_image_path(r.get("image_path")) if r.get("image_path") else None
+        tweet_id = r.get("posted_tweet_id")
+        r["posted_url"] = f"https://x.com/{X_HANDLE}/status/{tweet_id}" if tweet_id else None
+    return rows
+
+
+class XPostEditRequest(BaseModel):
+    tweet_text: str
+
+
+@app.patch("/x-post/{post_id}")
+def x_post_edit(post_id: str, req: XPostEditRequest):
+    """
+    Hand-edit a pending draft's tweet text directly — bypasses the Scribe/
+    Reviewer pipeline entirely, same discipline as PATCH /products/{id} for
+    bookmarks. Only pending drafts are editable; the locked quote/author and
+    image aren't touched (this edits the tweet's wording only).
+    """
+    from agents.state import get_x_post, update_x_post
+    from agents.x_post import TWEET_HARD_MAX
+
+    post = get_x_post(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.get("status") not in ("pending", "draft"):
+        raise HTTPException(status_code=422, detail=f"Post is already {post.get('status')} — only pending/draft posts can be edited")
+
+    text = req.tweet_text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="tweet_text cannot be empty")
+    if len(text) > TWEET_HARD_MAX:
+        raise HTTPException(status_code=422,
+                            detail=f"tweet_text is {len(text)} characters — exceeds the {TWEET_HARD_MAX} hard maximum")
+
+    update_x_post(post_id, tweet_text=text)
+    return {"id": post_id, "tweet_text": text}
+
+
+class XPostRegenerateImageRequest(BaseModel):
+    guidance: str = ""   # optional — unlike the bookmark equivalent, works fine with none
+
+
+@app.post("/x-post/{post_id}/regenerate-image")
+def x_post_regenerate_image(post_id: str, req: XPostRegenerateImageRequest):
+    """
+    Swap out a pending draft's image. With guidance, repaints toward that
+    steer (same "append an IMPORTANT direction" pattern as the bookmark
+    pipeline's regenerate-image); with none, just re-rolls the same prompt —
+    image generation is stochastic, so this alone produces a genuinely
+    different image without changing the creative direction. Only pending
+    drafts can be re-imaged; the tweet text and locked quote are untouched.
+    """
+    from agents.state import get_x_post, update_x_post
+    from agents.artist import build_x_post_image_prompt, generate_image
+
+    post = get_x_post(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.get("status") not in ("pending", "draft"):
+        raise HTTPException(status_code=422, detail=f"Post is already {post.get('status')} — only pending/draft posts can be re-imaged")
+
+    old_prompt = post.get("image_prompt") or ""
+    if not old_prompt:
+        # Defensive fallback for a row saved before image_prompt was tracked.
+        old_prompt = build_x_post_image_prompt(post.get("topic") or "", "Serene and luminous")
+
+    guidance = req.guidance.strip()
+    new_prompt = f"{old_prompt}\n\nIMPORTANT new direction: {guidance}" if guidance else old_prompt
+
+    try:
+        gen = generate_image(new_prompt, "16:9")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Image generation error: {e}")
+    new_image_path = gen.get("image_url", "")
+
+    update_x_post(post_id, image_path=new_image_path, image_prompt=new_prompt)
+    return {
+        "id": post_id,
+        "image_path": new_image_path,
+        "image_web": _web_image_path(new_image_path) if new_image_path else None,
+    }
+
+
+@app.post("/x-post/{post_id}/save-draft")
+def x_post_save_draft(post_id: str):
+    """
+    Sets a pending post aside as a draft — liked, but not ready to approve
+    yet. Moves it out of Pending approval into GET /x-post/drafts; every
+    other action (edit, new image, approve, discard) still works on it.
+    """
+    from agents.state import get_x_post, update_x_post
+
+    post = get_x_post(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.get("status") != "pending":
+        raise HTTPException(status_code=422, detail=f"Post is already {post.get('status')} — only pending posts can be saved as a draft")
+
+    update_x_post(post_id, status="draft")
+    return {"id": post_id, "status": "draft"}
+
+
+@app.post("/x-post/{post_id}/restore")
+def x_post_restore(post_id: str):
+    """Moves a draft back into Pending approval."""
+    from agents.state import get_x_post, update_x_post
+
+    post = get_x_post(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.get("status") != "draft":
+        raise HTTPException(status_code=422, detail=f"Post is {post.get('status')}, not a draft")
+
+    update_x_post(post_id, status="pending")
+    return {"id": post_id, "status": "pending"}
+
+
+@app.post("/x-post/approve/{post_id}")
+def x_post_approve(post_id: str):
+    from agents.state import get_x_post, update_x_post
+    from agents.x_post import post_tweet
+
+    post = get_x_post(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if post.get("status") not in ("pending", "draft"):
+        raise HTTPException(status_code=409, detail=f"Post is already {post.get('status')}")
+
+    try:
+        result = post_tweet(post["tweet_text"], post.get("image_path"))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"X post failed: {e}")
+
+    update_x_post(post_id, status="approved", posted_tweet_id=result.get("tweet_id"))
+    return {
+        "id": post_id,
+        "status": "approved",
+        "dry_run": result.get("dry_run", False),
+        "posted_tweet_id": result.get("tweet_id"),
+        "url": result.get("url"),
+        "text": result.get("text"),
+    }
+
+
+@app.post("/x-post/discard/{post_id}")
+def x_post_discard(post_id: str):
+    """Discards for good — no 'discarded' status kept around; only what
+    actually got posted is worth remembering (see GET /x-post/posted)."""
+    from agents.state import get_x_post, delete_x_post
+    post = get_x_post(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    delete_x_post(post_id)
+    return {"id": post_id, "status": "discarded"}
 
 
 # --- Products endpoints ---
@@ -1839,6 +2119,227 @@ def regenerate_all(product_id: str, req: RegenerateAllRequest):
     job_id = _start_job(
         "redo-product",
         lambda progress, on_turn, ask: _redo_product(product_id, req, progress, on_turn, ask),
+    )
+    return {"job_id": job_id, "status": "running"}
+
+
+# --- Quote card "redirect the team" — same three levers as bookmarks above,
+# adapted for a product with no listing: requote (Ruhi Book 1 only, hard
+# rule 11), repaint, or redo everything. ---
+
+def _require_card(product: dict):
+    """Inverse of _require_bookmark: these three actions assume Ruhi-Book1-
+    only retrieval and the card rubric/compositor, which a bookmark has
+    neither of."""
+    if (product.get("product_type") or "bookmark") != "quote_card":
+        raise HTTPException(
+            status_code=422,
+            detail="This action applies to quote cards only — bookmarks use "
+                   "regenerate-quote/regenerate-image/regenerate-all instead.",
+        )
+
+
+def _card_translation_dict(card_copy: dict) -> Optional[dict]:
+    """Reconstructs translate_quote()'s dict shape from what's stored on the
+    product, for re-rendering with an UNCHANGED translation (regenerate-card-
+    image). Must include "code" — render_quote_card's font/RTL shaping keys
+    off it, not off language_name."""
+    if not card_copy.get("language"):
+        return None
+    return {
+        "code": card_copy.get("language"),
+        "name": card_copy.get("language_name"),
+        "text": card_copy.get("translation_text"),
+        "disclaimer_native": card_copy.get("translation_disclaimer_native"),
+        "disclaimer_en": card_copy.get("translation_disclaimer_en"),
+    }
+
+
+class RegenerateCardQuoteRequest(BaseModel):
+    guidance: str = ""   # e.g. "something about detachment instead of unity"
+
+@app.post("/products/{product_id}/regenerate-card-quote")
+def regenerate_card_quote(product_id: str, req: RegenerateCardQuoteRequest):
+    """
+    Replace ONLY the printed quote — same "redirect" contract as bookmarks'
+    regenerate-quote, but sourced exclusively from Ruhi Book 1 (hard rule 11:
+    retrieve_ruhi_book1, never the general library) and always verbatim, so
+    quote_grounded stays True by construction. Re-renders on the SAME
+    artwork, re-translates if the card has a translation, and re-scores with
+    the card rubric. Always saves — a deliberate creative decision, not a
+    quality-gated auto-improve.
+    """
+    from agents.card_compositor import render_quote_card
+    from agents.reviewer import score_quote_card
+    from agents.translator import translate_quote
+
+    product = _load_product_or_404(product_id)
+    _require_card(product)
+    card_copy = json.loads(product.get("listing_copy") or "{}")
+    theme = product.get("theme") or ""
+    image_path = product.get("image_url", "")
+    old_quote = card_copy.get("quote", "")
+    language = card_copy.get("language")
+
+    query = req.guidance.strip() or theme
+    passages = retrieve_ruhi_book1(query, n_results=3) or []
+    if not passages:
+        raise HTTPException(
+            status_code=422,
+            detail="No matching passage found in the Ruhi Book 1 index for that guidance. "
+                   "Try different wording, or run scripts/ingest_ruhi_book1.py if the index isn't built.",
+        )
+    pick = next((p for p in passages if _trim_card_quote(p["text"]) != old_quote), passages[0])
+    new_quote = _trim_card_quote(pick["text"])
+    citation_src = str(pick.get("source") or "").strip()
+
+    translation = None
+    if language:
+        try:
+            translation = translate_quote(new_quote, language)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Translation failed: {e}")
+
+    try:
+        rendered = render_quote_card(image_path, new_quote, citation_src, translation=translation)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not re-render the card: {e}")
+
+    old_review = json.loads(product.get("reviewer_scores") or "{}")
+    try:
+        consult_transcript = json.loads(product.get("consultation") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        consult_transcript = []
+    review = score_quote_card(
+        theme, new_quote, citation_src, True,
+        front_image_path=rendered["front_path"], translation=translation,
+        consultation_transcript=consult_transcript, previous_review=old_review or None,
+    )
+
+    card_copy["quote"] = new_quote
+    card_copy["quote_grounded"] = True
+    card_copy["citation"] = citation_src
+    if language:
+        card_copy["language_name"] = translation.get("name")
+        card_copy["translation_text"] = translation.get("text")
+        card_copy["translation_disclaimer_native"] = translation.get("disclaimer_native")
+        card_copy["translation_disclaimer_en"] = translation.get("disclaimer_en")
+
+    update_product(
+        product_id, listing_copy=json.dumps(card_copy),
+        reviewer_scores=json.dumps(review),
+        front_image=rendered["front_path"], back_image=rendered["back_path"],
+    )
+    log_run(product_id, "librarian", "regenerate_card_quote", query[:200], new_quote[:200])
+
+    return {
+        "product_id": product_id,
+        "old_quote": old_quote, "new_quote": new_quote, "citation": citation_src,
+        "old_score": old_review.get("overall", 0), "new_score": review.get("overall", 0),
+        "review": review,
+        "front_image_web": _web_image_path(rendered["front_path"]),
+        "back_image_web": _web_image_path(rendered["back_path"]),
+    }
+
+
+class RegenerateCardImageRequest(BaseModel):
+    guidance: str   # required — e.g. "more vibrant colors, remove the lotus, add mountains"
+
+@app.post("/products/{product_id}/regenerate-card-image")
+def regenerate_card_image(product_id: str, req: RegenerateCardImageRequest):
+    """
+    Replace ONLY the artwork. Repaints from the original image prompt plus
+    fresh guidance, keeps the existing (locked) quote/citation/translation,
+    re-renders, and re-scores with the card rubric. Always saves.
+    """
+    from agents.artist import generate_image
+    from agents.card_compositor import render_quote_card
+    from agents.reviewer import score_quote_card
+
+    if not req.guidance.strip():
+        raise HTTPException(status_code=422,
+                            detail="guidance is required — describe what should change about the artwork")
+
+    product = _load_product_or_404(product_id)
+    _require_card(product)
+    card_copy = json.loads(product.get("listing_copy") or "{}")
+    theme = product.get("theme") or ""
+    old_image_prompt = product.get("image_prompt", "")
+    quote = card_copy.get("quote", "")
+    citation_src = card_copy.get("citation", "")
+    quote_grounded = card_copy.get("quote_grounded", True)
+    translation = _card_translation_dict(card_copy)
+
+    new_prompt = f"{old_image_prompt}\n\nIMPORTANT new direction from Sheraj: {req.guidance}"
+    try:
+        gen = generate_image(new_prompt, "2:3")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image generation error: {e}")
+    new_image_path = gen.get("image_url", "")
+
+    try:
+        rendered = render_quote_card(new_image_path, quote, citation_src, translation=translation)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not render the new artwork: {e}")
+
+    old_review = json.loads(product.get("reviewer_scores") or "{}")
+    try:
+        consult_transcript = json.loads(product.get("consultation") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        consult_transcript = []
+    review = score_quote_card(
+        theme, quote, citation_src, quote_grounded,
+        front_image_path=rendered["front_path"], translation=translation,
+        consultation_transcript=consult_transcript, previous_review=old_review or None,
+    )
+
+    update_product(
+        product_id, image_url=new_image_path, image_prompt=new_prompt,
+        reviewer_scores=json.dumps(review),
+        front_image=rendered["front_path"], back_image=rendered["back_path"],
+    )
+    log_run(product_id, "artist", "regenerate_card_image", req.guidance[:200], new_image_path[:200])
+
+    return {
+        "product_id": product_id,
+        "old_score": old_review.get("overall", 0), "new_score": review.get("overall", 0),
+        "review": review,
+        "image_web": _web_image_path(new_image_path),
+        "front_image_web": _web_image_path(rendered["front_path"]),
+        "back_image_web": _web_image_path(rendered["back_path"]),
+    }
+
+
+def _redo_card(product_id: str, req: RegenerateAllRequest, progress,
+              on_turn=None, request_human_input=None) -> dict:
+    """
+    Full redo of a quote card: re-run the ENTIRE card pipeline (Librarian,
+    Artist, consultation, translation, Card Compositor, Reviewer) from the
+    same theme/language, optionally steered by fresh guidance, overwriting
+    this product's row in place — mirrors bookmarks' _redo_product.
+    """
+    product = _load_product_or_404(product_id)
+    card_copy = json.loads(product.get("listing_copy") or "{}")
+    theme = product.get("theme") or ""
+    language = card_copy.get("language")
+
+    progress("Redoing the whole card from scratch...")
+    card_req = CardPipelineRequest(theme=theme, language=language, guidance=req.guidance)
+    return _run_card_pipeline(card_req, progress, on_turn, request_human_input,
+                              existing_product_id=product_id)
+
+
+@app.post("/products/{product_id}/regenerate-card-all")
+def regenerate_card_all(product_id: str, req: RegenerateAllRequest):
+    """
+    Background job: redo the ENTIRE quote card (artwork, quote, translation,
+    score) from its theme plus fresh guidance, overwriting this product in
+    place. Returns {job_id} immediately; poll GET /pipeline/status/{job_id}.
+    """
+    _require_card(_load_product_or_404(product_id))
+    job_id = _start_job(
+        "redo-card",
+        lambda progress, on_turn, ask: _redo_card(product_id, req, progress, on_turn, ask),
     )
     return {"job_id": job_id, "status": "running"}
 
@@ -2327,12 +2828,15 @@ def trust_report():
     }
 
 
-# --- Google Calendar OAuth (the Secretary's; mirrors the Etsy flow) ---
+# --- Google Workspace OAuth (the Secretary's; mirrors the Etsy flow) ---
+# One consent screen, one token, shared by Calendar/Gmail/Drive/Docs/Sheets/
+# Slides (agents/google_auth.py). Renamed from /gcal/* now that it covers
+# more than Calendar — single-user project, no back-compat shim needed.
 
-@app.get("/gcal/oauth/start")
-def gcal_oauth_start():
+@app.get("/google/oauth/start")
+def google_oauth_start():
     """Step 1 of Google OAuth. Open in a browser — one-time approval."""
-    from agents.gcal import build_auth_url
+    from agents.google_auth import build_auth_url
     from fastapi.responses import RedirectResponse, HTMLResponse
     if not os.getenv("GOOGLE_CLIENT_ID"):
         return HTMLResponse("""
@@ -2341,9 +2845,11 @@ def gcal_oauth_start():
             <p>Add Google credentials to <strong>.env</strong> first (one-time, ~5 minutes):</p>
             <ol>
               <li>Go to <a href="https://console.cloud.google.com/projectcreate" target="_blank">console.cloud.google.com</a> and create a project (any name, e.g. "bahAI Secretary")</li>
-              <li>In <em>APIs &amp; Services → Library</em>, search "Google Calendar API" and click <strong>Enable</strong></li>
+              <li>In <em>APIs &amp; Services → Library</em>, enable: <strong>Google Calendar API</strong>,
+              <strong>Gmail API</strong>, <strong>Google Drive API</strong>, <strong>Google Docs API</strong>,
+              <strong>Google Sheets API</strong>, and <strong>Google Slides API</strong></li>
               <li>In <em>APIs &amp; Services → OAuth consent screen</em>: choose <strong>External</strong>, fill in the app name and your email, and add yourself (sherajr22@gmail.com) as a <strong>Test user</strong></li>
-              <li>In <em>APIs &amp; Services → Credentials → Create credentials → OAuth client ID</em>: choose <strong>Web application</strong> and add this authorized redirect URI: <code>http://localhost:8765/gcal/oauth/callback</code></li>
+              <li>In <em>APIs &amp; Services → Credentials → Create credentials → OAuth client ID</em>: choose <strong>Web application</strong> and add this authorized redirect URI: <code>http://localhost:8765/google/oauth/callback</code></li>
               <li>Copy the Client ID into <code>GOOGLE_CLIENT_ID</code> and the secret into <code>GOOGLE_CLIENT_SECRET</code> in <code>.env</code></li>
               <li>Restart the API, then revisit this page</li>
             </ol>
@@ -2352,14 +2858,17 @@ def gcal_oauth_start():
     return RedirectResponse(url=build_auth_url())
 
 
-@app.get("/gcal/oauth/callback")
-def gcal_oauth_callback(
+@app.get("/google/oauth/callback")
+def google_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
 ):
-    """Google redirects here after approval. Exchanges the code and creates her calendar."""
-    from agents.gcal import exchange_code, SECRETARY_CALENDAR_NAME
+    """Google redirects here after approval. Exchanges the code and creates
+    her Calendar + Drive sandboxes (idempotent — safe on reconnect too)."""
+    from agents.google_auth import exchange_code
+    from agents.gcal import ensure_secretary_calendar, SECRETARY_CALENDAR_NAME
+    from agents.gdrive import ensure_secretary_folder, SECRETARY_FOLDER_NAME
     from fastapi.responses import HTMLResponse
 
     if error or not code or not state:
@@ -2367,35 +2876,232 @@ def gcal_oauth_callback(
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Google authorisation failed</h2>
             <p>{error or 'No authorisation code returned.'}</p>
-            <p><a href="/gcal/oauth/start">Try again</a>.</p>
+            <p><a href="/google/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
     try:
-        exchange_code(code, state)
+        exchange_code(code, state, on_connected=lambda: (
+            ensure_secretary_calendar(), ensure_secretary_folder()))
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
-            <h2>✅ Google Calendar connected!</h2>
+            <h2>✅ Google Workspace connected!</h2>
             <p>Your Secretary created her own calendar, <strong>"{SECRETARY_CALENDAR_NAME}"</strong>,
-            and can now see your schedule. You can close this tab and go back to the dashboard.</p>
+            and her own Drive folder, <strong>"{SECRETARY_FOLDER_NAME}"</strong>, and can now see your
+            schedule and search/read your Gmail, Drive, Docs, Sheets, and Slides. You can close this
+            tab and go back to the dashboard.</p>
             </body></html>
         """)
     except Exception as e:
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Token exchange failed</h2><p>{e}</p>
-            <p><a href="/gcal/oauth/start">Try again</a>.</p>
+            <p><a href="/google/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
 
 
-@app.get("/gcal/status")
-def gcal_status():
-    from agents.gcal import is_authorised, her_calendar_id
+@app.get("/google/status")
+def google_status():
+    from agents.google_auth import is_authorised
+    from agents.gcal import her_calendar_id
     return {
         "configured": bool(os.getenv("GOOGLE_CLIENT_ID")),
         "authorised": is_authorised(),
         "secretary_calendar": her_calendar_id(),
     }
+
+
+# --- WhatsApp (Secretary Phase 3, Meta Cloud API) ---
+#
+# The webhook below is the one endpoint in this whole API meant to be
+# reachable from the public internet (via a Cloudflare Tunnel restricted to
+# this path only — see /whatsapp/setup). It has no session/cookie auth like
+# a browser-facing endpoint would; agents.whatsapp.verify_signature() is the
+# entire security boundary. Never relax or bypass that check.
+
+@app.get("/whatsapp/setup")
+def whatsapp_setup():
+    """Guided setup page, same style as /google/oauth/start's inline
+    instructions — Sheraj is non-technical and this involves several
+    external steps (Meta Developer account, test number, Cloudflare
+    Tunnel) with no simple one-click OAuth flow to walk him through."""
+    from agents import whatsapp
+    configured = whatsapp.is_configured()
+    status_line = ("✅ All WhatsApp settings are filled in below." if configured else
+                   "⚠️ Some settings below are still empty.")
+    return HTMLResponse(f"""
+        <html><body style="font-family:sans-serif;max-width:700px;margin:2em auto;line-height:1.5">
+        <h2>Connect the Secretary to WhatsApp</h2>
+        <p>{status_line}</p>
+        <h3>1. Create a Meta Developer app</h3>
+        <ol>
+          <li>Go to <a href="https://developers.facebook.com/apps" target="_blank">developers.facebook.com/apps</a>
+              and create an app of type <strong>"Business"</strong>.</li>
+          <li>Add the <strong>WhatsApp</strong> product to the app.</li>
+          <li>Meta gives you a <strong>free test phone number</strong> automatically — start with that
+              before requesting a real one.</li>
+        </ol>
+        <h3>2. Collect three values from the WhatsApp → API Setup page</h3>
+        <ul>
+          <li><code>WHATSAPP_TOKEN</code> — the temporary access token shown there (or a permanent
+              one from System Users, once you're ready to go beyond testing)</li>
+          <li><code>WHATSAPP_PHONE_NUMBER_ID</code> — shown right above the token</li>
+          <li><code>WHATSAPP_APP_SECRET</code> — App Settings → Basic → App Secret (click "Show")</li>
+        </ul>
+        <h3>3. Pick your own values for two more</h3>
+        <ul>
+          <li><code>WHATSAPP_VERIFY_TOKEN</code> — any password-like string you make up (used only to
+              confirm to Meta that the webhook is really yours)</li>
+          <li><code>WHATSAPP_OWNER_NUMBER</code> — YOUR WhatsApp number in international format,
+              e.g. <code>+15551234567</code> (this is the only number that gets full Secretary access)</li>
+        </ul>
+        <p>Put all five into your <code>.env</code> file (already has empty placeholders) and restart the API.</p>
+        <h3>4. Expose this server to the internet — ONE path only</h3>
+        <p>Meta needs to reach <code>/whatsapp/webhook</code> on this machine. Don't tunnel your whole API —
+           install <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+           target="_blank">cloudflared</a> and use a config that only proxies the webhook path, e.g.:</p>
+        <pre style="background:#f4f4f4;padding:1em;border-radius:6px">tunnel: bahai-secretary
+credentials-file: &lt;path cloudflared gives you after 'cloudflared tunnel login'&gt;
+
+ingress:
+  - hostname: your-chosen-subdomain.your-domain.com
+    path: /whatsapp/webhook
+    service: http://localhost:8765
+  - service: http_status:404</pre>
+        <p>Then run <code>cloudflared tunnel run bahai-secretary</code> and leave it running alongside the API.</p>
+        <h3>5. Point Meta at the webhook</h3>
+        <ol>
+          <li>In WhatsApp → Configuration, set the Callback URL to
+              <code>https://your-chosen-subdomain.your-domain.com/whatsapp/webhook</code> and the
+              Verify Token to whatever you picked for <code>WHATSAPP_VERIFY_TOKEN</code>.</li>
+          <li>Click <strong>Verify and Save</strong> — Meta will call the webhook once to confirm it.</li>
+          <li>Subscribe to the <strong>messages</strong> field.</li>
+          <li>You'll also need to <strong>publish the app</strong> (requires a privacy policy URL —
+              use <code>/whatsapp/privacy</code> on this same tunnel) before Meta will deliver real
+              messages, not just dashboard test events.</li>
+          <li><strong>Easy to miss:</strong> none of the above actually tells your WhatsApp Business
+              Account (WABA) to send its events to THIS app — that's a separate link. Check with
+              <code>GET https://graph.facebook.com/v21.0/&lt;WABA_ID&gt;/subscribed_apps</code> (bearer
+              token = <code>WHATSAPP_TOKEN</code>). If your app isn't in the list (e.g. after
+              reconnecting the app in Meta's UI, which can silently repoint it at Meta's own
+              "WA DevX Webhook Events 1P App"), fix it with
+              <code>POST</code> to that same URL. Meta's "Check test webhooks" log will show real
+              messages arriving even when this is broken — it doesn't confirm delivery to your
+              callback, only that Meta generated the event.</li>
+        </ol>
+        <h3>6. Message the test number from your phone</h3>
+        <p>Save the test number as a contact and send it a message — the Secretary should reply.</p>
+        <h3>7. (Later) the 24-hour-window fallback template</h3>
+        <p>WhatsApp only allows free-form replies within 24 hours of your last message. For a reminder
+           sent after a quiet day, submit a simple template for Meta's review (Message Templates →
+           Create): name it <code>{whatsapp.WHATSAPP_UPDATE_TEMPLATE}</code>, category "Utility", body
+           text <code>Update from Sheraj's assistant: {{{{1}}}}</code>. Approval can take up to a day —
+           reminders work over the dashboard regardless while you wait.</p>
+        <p><a href="/secretary/status">Check current connection status</a></p>
+        </body></html>
+    """)
+
+
+@app.get("/whatsapp/privacy")
+def whatsapp_privacy():
+    """Privacy policy for Meta's app-publish requirement. Meta requires a
+    publicly reachable URL before an app can leave development mode — this
+    is that page, describing the one real thing this app does: a private,
+    single-user assistant for Sheraj, never a public product."""
+    return HTMLResponse("""
+        <html><body style="font-family:sans-serif;max-width:700px;margin:2em auto;line-height:1.6">
+        <h2>Privacy Policy — bahAI Secretary</h2>
+        <p><em>Last updated 2026-07-07</em></p>
+        <p>This application is a private, single-user personal assistant built for and used by
+           one person (its owner). It is not a public product, is not distributed to other users,
+           and does not knowingly collect data from anyone other than its owner.</p>
+        <h3>What data is handled</h3>
+        <ul>
+          <li>Messages sent to and from the owner's WhatsApp number, calendar events, tasks, and
+              reminders the owner creates through the assistant.</li>
+          <li>This data is used solely to operate the assistant for its owner — scheduling,
+              reminders, and answering questions the owner asks it.</li>
+        </ul>
+        <h3>Where it's stored</h3>
+        <p>All personal data is stored in a private local database on the owner's own machine.
+           It is never sold, shared for advertising, or made available to any third party except
+           the service providers strictly necessary to operate the assistant:</p>
+        <ul>
+          <li><strong>Meta WhatsApp Business Cloud API</strong> — transports messages to and from
+              WhatsApp.</li>
+          <li><strong>Anthropic (Claude)</strong> — processes message text to generate the
+              assistant's replies.</li>
+          <li><strong>Google Workspace APIs</strong> (Calendar/Gmail/Drive/Docs/Sheets), only when
+              the owner has connected them — used solely to read/write the owner's own data at the
+              owner's request.</li>
+        </ul>
+        <h3>Data retention and deletion</h3>
+        <p>Data is retained until the owner deletes it. As the sole user, the owner can delete any
+           stored data directly at any time.</p>
+        <h3>Contact</h3>
+        <p>Questions about this policy: <a href="mailto:sherajr22@gmail.com">sherajr22@gmail.com</a></p>
+        </body></html>
+    """)
+
+
+@app.get("/whatsapp/status")
+def whatsapp_status():
+    from agents import whatsapp
+    return {
+        "configured": whatsapp.is_configured(),
+        "owner_number_set": bool(whatsapp.WHATSAPP_OWNER_NUMBER),
+    }
+
+
+@app.get("/whatsapp/webhook")
+def whatsapp_webhook_verify(request: Request):
+    """Meta's one-time handshake when you click 'Verify and Save' in the
+    WhatsApp Configuration page."""
+    from agents import whatsapp
+    q = request.query_params
+    challenge = whatsapp.verify_webhook_challenge(
+        q.get("hub.mode", ""), q.get("hub.verify_token", ""), q.get("hub.challenge", ""))
+    if challenge is None:
+        raise HTTPException(status_code=403, detail="Verification failed")
+    return PlainTextResponse(challenge)
+
+
+def _handle_whatsapp_message(msg: dict):
+    """Runs in a background task so the webhook can ack Meta immediately —
+    Meta may retry the whole webhook delivery if it doesn't get a fast 200,
+    which would otherwise risk a duplicate reply to the same message."""
+    from agents import whatsapp, secretary, secretary_store
+    phone = msg["from"]
+    secretary_store.record_inbound_contact(phone)
+    if not whatsapp.is_owner(phone):
+        # Never route a non-owner message into the Secretary's chat loop —
+        # that would hand a stranger who texts this number full access to
+        # Sheraj's calendar/Gmail/Drive via her tool-calling loop.
+        try:
+            whatsapp.send_text(phone, "This is Abigail, Sheraj's personal assistant — "
+                                      "I can only take instructions from him directly.")
+        except Exception:
+            pass
+        secretary_store.add_notification(
+            "whatsapp", f"Message from a non-owner number ({phone[-4:]}) — auto-replied, not processed")
+        return
+    try:
+        result = secretary.chat(msg["text"], channel="whatsapp")
+        whatsapp.send_text(phone, result["reply"])
+    except Exception as e:
+        secretary_store.add_notification("scheduler_error", f"WhatsApp reply failed: {type(e).__name__}")
+
+
+@app.post("/whatsapp/webhook")
+async def whatsapp_webhook_receive(request: Request, background_tasks: BackgroundTasks):
+    from agents import whatsapp
+    raw = await request.body()
+    if not whatsapp.verify_signature(raw, request.headers.get("X-Hub-Signature-256")):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    payload = json.loads(raw)
+    for msg in whatsapp.parse_webhook_messages(payload):
+        background_tasks.add_task(_handle_whatsapp_message, msg)
+    return {"status": "ok"}
 
 
 # --- Secretary (Phase 1: chat + private memory) ---
@@ -2416,12 +3122,12 @@ def secretary_chat(req: SecretaryChatRequest):
         raise HTTPException(status_code=400, detail="Empty message")
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=503,
-                            detail="ANTHROPIC_API_KEY is not set — add it to .env to enable the Secretary")
+                            detail="ANTHROPIC_API_KEY is not set — add it to .env to enable Abigail")
     try:
         return secretary.chat(text, channel="dashboard")
     except Exception as e:
         # Surface the failure class, not the conversation content
-        raise HTTPException(status_code=502, detail=f"Secretary is unavailable: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail=f"Abigail is unavailable: {type(e).__name__}")
 
 
 @app.get("/secretary/history")
@@ -2433,8 +3139,8 @@ def secretary_history(limit: int = 50):
 
 @app.get("/secretary/status")
 def secretary_status():
-    from agents import secretary_store
-    from agents.gcal import is_authorised as gcal_authorised
+    from agents import secretary_store, whatsapp
+    from agents.google_auth import is_authorised as google_authorised
     from agents.router import ANTHROPIC_MODEL
     secretary_store.init_db()
     return {
@@ -2442,8 +3148,9 @@ def secretary_status():
         "model": ANTHROPIC_MODEL,
         "notes": len(secretary_store.list_memory_notes()),
         "open_tasks": len(secretary_store.get_open_tasks()),
-        "gcal_configured": bool(os.getenv("GOOGLE_CLIENT_ID")),
-        "gcal_authorised": gcal_authorised(),
+        "google_configured": bool(os.getenv("GOOGLE_CLIENT_ID")),
+        "google_authorised": google_authorised(),
+        "whatsapp_configured": whatsapp.is_configured(),
         "pending_reminders": len(secretary_store.get_pending_reminders()),
         "pending_approvals": len(secretary_store.get_pending_actions()),
     }
@@ -2502,6 +3209,202 @@ def secretary_resolve_approval(action_id: int, req: ApprovalRequest):
         secretary_store.resolve_pending_action(action_id, "rejected")
         return {"result": "rejected"}
     return {"result": secretary.execute_pending_action(action_id)}
+
+
+# --- WhatsApp contacts (the allowlist — owner-controlled only, never
+# LLM-writable; see agents/secretary_tools.py's SEND_WHATSAPP_TOOL docstring) ---
+
+class ContactRequest(BaseModel):
+    name: str
+    phone: str
+    allowlisted: bool = False
+
+
+@app.get("/secretary/contacts")
+def secretary_list_contacts():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"contacts": secretary_store.list_contacts()}
+
+
+@app.post("/secretary/contacts")
+def secretary_add_contact(req: ContactRequest):
+    from agents import secretary_store
+    secretary_store.init_db()
+    if not req.name.strip() or not req.phone.strip():
+        raise HTTPException(status_code=400, detail="Name and phone are both required")
+    cid = secretary_store.add_contact(req.name.strip(), req.phone.strip(), req.allowlisted)
+    return {"id": cid}
+
+
+class AllowlistRequest(BaseModel):
+    allowlisted: bool
+
+
+@app.post("/secretary/contacts/{contact_id}/allowlist")
+def secretary_set_contact_allowlisted(contact_id: int, req: AllowlistRequest):
+    from agents import secretary_store
+    secretary_store.set_contact_allowlisted(contact_id, req.allowlisted)
+    return {"result": "ok"}
+
+
+@app.delete("/secretary/contacts/{contact_id}")
+def secretary_remove_contact(contact_id: int):
+    from agents import secretary_store
+    secretary_store.remove_contact(contact_id)
+    return {"result": "ok"}
+
+
+# --- Secretary: personality / custom instructions ---
+
+class PersonalityRequest(BaseModel):
+    custom_instructions: str
+
+
+@app.get("/secretary/personality")
+def secretary_get_personality():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"custom_instructions": secretary_store.get_setting("custom_instructions", "") or ""}
+
+
+@app.post("/secretary/personality")
+def secretary_set_personality(req: PersonalityRequest):
+    from agents import secretary_store
+    secretary_store.init_db()
+    secretary_store.set_setting("custom_instructions", req.custom_instructions)
+    return {"result": "ok"}
+
+
+# --- Secretary: notes (manual view/edit of private/memory/*.md) ---
+
+class NoteRequest(BaseModel):
+    name: str
+    content: str
+
+
+@app.get("/secretary/notes")
+def secretary_list_notes():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"notes": secretary_store.list_memory_notes()}
+
+
+@app.post("/secretary/notes")
+def secretary_save_note(req: NoteRequest):
+    from agents import secretary_store
+    secretary_store.init_db()
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Note name is required")
+    secretary_store.overwrite_memory_note(name, req.content)
+    return {"result": "ok"}
+
+
+@app.delete("/secretary/notes/{name}")
+def secretary_delete_note(name: str):
+    from agents import secretary_store
+    secretary_store.delete_memory_note(name)
+    return {"result": "ok"}
+
+
+# --- Secretary: tasks (manual view/edit — she still only sees open ones) ---
+
+class TaskRequest(BaseModel):
+    description: str
+    due: Optional[str] = None
+
+
+class TaskEditRequest(BaseModel):
+    description: Optional[str] = None
+    due: Optional[str] = None
+    done: Optional[bool] = None
+
+
+@app.get("/secretary/tasks")
+def secretary_list_tasks():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"tasks": secretary_store.get_all_tasks()}
+
+
+@app.post("/secretary/tasks")
+def secretary_add_task(req: TaskRequest):
+    from agents import secretary_store
+    secretary_store.init_db()
+    desc = req.description.strip()
+    if not desc:
+        raise HTTPException(status_code=400, detail="Description is required")
+    tid = secretary_store.add_task(desc, due=req.due)
+    return {"id": tid}
+
+
+@app.patch("/secretary/tasks/{task_id}")
+def secretary_edit_task(task_id: int, req: TaskEditRequest):
+    from agents import secretary_store
+    edits = req.model_dump(exclude_unset=True)
+    if not edits:
+        raise HTTPException(status_code=400, detail="No fields provided to edit")
+    secretary_store.update_task(task_id, **edits)
+    return {"result": "ok"}
+
+
+@app.delete("/secretary/tasks/{task_id}")
+def secretary_delete_task(task_id: int):
+    from agents import secretary_store
+    secretary_store.delete_task(task_id)
+    return {"result": "ok"}
+
+
+# --- Secretary: reminders (manual view/edit) ---
+
+class ReminderRequest(BaseModel):
+    message: str
+    fire_at: str
+    recurrence: Optional[str] = None
+    wake_me: bool = False
+
+
+class ReminderEditRequest(BaseModel):
+    message: Optional[str] = None
+    fire_at: Optional[str] = None
+    recurrence: Optional[str] = None
+    wake_me: Optional[bool] = None
+
+
+@app.get("/secretary/reminders")
+def secretary_list_reminders():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"reminders": secretary_store.get_all_reminders()}
+
+
+@app.post("/secretary/reminders")
+def secretary_add_reminder(req: ReminderRequest):
+    from agents import secretary_store
+    secretary_store.init_db()
+    msg = req.message.strip()
+    if not msg or not req.fire_at.strip():
+        raise HTTPException(status_code=400, detail="Message and fire_at are both required")
+    rid = secretary_store.add_reminder(msg, req.fire_at, recurrence=req.recurrence, wake_me=req.wake_me)
+    return {"id": rid}
+
+
+@app.patch("/secretary/reminders/{reminder_id}")
+def secretary_edit_reminder(reminder_id: int, req: ReminderEditRequest):
+    from agents import secretary_store
+    edits = req.model_dump(exclude_unset=True)
+    if not edits:
+        raise HTTPException(status_code=400, detail="No fields provided to edit")
+    secretary_store.update_reminder(reminder_id, **edits)
+    return {"result": "ok"}
+
+
+@app.delete("/secretary/reminders/{reminder_id}")
+def secretary_delete_reminder(reminder_id: int):
+    from agents import secretary_store
+    secretary_store.delete_reminder(reminder_id)
+    return {"result": "ok"}
 
 
 # --- Health check ---

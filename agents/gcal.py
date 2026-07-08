@@ -1,10 +1,9 @@
 """
-Google Calendar for the Secretary — OAuth + calendar CRUD + the deterministic
-Bahá'í event tagger.
-
-Mirrors etsy.py's raw-requests OAuth pattern (no Google SDK): PKCE + localhost
-callback, token stored in private/google_token.json (hard rule: everything
-personal lives in private/).
+Google Calendar for the Secretary — calendar CRUD + the deterministic Bahá'í
+event tagger. OAuth/token mechanics live in agents/google_auth.py (shared
+across Calendar/Gmail/Drive/Docs/Sheets/Slides — one consent screen, one
+token file); this module only ever imports get_valid_token/is_authorised/
+_headers from there.
 
 Ownership hard rule: she creates/edits/deletes freely ONLY on the
 "bahAI Secretary" calendar she creates on first connect. Callers must gate any
@@ -14,162 +13,24 @@ write to another calendar behind Sheraj's explicit per-event confirmation —
 The tagger is keyword rules on the event's own title. It is NOT an LLM call.
 Holy Day/Feast tags never come from date-coincidence alone — badi_dates.py
 still supplies the verified date list surfaced separately in her prompt.
-
-Env (.env): GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET — a "Desktop app" or "Web
-application" OAuth client from Google Cloud Console with
-http://localhost:8765/gcal/oauth/callback as an authorized redirect URI.
 """
 
-import base64
-import hashlib
-import json
-import os
 import re
-import secrets
-import time
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import requests
 from dotenv import load_dotenv
+from pathlib import Path
 
 load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"))
 
 from agents import secretary_store as store
+from agents.google_auth import get_valid_token, is_authorised, _headers  # noqa: F401 (re-exported)
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 CAL_API = "https://www.googleapis.com/calendar/v3"
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8765/gcal/oauth/callback")
-SCOPE = "https://www.googleapis.com/auth/calendar"
-
-TOKEN_FILE = store.PRIVATE_DIR / "google_token.json"
-PKCE_STATE_FILE = store.PRIVATE_DIR / "google_pkce_state.json"
 
 SECRETARY_CALENDAR_NAME = "bahAI Secretary"
-
-
-# ── PKCE + token storage (etsy.py pattern) ─────────────────────────────────────
-
-def _generate_pkce() -> dict:
-    code_verifier = secrets.token_urlsafe(64)
-    digest = hashlib.sha256(code_verifier.encode()).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-    return {"code_verifier": code_verifier, "code_challenge": code_challenge}
-
-
-def _load_token() -> Optional[dict]:
-    if TOKEN_FILE.exists():
-        return json.loads(TOKEN_FILE.read_text())
-    return None
-
-
-def _save_token(token_data: dict) -> None:
-    store.PRIVATE_DIR.mkdir(exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps(token_data, indent=2))
-
-
-def _refresh_token(refresh_token: str) -> dict:
-    resp = requests.post(
-        GOOGLE_TOKEN_URL,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={
-            "grant_type": "refresh_token",
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "refresh_token": refresh_token,
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    data["refresh_token"] = refresh_token  # Google omits it on refresh
-    data["expires_at"] = time.time() + data.get("expires_in", 3600)
-    _save_token(data)
-    return data
-
-
-def get_valid_token() -> str:
-    data = _load_token()
-    if not data:
-        raise RuntimeError(
-            "Google Calendar not connected. "
-            "Visit http://localhost:8765/gcal/oauth/start to connect."
-        )
-    if time.time() >= data.get("expires_at", 0) - 300:
-        data = _refresh_token(data["refresh_token"])
-    return data["access_token"]
-
-
-def is_authorised() -> bool:
-    try:
-        get_valid_token()
-        return True
-    except Exception:
-        return False
-
-
-# ── OAuth flow ─────────────────────────────────────────────────────────────────
-
-def build_auth_url() -> str:
-    if not GOOGLE_CLIENT_ID:
-        raise RuntimeError("GOOGLE_CLIENT_ID not set in .env")
-    pkce = _generate_pkce()
-    state = secrets.token_urlsafe(16)
-    store.PRIVATE_DIR.mkdir(exist_ok=True)
-    PKCE_STATE_FILE.write_text(json.dumps({
-        "code_verifier": pkce["code_verifier"],
-        "state": state,
-    }))
-    from urllib.parse import urlencode
-    return f"{GOOGLE_AUTH_URL}?" + urlencode({
-        "response_type": "code",
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "scope": SCOPE,
-        "state": state,
-        "code_challenge": pkce["code_challenge"],
-        "code_challenge_method": "S256",
-        "access_type": "offline",   # refresh token
-        "prompt": "consent",        # force refresh token even on re-consent
-    })
-
-
-def exchange_code(code: str, state: str) -> dict:
-    if not PKCE_STATE_FILE.exists():
-        raise RuntimeError("No PKCE state found. Restart the OAuth flow.")
-    saved = json.loads(PKCE_STATE_FILE.read_text())
-    if saved["state"] != state:
-        raise ValueError("OAuth state mismatch — possible CSRF. Restart the flow.")
-
-    resp = requests.post(
-        GOOGLE_TOKEN_URL,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={
-            "grant_type": "authorization_code",
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri": REDIRECT_URI,
-            "code": code,
-            "code_verifier": saved["code_verifier"],
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    data["expires_at"] = time.time() + data.get("expires_in", 3600)
-    _save_token(data)
-    PKCE_STATE_FILE.unlink(missing_ok=True)
-    ensure_secretary_calendar()
-    return data
-
-
-def _headers() -> dict:
-    return {"Authorization": f"Bearer {get_valid_token()}",
-            "Content-Type": "application/json"}
 
 
 # ── Her calendar ───────────────────────────────────────────────────────────────
@@ -212,23 +73,26 @@ def list_calendars() -> list[dict]:
     return resp.json().get("items", [])
 
 
-def list_events(days_ahead: int = 14) -> list[dict]:
+def _merged_events(time_min: str, time_max: str, query: str = None,
+                   max_results: int = 100) -> list[dict]:
     """
-    Merged upcoming events across ALL his calendars (read is unrestricted;
-    only writes are gated). Each event gains calendar_id/calendar_name and
-    deterministic tags.
+    Merged events across ALL his calendars for an arbitrary [time_min, time_max)
+    window (read is unrestricted; only writes are gated). Each event gains
+    calendar_id/calendar_name and deterministic tags. `query`, if given, is
+    passed to Google's own full-text search (`q`) AND re-checked locally
+    against summary/description — Google's `q` can match description/
+    location/attendee fields loosely, so the local pass keeps results
+    actually relevant to what was asked.
     """
-    now = datetime.now().astimezone()
-    time_min = now.isoformat()
-    time_max = (now + timedelta(days=days_ahead)).isoformat()
     merged = []
     for cal in list_calendars():
+        params = {"timeMin": time_min, "timeMax": time_max,
+                  "singleEvents": "true", "orderBy": "startTime", "maxResults": max_results}
+        if query:
+            params["q"] = query
         resp = requests.get(
             f"{CAL_API}/calendars/{requests.utils.quote(cal['id'], safe='')}/events",
-            headers=_headers(),
-            params={"timeMin": time_min, "timeMax": time_max,
-                    "singleEvents": "true", "orderBy": "startTime", "maxResults": 100},
-            timeout=30,
+            headers=_headers(), params=params, timeout=30,
         )
         if resp.status_code != 200:
             continue  # a single broken calendar must not sink the merged view
@@ -237,7 +101,44 @@ def list_events(days_ahead: int = 14) -> list[dict]:
             ev["calendar_name"] = cal.get("summary", "")
             merged.append(ev)
     merged.sort(key=lambda e: e.get("start", {}).get("dateTime") or e.get("start", {}).get("date") or "")
-    return [_slim(ev) for ev in merged]
+    slim = [_slim(ev) for ev in merged]
+    if query:
+        needle = query.strip().lower()
+        slim = [ev for ev in slim
+               if needle in ev["summary"].lower() or needle in ev.get("description", "").lower()]
+    return slim[:max_results]
+
+
+def list_events(days_ahead: int = 14) -> list[dict]:
+    """
+    Merged upcoming events across ALL his calendars, from now to now+days_ahead.
+    """
+    now = datetime.now().astimezone()
+    time_min = now.isoformat()
+    time_max = (now + timedelta(days=days_ahead)).isoformat()
+    return _merged_events(time_min, time_max, max_results=100)
+
+
+def search_events(start_date: str, end_date: str, query: str = None,
+                  max_results: int = 60) -> list[dict]:
+    """
+    Arbitrary-range calendar search (past, future, or spanning both),
+    optionally filtered by keyword — what the Secretary's search_calendar
+    tool calls so she can actually look things up instead of being limited
+    to the fixed "next N days" window `list_events` provides. Dates are
+    YYYY-MM-DD, inclusive on both ends. Capped to 400 days to keep tool
+    results bounded — a wider request is clamped, never rejected outright.
+    """
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    if end < start:
+        start, end = end, start
+    if (end - start).days > 400:
+        end = start + timedelta(days=400)
+    tz = datetime.now().astimezone().tzinfo
+    time_min = datetime.combine(start, datetime.min.time(), tzinfo=tz).isoformat()
+    time_max = (datetime.combine(end, datetime.min.time(), tzinfo=tz) + timedelta(days=1)).isoformat()
+    return _merged_events(time_min, time_max, query=query, max_results=max_results)
 
 
 def _to_local(iso: str | None) -> str | None:

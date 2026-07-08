@@ -102,7 +102,10 @@ export interface JobStep {
   message: string;
 }
 
-export interface Job {
+// Fields shared by every background job regardless of its result payload
+// shape (bookmark/card pipelines return PipelineResult; x-post jobs return
+// XPostJobResult) — see Job<TResult> below.
+export interface JobBase {
   job_id: string;
   kind: string;
   status: "running" | "waiting_for_input" | "done" | "error";
@@ -114,13 +117,16 @@ export interface Job {
   consultation_live?: ConsultationTurn[];
   // Set while status is "waiting_for_input": what the Reviewer is asking Sheraj.
   pending_prompt?: string | null;
-  result: PipelineResult | null;
   error: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface JobSummary extends Omit<Job, "result"> {
+export interface Job<TResult = PipelineResult> extends JobBase {
+  result: TResult | null;
+}
+
+export interface JobSummary extends JobBase {
   has_result: boolean;
 }
 
@@ -255,6 +261,30 @@ export interface RegenerateImageResult {
   back_image_web: string;
 }
 
+// Quote card "redirect the team" — same idea as bookmarks above, but no
+// listing text exists, so these carry a card `review` rubric instead.
+export interface RegenerateCardQuoteResult {
+  product_id: string;
+  old_quote: string;
+  new_quote: string;
+  citation: string;
+  old_score: number;
+  new_score: number;
+  review: Review;
+  front_image_web: string;
+  back_image_web: string;
+}
+
+export interface RegenerateCardImageResult {
+  product_id: string;
+  old_score: number;
+  new_score: number;
+  review: Review;
+  image_web: string;
+  front_image_web: string;
+  back_image_web: string;
+}
+
 // All fields optional — only the ones the user actually changed are sent.
 export interface EditProductPayload {
   title?: string;
@@ -308,8 +338,11 @@ export interface SecretaryStatus {
   model: string;
   notes: number;
   open_tasks: number;
-  gcal_configured: boolean;
-  gcal_authorised: boolean;
+  // One shared Google connection (Calendar + Gmail/Drive/Docs/Sheets/
+  // Slides-read) — see agents/google_auth.py.
+  google_configured: boolean;
+  google_authorised: boolean;
+  whatsapp_configured: boolean;
   pending_reminders: number;
   pending_approvals: number;
 }
@@ -363,8 +396,125 @@ export interface PendingApproval {
   created_at: string;
 }
 
-export interface GcalStatus {
+export interface GoogleStatus {
   configured: boolean;
   authorised: boolean;
   secretary_calendar: string | null;
+}
+
+export interface WhatsAppStatus {
+  configured: boolean;
+  owner_number_set: boolean;
+}
+
+export interface Contact {
+  id: number;
+  name: string;
+  phone: string;
+  allowlisted: number;
+  last_inbound_at: string | null;
+  created_at: string;
+}
+
+export interface NoteRow {
+  name: string;
+  content: string;
+}
+
+export interface TaskRow {
+  id: number;
+  description: string;
+  due: string | null;
+  done: number;
+  created_at: string;
+}
+
+export interface ReminderRow {
+  id: number;
+  message: string;
+  fire_at: string;
+  recurrence: string | null;
+  wake_me: number;
+  fired: number;
+  created_at: string;
+}
+
+// ── Post to X (@peaceAntz) — giveaway outreach, never sold, never auto-posted ─
+// A background job like the bookmark/card pipelines: the team's consultation
+// (agents/consultation.py, product="x_post") includes the same round-2 human
+// pause, so POST /x-post returns {job_id} and the dashboard polls/responds
+// exactly the way PipelinePanel does.
+
+// Reviewer QA's deterministic mechanical checks (agents/x_post.py review_tweet).
+export interface XPostReview extends Review {
+  checks?: Record<string, { ok: boolean; detail: string }>;
+}
+
+// The x-post job's `result` payload once status is "done" (see
+// api._run_x_post_job) — the draft is already saved to pending_x_posts by
+// this point, keyed by `id`.
+export interface XPostJobResult {
+  id: string;
+  topic: string;
+  tweet_text: string;
+  image_path: string | null;
+  image_web: string | null;
+  // false: an original reflection — inspired by retrieved passages, but
+  // nothing is quoted or attributed in the tweet itself.
+  include_quote: boolean;
+  quote_locked: string;
+  quote_author: string;
+  citation: string;
+  inspired_by: string;
+  attempts: number;
+  review: XPostReview;
+  consultation: ConsultationTurn[];
+}
+
+// Row from pending_x_posts (GET /x-post/pending and GET /x-post/posted).
+export interface PendingXPost {
+  id: string;
+  topic: string | null;
+  tweet_text: string | null;
+  image_path: string | null;
+  image_web: string | null;
+  image_prompt: string | null;
+  quote_locked: string | null;
+  quote_author: string | null;
+  // 1: tweet weaves in an unaltered locked quote (default/legacy rows).
+  // 0: an original reflection — inspired by inspired_by, nothing quoted.
+  include_quote: number;
+  inspired_by: string | null;
+  constitution_score: number | null;
+  status: string;
+  created_at: string | null;
+  posted_tweet_id: string | null;
+  // Only present on GET /x-post/posted rows — reconstructed from
+  // posted_tweet_id, null for a dry-run post that never really went out.
+  posted_url?: string | null;
+}
+
+export interface XPostApproveResult {
+  id: string;
+  status: string;
+  dry_run: boolean;
+  posted_tweet_id: string | null;
+  url: string | null;
+  text: string | null;
+}
+
+export interface XPostEditResult {
+  id: string;
+  tweet_text: string;
+}
+
+export interface XPostRegenerateImageResult {
+  id: string;
+  image_path: string | null;
+  image_web: string | null;
+}
+
+export interface XPostStatusResult {
+  id: string;
+  status: string;
 }

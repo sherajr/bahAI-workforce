@@ -13,7 +13,7 @@ import {
 import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
 import { ListingDetail } from "./ListingDetail";
-import { QuoteCardDetail } from "./QuoteCardPreview";
+import { CardRedirectCard, QuoteCardDetail } from "./QuoteCardPreview";
 import { ScoreCard } from "./ScoreCard";
 import { BadgePill, Button, Card, CardContent, ErrorNote } from "./ui";
 
@@ -261,6 +261,7 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
               artworkDisclosure={cardCopy.artwork_disclosure}
             />
           )}
+          {quoteCard && <CardRedirectCard product={product} />}
           {quoteCard && <FeedbackCard product={product} />}
           {listing && <ListingDetail listing={listing} />}
 

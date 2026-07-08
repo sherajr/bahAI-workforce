@@ -5,8 +5,9 @@ only there).
 
 Two surfaces:
   private/secretary.db   — SQLite: conversations, check-ins, streaks, tasks,
-                           reminders, contacts (allowlist), approval queue,
-                           settings.
+                           reminders, contacts (WhatsApp allowlist), pending
+                           actions (the one approval queue for every gated
+                           write — calendar, Drive, Gmail, WhatsApp), settings.
   private/memory/*.md    — her long-term notes about Sheraj, plain markdown so
                            he can open and read every one of them himself.
 
@@ -76,18 +77,11 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
-            CREATE TABLE IF NOT EXISTS contacts (       -- Phase 3 allowlist
+            CREATE TABLE IF NOT EXISTS contacts (       -- Phase 3 WhatsApp allowlist
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                phone TEXT,
-                allowlisted INTEGER DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS approval_queue ( -- Phase 3
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                recipient TEXT NOT NULL,
-                draft TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',    -- 'pending' | 'approved' | 'rejected' | 'sent'
+                phone TEXT UNIQUE,
+                allowlisted INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
@@ -125,6 +119,27 @@ def init_db():
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('quiet_hours', '22:30-07:30')"
         )
+        # Migration: added after `contacts` first shipped without it. Wrapped
+        # in try/except (same pattern as agents/state.py) since ALTER TABLE
+        # has no IF NOT EXISTS and this runs on every startup.
+        try:
+            conn.execute("ALTER TABLE contacts ADD COLUMN last_inbound_at TEXT")
+        except sqlite3.OperationalError:
+            pass
+        # Migration: `contacts.phone` shipped with an inline UNIQUE constraint
+        # in the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS is a no-op
+        # on a table created before that constraint existed — so a DB created
+        # under the old schema has no unique index at all, and
+        # record_inbound_contact()'s `ON CONFLICT(phone)` upsert then fails
+        # with "no such constraint" (same class of gotcha as state.py's
+        # column migrations, but for constraints instead of columns). A
+        # unique index is what SQLite actually checks for an upsert conflict
+        # target, so add one explicitly rather than relying on the inline
+        # constraint reapplying itself.
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 
@@ -182,6 +197,21 @@ def list_memory_notes() -> list[dict]:
             for p in sorted(MEMORY_DIR.glob("*.md"))]
 
 
+def overwrite_memory_note(name: str, content: str):
+    """Replaces a note's ENTIRE content (dashboard manual edit) — distinct
+    from write_memory_note, which only ever appends a dated bullet (her own
+    tool call). Creates the file if it doesn't exist yet."""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    path = MEMORY_DIR / _safe_note_name(name)
+    path.write_text(content, encoding="utf-8")
+
+
+def delete_memory_note(name: str):
+    path = MEMORY_DIR / _safe_note_name(name)
+    if path.exists():
+        path.unlink()
+
+
 # --- Tasks ---
 
 def add_task(description: str, due: str = None) -> int:
@@ -202,6 +232,38 @@ def get_open_tasks() -> list[dict]:
 def complete_task(task_id: int):
     with _connect() as conn:
         conn.execute("UPDATE tasks SET done = 1 WHERE id = ?", (task_id,))
+        conn.commit()
+
+
+def get_all_tasks() -> list[dict]:
+    """Open and done, for the dashboard's manual task-management view (her
+    own prompt context still only ever sees get_open_tasks())."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, description, due, done, created_at FROM tasks ORDER BY done, id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_task(task_id: int, **fields):
+    """Caller (the API endpoint, via Pydantic's exclude_unset) decides which
+    columns to touch — an explicitly-passed None (e.g. due=None to clear a
+    due date) is a real SQL NULL, not "leave untouched"; a key simply
+    absent from **fields is what's left alone."""
+    allowed = {"description", "due", "done"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    if "done" in fields and fields["done"] is not None:
+        fields["done"] = int(fields["done"])
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    with _connect() as conn:
+        conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", (*fields.values(), task_id))
+        conn.commit()
+
+
+def delete_task(task_id: int):
+    with _connect() as conn:
+        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         conn.commit()
 
 
@@ -250,6 +312,33 @@ def reschedule_reminder(reminder_id: int, next_fire_at: str):
 def delete_reminder(reminder_id: int):
     with _connect() as conn:
         conn.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+        conn.commit()
+
+
+def get_all_reminders() -> list[dict]:
+    """Fired and unfired, for the dashboard's manual reminder-management view
+    (the scheduler and her own prompt context still only ever see
+    get_pending_reminders())."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, message, fire_at, recurrence, wake_me, fired, created_at "
+            "FROM reminders ORDER BY fired, fire_at").fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_reminder(reminder_id: int, **fields):
+    """Same exclude_unset convention as update_task — an explicit
+    recurrence=None clears a recurring reminder to one-off; an absent key
+    leaves the column untouched."""
+    allowed = {"message", "fire_at", "recurrence", "wake_me"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    if "wake_me" in fields and fields["wake_me"] is not None:
+        fields["wake_me"] = int(fields["wake_me"])
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    with _connect() as conn:
+        conn.execute(f"UPDATE reminders SET {set_clause} WHERE id = ?", (*fields.values(), reminder_id))
         conn.commit()
 
 
@@ -343,3 +432,81 @@ def set_setting(key: str, value: str):
         conn.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
                      "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
         conn.commit()
+
+
+# --- Contacts (Phase 3 WhatsApp allowlist) ---
+# The allowlist itself is owner-controlled only (dashboard/API), never
+# LLM-writable — see agents/secretary_tools.py's docstring for why. Outbound
+# approval for non-allowlisted numbers reuses `pending_actions` (kind
+# "whatsapp_send") rather than a second queue table, same as every other
+# gated write in this codebase.
+
+def normalize_phone(phone: str) -> str:
+    """
+    Digits only, no '+'. Meta's webhook `from` field never includes a '+'
+    (e.g. "15551234567"), but a human typing a number into the dashboard
+    (or WHATSAPP_OWNER_NUMBER in .env) naturally writes "+1 555 123 4444" —
+    every phone comparison in this module must go through this first, or an
+    owner/allowlist check silently fails on a formatting mismatch, not a
+    real identity mismatch.
+    """
+    return re.sub(r"\D", "", phone or "")
+
+
+def add_contact(name: str, phone: str, allowlisted: bool = False) -> int:
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO contacts (name, phone, allowlisted) VALUES (?, ?, ?)",
+            (name, normalize_phone(phone), int(allowlisted)))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_contacts() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM contacts ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_contact_by_phone(phone: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM contacts WHERE phone = ?",
+                           (normalize_phone(phone),)).fetchone()
+    return dict(row) if row else None
+
+
+def is_allowlisted(phone: str) -> bool:
+    contact = get_contact_by_phone(phone)
+    return bool(contact and contact["allowlisted"])
+
+
+def set_contact_allowlisted(contact_id: int, allowlisted: bool):
+    with _connect() as conn:
+        conn.execute("UPDATE contacts SET allowlisted = ? WHERE id = ?",
+                     (int(allowlisted), contact_id))
+        conn.commit()
+
+
+def remove_contact(contact_id: int):
+    with _connect() as conn:
+        conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+        conn.commit()
+
+
+def record_inbound_contact(phone: str, name: str = None) -> dict:
+    """
+    Upserts a contact on inbound WhatsApp message and stamps last_inbound_at
+    — the 24-hour free-form messaging window (agents/whatsapp.py) is
+    measured from this, and a never-messaged-before number always starts
+    un-allowlisted (never auto-trusted just for having texted in).
+    """
+    phone = normalize_phone(phone)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO contacts (name, phone, last_inbound_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(phone) DO UPDATE SET last_inbound_at = excluded.last_inbound_at",
+            (name or phone, phone, now))
+        conn.commit()
+        row = conn.execute("SELECT * FROM contacts WHERE phone = ?", (phone,)).fetchone()
+    return dict(row)

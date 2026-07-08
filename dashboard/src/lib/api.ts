@@ -3,11 +3,13 @@
 // Every call reports into the activity-log event bus below.
 
 import type {
-  AgentStatus, CanvaStatus, CardLanguage, EditProductPayload, EditProductResult,
-  EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobStep, JobSummary, PipelineResult,
-  GcalStatus, PendingApproval, ProductRow, RegenerateImageResult, RegenerateQuoteResult,
-  SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus,
-  SecretaryUpcoming, StewardReport, TrustReport,
+  AgentStatus, CanvaStatus, CardLanguage, Contact, EditProductPayload, EditProductResult,
+  EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobBase, JobStep, JobSummary, PipelineResult,
+  GoogleStatus, NoteRow, PendingApproval, PendingXPost, ProductRow, RegenerateCardImageResult,
+  RegenerateCardQuoteResult, RegenerateImageResult, RegenerateQuoteResult, ReminderRow,
+  SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus, SecretaryUpcoming,
+  StewardReport, TaskRow, TrustReport, WhatsAppStatus, XPostApproveResult, XPostEditResult,
+  XPostRegenerateImageResult, XPostStatusResult,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -49,7 +51,7 @@ export function getActivityLog(): ActivityEntry[] {
 // ── Fetch helpers ─────────────────────────────────────────────────────────────
 
 async function request<T>(
-  method: "GET" | "POST" | "PATCH",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   body?: unknown,
   opts?: { silent?: boolean }
@@ -98,7 +100,7 @@ const patch = <T>(path: string, body?: unknown) => request<T>("PATCH", path, bod
 const jobStepsSeen = new Map<string, number>();
 const jobsCompletionLogged = new Set<string>();
 
-function logJobProgress(job: Job) {
+function logJobProgress(job: JobBase) {
   const seen = jobStepsSeen.get(job.job_id) ?? 0;
   const newSteps: JobStep[] = job.steps.slice(seen);
   for (const step of newSteps) {
@@ -176,8 +178,10 @@ export const api = {
     return res;
   },
   getCardLanguages: () => get<CardLanguage[]>("/card/languages"),
-  getPipelineStatus: async (jobId: string) => {
-    const job = await request<Job>("GET", `/pipeline/status/${jobId}`, undefined, { silent: true });
+  // Generic over the job's result payload — bookmark/card/redo jobs default
+  // to PipelineResult; x-post jobs pass <XPostJobResult> at the call site.
+  getPipelineStatus: async <TResult = PipelineResult>(jobId: string) => {
+    const job = await request<Job<TResult>>("GET", `/pipeline/status/${jobId}`, undefined, { silent: true });
     logJobProgress(job);
     return job;
   },
@@ -244,6 +248,35 @@ export const api = {
       ts: new Date().toLocaleTimeString(),
       method: "REDO", path: id, status: "", ms: 0,
       detail: `Started full redo of ${id}${guidance ? `: "${guidance}"` : ""} — job ${res.job_id}`,
+    });
+    return res;
+  },
+  regenerateCardQuote: async (id: string, guidance: string) => {
+    const res = await post<RegenerateCardQuoteResult>(`/products/${id}/regenerate-card-quote`, { guidance });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "QUOTE", path: id, status: "OK", ms: 0,
+      detail: `New quote for card ${id} (${res.old_score.toFixed(1)} → ${res.new_score.toFixed(1)}): "${res.new_quote.slice(0, 60)}..."`,
+    });
+    return res;
+  },
+  regenerateCardImage: async (id: string, guidance: string) => {
+    const res = await post<RegenerateCardImageResult>(`/products/${id}/regenerate-card-image`, { guidance });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "IMAGE", path: id, status: "OK", ms: 0,
+      detail: `New artwork for card ${id}: ${res.old_score.toFixed(1)} → ${res.new_score.toFixed(1)}.`,
+    });
+    return res;
+  },
+  regenerateCardAll: async (id: string, guidance: string) => {
+    const res = await post<{ job_id: string; status: string }>(`/products/${id}/regenerate-card-all`, {
+      guidance,
+    });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "REDO", path: id, status: "", ms: 0,
+      detail: `Started full redo of card ${id}${guidance ? `: "${guidance}"` : ""} — job ${res.job_id}`,
     });
     return res;
   },
@@ -350,8 +383,50 @@ export const api = {
     });
     return res;
   },
-  getGcalStatus: () =>
-    request<GcalStatus>("GET", "/gcal/status", undefined, { silent: true }),
+  getGoogleStatus: () =>
+    request<GoogleStatus>("GET", "/google/status", undefined, { silent: true }),
+  getWhatsAppStatus: () =>
+    request<WhatsAppStatus>("GET", "/whatsapp/status", undefined, { silent: true }),
+  getContacts: () =>
+    request<{ contacts: Contact[] }>("GET", "/secretary/contacts", undefined, { silent: true }),
+  addContact: (name: string, phone: string, allowlisted = false) =>
+    post<{ id: number }>("/secretary/contacts", { name, phone, allowlisted }),
+  setContactAllowlisted: (id: number, allowlisted: boolean) =>
+    post<{ result: string }>(`/secretary/contacts/${id}/allowlist`, { allowlisted }),
+  removeContact: (id: number) =>
+    request<{ result: string }>("DELETE", `/secretary/contacts/${id}`),
+  // Personality / custom instructions
+  getPersonality: () =>
+    request<{ custom_instructions: string }>("GET", "/secretary/personality", undefined, { silent: true }),
+  setPersonality: (custom_instructions: string) =>
+    post<{ result: string }>("/secretary/personality", { custom_instructions }),
+  // Notes (private/memory/*.md, manual view/edit)
+  getNotes: () =>
+    request<{ notes: NoteRow[] }>("GET", "/secretary/notes", undefined, { silent: true }),
+  saveNote: (name: string, content: string) =>
+    post<{ result: string }>("/secretary/notes", { name, content }),
+  deleteNote: (name: string) =>
+    request<{ result: string }>("DELETE", `/secretary/notes/${encodeURIComponent(name)}`),
+  // Tasks (manual view/edit — she still only ever sees open ones)
+  getTasks: () =>
+    request<{ tasks: TaskRow[] }>("GET", "/secretary/tasks", undefined, { silent: true }),
+  addTask: (description: string, due?: string) =>
+    post<{ id: number }>("/secretary/tasks", { description, due: due || null }),
+  editTask: (id: number, edits: { description?: string; due?: string | null; done?: boolean }) =>
+    patch<{ result: string }>(`/secretary/tasks/${id}`, edits),
+  deleteTask: (id: number) =>
+    request<{ result: string }>("DELETE", `/secretary/tasks/${id}`),
+  // Reminders (manual view/edit)
+  getReminders: () =>
+    request<{ reminders: ReminderRow[] }>("GET", "/secretary/reminders", undefined, { silent: true }),
+  addReminder: (message: string, fire_at: string, recurrence?: string, wake_me = false) =>
+    post<{ id: number }>("/secretary/reminders", { message, fire_at, recurrence: recurrence || null, wake_me }),
+  editReminder: (
+    id: number,
+    edits: { message?: string; fire_at?: string; recurrence?: string | null; wake_me?: boolean }
+  ) => patch<{ result: string }>(`/secretary/reminders/${id}`, edits),
+  deleteReminder: (id: number) =>
+    request<{ result: string }>("DELETE", `/secretary/reminders/${id}`),
   // Scheduler fires/failures -> Activity Log (titles only, hard rule 8).
   // Returns the highest notification id seen, for the next poll.
   pollSecretaryNotifications: async (afterId: number) => {
@@ -371,6 +446,81 @@ export const api = {
       });
     }
     return { notifications: res.notifications, lastId: last };
+  },
+
+  // Post to X (@peaceAntz) — giveaway outreach, never sold, never auto-posted.
+  // A background job: the team's consultation (with its round-2 human pause)
+  // runs the same way as the bookmark/card pipelines — poll getPipelineStatus
+  // <XPostJobResult> and respondToJob for the pause.
+  runXPost: async (topic: string, includeQuote: boolean) => {
+    const res = await post<{ job_id: string; status: string }>("/x-post", { topic, include_quote: includeQuote });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "RUN", path: "x-post", status: "", ms: 0,
+      detail: `Started drafting a post for "${topic}" (${includeQuote ? "with a quote" : "no direct quote"}) — job ${res.job_id}`,
+    });
+    return res;
+  },
+  getPendingXPosts: () => get<PendingXPost[]>("/x-post/pending"),
+  getDraftXPosts: () => get<PendingXPost[]>("/x-post/drafts"),
+  getPostedXPosts: () => get<PendingXPost[]>("/x-post/posted"),
+  saveXPostAsDraft: async (id: string) => {
+    const res = await post<XPostStatusResult>(`/x-post/${id}/save-draft`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "X-POST", path: id, status: "OK", ms: 0,
+      detail: `Set draft tweet ${id} aside to think about.`,
+    });
+    return res;
+  },
+  restoreXPost: async (id: string) => {
+    const res = await post<XPostStatusResult>(`/x-post/${id}/restore`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "X-POST", path: id, status: "OK", ms: 0,
+      detail: `Moved draft tweet ${id} back to pending approval.`,
+    });
+    return res;
+  },
+  editXPost: async (id: string, tweetText: string) => {
+    const res = await patch<XPostEditResult>(`/x-post/${id}`, { tweet_text: tweetText });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "X-POST", path: id, status: "OK", ms: 0,
+      detail: `Hand-edited draft tweet ${id}.`,
+    });
+    return res;
+  },
+  regenerateXPostImage: async (id: string, guidance: string) => {
+    const res = await post<XPostRegenerateImageResult>(`/x-post/${id}/regenerate-image`, { guidance });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "X-POST", path: id, status: "OK", ms: 0,
+      detail: guidance
+        ? `Regenerated the image for draft ${id}: "${guidance}"`
+        : `Regenerated the image for draft ${id} (no guidance).`,
+    });
+    return res;
+  },
+  approveXPost: async (id: string) => {
+    const res = await post<XPostApproveResult>(`/x-post/approve/${id}`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "X-POST", path: id, status: "OK", ms: 0,
+      detail: res.dry_run
+        ? `Dry-run: would have posted tweet ${id} (TWITTER_DRY_RUN=true).`
+        : `Posted to X: ${res.url ?? res.posted_tweet_id ?? id}`,
+    });
+    return res;
+  },
+  discardXPost: async (id: string) => {
+    const res = await post<{ id: string; status: string }>(`/x-post/discard/${id}`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "X-POST", path: id, status: "OK", ms: 0,
+      detail: `Discarded draft tweet ${id}.`,
+    });
+    return res;
   },
 
   // Steward

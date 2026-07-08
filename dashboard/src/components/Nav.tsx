@@ -1,13 +1,14 @@
-import { Sparkles, Images, Handshake, Settings, MessageCircleHeart } from "lucide-react";
+import { Sparkles, Images, Handshake, Settings, MessageCircleHeart, Send } from "lucide-react";
 import { cn } from "../lib/utils";
 import { NineStar } from "./NineStar";
 
-export type Tab = "pipeline" | "products" | "secretary" | "trust" | "settings";
+export type Tab = "pipeline" | "products" | "x-posts" | "secretary" | "trust" | "settings";
 
-const TABS: { id: Tab; label: string; icon: typeof Sparkles }[] = [
+const TABS: { id: Tab; label: string; icon: typeof Sparkles; avatar?: string }[] = [
   { id: "pipeline", label: "Pipeline", icon: Sparkles },
   { id: "products", label: "Products", icon: Images },
-  { id: "secretary", label: "Secretary", icon: MessageCircleHeart },
+  { id: "x-posts", label: "Post to X", icon: Send },
+  { id: "secretary", label: "Abigail", icon: MessageCircleHeart, avatar: "/abigail.jpg" },
   { id: "trust", label: "Trust", icon: Handshake },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -23,7 +24,7 @@ export function Nav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void })
         </div>
       </div>
       <div className="mt-2 flex flex-col gap-1 px-3">
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {TABS.map(({ id, label, icon: Icon, avatar }) => (
           <button
             key={id}
             onClick={() => onChange(id)}
@@ -34,7 +35,11 @@ export function Nav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void })
                 : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-200"
             )}
           >
-            <Icon className="h-4 w-4" />
+            {avatar ? (
+              <img src={avatar} alt="" className="h-5 w-5 rounded-full object-cover" />
+            ) : (
+              <Icon className="h-4 w-4" />
+            )}
             {label}
           </button>
         ))}

@@ -8,6 +8,7 @@ vector_store/
 texts/
 tasks/
 outputs/
+logs/
 
 # Python
 __pycache__/
@@ -38,3 +39,6 @@ private/
 dashboard/node_modules/
 dashboard/dist/
 dashboard/*.tsbuildinfo
+
+# Abigail's avatar — Sheraj's choice to keep her image out of the public repo
+dashboard/public/abigail*

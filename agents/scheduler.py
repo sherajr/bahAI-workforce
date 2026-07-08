@@ -14,8 +14,11 @@ Every fire and every failure is surfaced as a notification the dashboard
 turns into an Activity Log entry — event names only, never check-in content
 (hard rule 8: a silently-dead scheduler is the Canva bug all over again).
 
-Delivery in Phase 2 = dashboard: a notification row + an assistant chat
-message. Phase 3 adds WhatsApp on top of the same fire path.
+Delivery: a notification row + an assistant chat message, always (Phase 2).
+Phase 3 adds a WhatsApp send to Sheraj's own number on top of the same fire
+path, best-effort — a WhatsApp failure (not connected, API error) never
+blocks the dashboard delivery, since the dashboard notification is the
+hard guarantee (hard rule 8: a fire must never vanish silently).
 """
 
 import json
@@ -88,11 +91,19 @@ def next_occurrence(fire_at: datetime, recurrence: str) -> datetime | None:
     return nxt
 
 
-# ── Delivery (Phase 2: dashboard notification + chat message) ──────────────────
+# ── Delivery (dashboard always; WhatsApp to Sheraj's own number if connected) ──
 
 def _deliver(title: str, kind: str = "reminder"):
     store.add_notification(kind, title)
     store.add_message("assistant", f"⏰ Reminder: {title}", channel="dashboard")
+    try:
+        from agents import whatsapp
+        if whatsapp.is_configured():
+            whatsapp.send_best_effort(whatsapp.WHATSAPP_OWNER_NUMBER, f"⏰ Reminder: {title}")
+    except Exception as e:
+        # Best-effort only — the dashboard delivery above already happened,
+        # so a WhatsApp hiccup is a notice, not a lost reminder.
+        store.add_notification("scheduler_error", f"WhatsApp delivery failed: {type(e).__name__}")
 
 
 # ── Tick parts ─────────────────────────────────────────────────────────────────

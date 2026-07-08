@@ -103,6 +103,32 @@ def build_card_image_prompt(theme: str, citations: list[dict] | None = None) -> 
     ], temperature=0.8, max_tokens=300).strip()
 
 
+def build_x_post_image_prompt(topic: str, mood: str) -> str:
+    """
+    Image prompt for a POST TO X — a single social image, never printed. No
+    Bahá'í numeric motif requirements (this isn't a physical product), no
+    text overlay (X renders the tweet's own text). Lean prompt on local
+    Qwen3 per CLAUDE.md rule 1.
+    """
+    system_prompt = build_system_prompt("artist", "design")
+    user_message = (
+        f"Write an image generation prompt for a single social media image.\n\n"
+        f"Topic: {topic}\n"
+        f"Mood: {mood}\n\n"
+        "Requirements:\n"
+        "- Landscape orientation, suitable for an X (Twitter) post\n"
+        "- Serene, luminous, spiritually evocative — nature, light, gardens, sky, water\n"
+        "- No religious iconography that needs explaining, no esoteric symbols\n"
+        "- NO text, letters, or words anywhere in the image\n"
+        "- Painterly fine art style\n\n"
+        "Output ONLY the image generation prompt. No explanation, no preamble."
+    )
+    return call_llm("design", [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_message},
+    ], temperature=0.8, max_tokens=250).strip()
+
+
 def _save_image_locally(image_bytes: bytes, prefix: str = "bookmark") -> Path:
     import uuid
     filename = f"{prefix}-{uuid.uuid4().hex[:8]}.jpg"

@@ -87,6 +87,19 @@ def init_db():
                 est_cost REAL NOT NULL,
                 ts TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS pending_x_posts (
+                id TEXT PRIMARY KEY,
+                topic TEXT,
+                tweet_text TEXT,
+                image_path TEXT,
+                quote_locked TEXT,
+                quote_author TEXT,
+                constitution_score REAL,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now')),
+                posted_tweet_id TEXT
+            );
         """)
         # Migrations — safe to run on existing databases
         for col in ("image_prompt TEXT", "theme TEXT",
@@ -96,6 +109,13 @@ def init_db():
                     "recipient_feedback TEXT"):
             try:
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
+        for col in ("image_prompt TEXT", "include_quote INTEGER DEFAULT 1", "inspired_by TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE pending_x_posts ADD COLUMN {col}")
                 conn.commit()
             except Exception:
                 pass  # column already exists
@@ -280,6 +300,67 @@ def update_product(product_id: str, **kwargs):
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     with _connect() as conn:
         conn.execute(f"UPDATE products SET {set_clause} WHERE id = ?", (*fields.values(), product_id))
+        conn.commit()
+
+
+# --- Pending X (Twitter) posts — human approval queue, never auto-posted ---
+
+def create_pending_x_post(
+    topic: str,
+    tweet_text: str,
+    quote_locked: str = "",
+    quote_author: str = "",
+    constitution_score: float = 0.0,
+    image_path: str = None,
+    image_prompt: str = None,
+    include_quote: bool = True,
+    inspired_by: str = "",
+) -> str:
+    post_id = str(uuid.uuid4())[:8]
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO pending_x_posts (id, topic, tweet_text, image_path, image_prompt,"
+            " quote_locked, quote_author, constitution_score, include_quote, inspired_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (post_id, topic, tweet_text, image_path, image_prompt, quote_locked, quote_author,
+             constitution_score, int(include_quote), inspired_by)
+        )
+        conn.commit()
+    return post_id
+
+
+def get_pending_x_posts(status: str = "pending") -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pending_x_posts WHERE status = ? ORDER BY created_at DESC", (status,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_x_post(post_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM pending_x_posts WHERE id = ?", (post_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_x_post(post_id: str, **kwargs):
+    allowed = {"status", "posted_tweet_id", "tweet_text", "image_path", "image_prompt"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    with _connect() as conn:
+        conn.execute(f"UPDATE pending_x_posts SET {set_clause} WHERE id = ?",
+                    (*fields.values(), post_id))
+        conn.commit()
+
+
+def delete_x_post(post_id: str):
+    """Discarding a draft tweet drops it for good — unlike products, a
+    discarded draft has no value as a record (only what actually got posted
+    does; see get_pending_x_posts('approved') for that history)."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM pending_x_posts WHERE id = ?", (post_id,))
         conn.commit()
 
 
