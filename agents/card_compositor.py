@@ -22,6 +22,7 @@ import uuid
 
 from PIL import Image, ImageDraw, ImageFont
 
+from agents import layout as layout_opts
 from agents.compositor import (
     GOLD, WHITE, SHADOW, OUTPUTS_DIR, PRINT_DPI, _FONT_PATHS, _RESAMPLE,
     _normalise_ratio,
@@ -41,8 +42,13 @@ def _font_stack(lang_code: str | None) -> list[str]:
     return list(_FONT_PATHS)
 
 
-def _load_font(lang_code: str | None, size: int) -> ImageFont.FreeTypeFont:
-    for path in _font_stack(lang_code):
+def _load_font(lang_code: str | None, size: int,
+               override_paths: list[str] | None = None) -> ImageFont.FreeTypeFont:
+    # override_paths (the layout editor's Latin font choice) is only ever
+    # passed for Latin text (English quote + citation). Translation and
+    # disclaimer keep their script-verified fonts from LANGUAGES (rule 9), so
+    # the editor can never swap a CJK/Arabic face for one lacking its glyphs.
+    for path in ((override_paths or []) + _font_stack(lang_code)):
         try:
             return ImageFont.truetype(path, size)
         except (IOError, OSError):
@@ -125,14 +131,28 @@ def _vignette(img: Image.Image, center_alpha: int, edge_alpha: int) -> Image.Ima
 
 
 def _composite_card_front(img: Image.Image, quote_en: str, citation: str,
-                          translation: dict | None) -> Image.Image:
+                          translation: dict | None, layout: dict | None = None) -> Image.Image:
     """
     Centered text stack over a soft vignette:
       English quote → (translation) → gold rule → citation → (disclaimer, pinned bottom)
     Auto-shrinks until the stack fits; raises if even the minimum size
     overflows — an illegible card must fail loudly, never ship silently.
+
+    `layout` (agents.layout.sanitize output) tunes the ENGLISH quote + citation
+    font, the English text size and colour, and the vignette strength. The
+    translation and the two disclaimers are untouched by it — their fonts stay
+    script-verified and their text is always supplied by the caller from stored
+    data, never editable here (CLAUDE.md rules 8, 9). Default layout reproduces
+    the pre-editor render.
     """
-    composited = _vignette(img, center_alpha=118, edge_alpha=200)
+    layout = layout or layout_opts.CARD_DEFAULTS
+    en_paths = layout_opts.font_paths(layout.get("font", "palatino"))
+    en_fill = layout_opts.color_rgba(layout.get("text_color", "white"))
+    scale = float(layout.get("text_scale", 1.0))
+    vig = float(layout.get("vignette", 1.0))
+
+    composited = _vignette(img, center_alpha=max(0, min(255, int(118 * vig))),
+                           edge_alpha=max(0, min(255, int(200 * vig))))
     draw = ImageDraw.Draw(composited)
     w, h = composited.size
 
@@ -151,8 +171,9 @@ def _composite_card_front(img: Image.Image, quote_en: str, citation: str,
     citation = citation.strip()
 
     fitted = None
-    for en_size in range(52, 15, -2):
-        en_font = _load_font(None, en_size)
+    en_size_top = max(18, int(52 * scale))
+    for en_size in range(en_size_top, 15, -2):
+        en_font = _load_font(None, en_size, override_paths=en_paths)
         en_lines = _wrap(draw, quote_flat, None, en_font, max_text_w)
         en_lh = int(en_size * 1.32)
         total = len(en_lines) * en_lh
@@ -171,7 +192,7 @@ def _composite_card_front(img: Image.Image, quote_en: str, citation: str,
         cit_lh = 0
         if citation:
             cit_size = max(16, int(en_size * 0.44))
-            cit_font = _load_font(None, cit_size)
+            cit_font = _load_font(None, cit_size, override_paths=en_paths)
             cit_lines = _wrap(draw, citation, None, cit_font, max_text_w)
             cit_lh = int(cit_size * 1.3)
             total += int(en_size * 0.55) + int(h * 0.035) + len(cit_lines) * cit_lh
@@ -198,7 +219,7 @@ def _composite_card_front(img: Image.Image, quote_en: str, citation: str,
      tr_font, tr_lines, tr_lh, cit_font, cit_lines, cit_lh, total) = fitted
 
     y = margin_y + (avail_h - total) // 2
-    y = _draw_centered(draw, en_lines, None, en_font, y, en_lh, w)
+    y = _draw_centered(draw, en_lines, None, en_font, y, en_lh, w, fill=en_fill)
     if tr_lines:
         y += int(en_size * 0.5)
         y = _draw_centered(draw, tr_lines, lang, tr_font, y, tr_lh, w)
@@ -220,7 +241,8 @@ def _composite_card_front(img: Image.Image, quote_en: str, citation: str,
 
 
 def render_quote_card(image_path: str, quote_en: str, citation: str = "",
-                      translation: dict | None = None) -> dict:
+                      translation: dict | None = None, layout: dict | None = None,
+                      dest_stem: str | None = None) -> dict:
     """
     From one (portrait 2:3) artwork, produce the two 3.5"×2" card faces at a
     true 1050×600px / 300dpi:
@@ -228,6 +250,12 @@ def render_quote_card(image_path: str, quote_en: str, citation: str = "",
       Front — a higher band of the same artwork (calmer region, and visibly
               different from the back) under the vignette + quote stack.
     translation, when given, is translator.translate_quote()'s dict.
+
+    `layout` (agents.layout.sanitize output) controls presentation only — see
+    _composite_card_front; None reproduces the pre-editor render. `dest_stem`,
+    when given, writes to `<stem>-front.png`/`<stem>-back.png` (overwriting) so
+    the live layout preview reuses one file pair per product instead of
+    accumulating; default is fresh uuid-named files.
     Returns {front_path, back_path}.
     """
     img = Image.open(image_path).convert("RGBA")
@@ -241,12 +269,12 @@ def render_quote_card(image_path: str, quote_en: str, citation: str = "",
     back_img = img.crop((0, back_top, w, back_top + band_h)).resize(CARD_TARGET_PX, _RESAMPLE)
     front_img = img.crop((0, front_top, w, front_top + band_h)).resize(CARD_TARGET_PX, _RESAMPLE)
 
-    front = _composite_card_front(front_img, quote_en, citation, translation)
+    front = _composite_card_front(front_img, quote_en, citation, translation, layout)
     back = _vignette(back_img, center_alpha=0, edge_alpha=60)
 
-    uid = uuid.uuid4().hex[:8]
-    front_path = str(OUTPUTS_DIR / f"card-front-{uid}.png")
-    back_path = str(OUTPUTS_DIR / f"card-back-{uid}.png")
+    stem = dest_stem or f"card-{uuid.uuid4().hex[:8]}"
+    front_path = str(OUTPUTS_DIR / f"{stem}-front.png")
+    back_path = str(OUTPUTS_DIR / f"{stem}-back.png")
     front.convert("RGB").save(front_path, "PNG", dpi=(PRINT_DPI, PRINT_DPI))
     back.convert("RGB").save(back_path, "PNG", dpi=(PRINT_DPI, PRINT_DPI))
     return {"front_path": front_path, "back_path": back_path}

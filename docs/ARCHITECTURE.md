@@ -68,8 +68,9 @@ to the bookmark pipeline, never sold, no listing/Etsy. Differences that matter:
   is the only retrieval function the card pipeline may call. If that index
   returns nothing, the card job fails outright — it never falls back to the
   general index, which would silently break the restriction.
-- Consultation reuses `run_consultation(product="quote_card")` — same 2-round
-  structure, card-specific framing via `_PRODUCT_FRAMES` (the newcomer to the
+- Consultation reuses `run_consultation(product="quote_card")` — same 3-round
+  structure (with the same human pause between rounds 2 and 3), card-specific
+  framing via `_PRODUCT_FRAMES` (the newcomer to the
   Faith, not the Etsy buyer, is the standard of judgment; shorter quote spec;
   `source_scope` tells the Librarian turn the citations shown are already
   Book-1-restricted and must not be substituted from memory).
@@ -142,7 +143,9 @@ erDiagram
 | Tab | Component | Endpoints used |
 |---|---|---|
 | Pipeline | `PipelinePanel.tsx` | `POST /pipeline/run`, `POST /pipeline/run-card`, `GET /card/languages`, `GET /pipeline/status/{id}`, `GET /pipeline/jobs` |
-| Products | `ProductsGallery.tsx` | `GET /products`, `POST /products/{id}/improve`, `PATCH /products/{id}` (manual edit), `POST /products/{id}/revenue`, `POST /etsy/publish` |
+| Products | `ProductsGallery.tsx` | `GET /products`, `POST /products/{id}/improve`, `PATCH /products/{id}` (manual edit), `POST /products/{id}/revenue`, `POST /etsy/publish`, `GET/POST /products/{id}/layout[/preview]` (visual layout editor, `LayoutEditor.tsx` — see AGENTS.md) |
+| Post to X | `XPostsPanel.tsx` | `POST /x-post`, `GET /x-post/pending`, `.../drafts`, `.../posted`, `POST /x-post/approve/{id}`, plus edit/regenerate/discard variants — see `dashboard/src/lib/api.ts` |
+| Secretary | `SecretaryPanel.tsx` | `POST /secretary/chat` and the calendar/Gmail/Drive/Docs/Sheets/tasks/reminders/notes/contacts surface — see AGENTS.md's Secretary section and `dashboard/src/lib/api.ts` for the full list |
 | Trust | `TrustPanel.tsx` | `GET /trust/report`, `GET /agents` |
 | Settings | `SettingsPanel.tsx` | `GET /canva/status`, `GET /etsy/status` |
 

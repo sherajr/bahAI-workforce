@@ -72,11 +72,6 @@ CONSULTATION_SCRIPTURE = {
         "never to be challenged, and always to be whole-heartedly enforced.\" "
         "— Shoghi Effendi"
     ),
-    "framing_contribution": (
-        "\"He who expresses an opinion should not voice it as correct and "
-        "right but set it forth as a contribution to the consensus of "
-        "opinion.\" — 'Abdu'l-Bahá"
-    ),
 }
 
 

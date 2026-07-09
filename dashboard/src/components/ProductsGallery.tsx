@@ -12,6 +12,7 @@ import {
 } from "../lib/utils";
 import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
+import { LayoutEditor } from "./LayoutEditor";
 import { ListingDetail } from "./ListingDetail";
 import { CardRedirectCard, QuoteCardDetail } from "./QuoteCardPreview";
 import { ScoreCard } from "./ScoreCard";
@@ -265,6 +266,10 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
           {quoteCard && <FeedbackCard product={product} />}
           {listing && <ListingDetail listing={listing} />}
 
+          {/* Visual layout editor — both product types. Presentation only;
+              never edits the printed text. */}
+          <LayoutEditor product={product} />
+
           {/* Everything below acts on the listing/Etsy machinery — quote
               cards have neither (they're given away, not sold), and the API
               rejects these actions for cards anyway. */}
@@ -295,6 +300,10 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
                       rows={2}
                       className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
                     />
+                    <p className="text-xs text-amber-400/80">
+                      Editing the quote by hand marks it "no longer verified" (it won't be checked
+                      against the source texts) and re-renders the printed face to match.
+                    </p>
                   </Field>
                   <Field label="Description">
                     <textarea

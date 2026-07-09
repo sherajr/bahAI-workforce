@@ -807,15 +807,58 @@ def make_executor(event_map: dict, effects: dict):
                          if k in editable and k != "product_id" and v is not None}
                 if not edits:
                     return "No fields to edit were given."
+
+                # Mirror api.edit_product: capture old quote before edits,
+                # scrub marketing text, demote verification + re-render on
+                # real quote change (rules 4 & 8; owner hand-edit path).
+                old_quote = (listing.get("bookmark_quote") or "").strip()
                 for field, value in edits.items():
                     listing[field] = value
+                new_quote = (listing.get("bookmark_quote") or "").strip()
+                quote_changed = "bookmark_quote" in edits and new_quote != old_quote
+
+                from agents.scribe import _sanitize_claims
+                listing = _sanitize_claims(listing)
+
+                if quote_changed:
+                    listing["quote_verified"] = False
+
                 update_kwargs = {"listing_copy": json.dumps(listing)}
                 if "title" in edits:
-                    update_kwargs["title"] = edits["title"]
+                    # Post-scrub title, not the raw edit value.
+                    update_kwargs["title"] = listing.get("title")
+
+                rerender_note = None
+                if quote_changed:
+                    try:
+                        from agents.compositor import render_bookmark_pair
+                        from agents import layout as layout_opts
+                        layout = layout_opts.sanitize(
+                            "bookmark",
+                            json.loads(product.get("layout_json") or "null"),
+                        )
+                        rendered = render_bookmark_pair(
+                            product.get("image_url") or "",
+                            listing.get("bookmark_quote") or "",
+                            layout=layout,
+                        )
+                        update_kwargs["front_image"] = rendered["front_path"]
+                        update_kwargs["back_image"] = rendered["back_path"]
+                    except Exception as e:
+                        rerender_note = (
+                            f"Text saved, but the printed face could not be "
+                            f"re-rendered ({e})."
+                        )
+
                 state.update_product(product_id, **update_kwargs)
                 changed = ", ".join(edits.keys())
                 effects["workspace"].append(f"edited product {product_id} ({changed})")
-                return f"Updated {changed} on product {product_id}."
+                msg = f"Updated {changed} on product {product_id}."
+                if quote_changed:
+                    msg += " The quote is no longer Librarian-verified."
+                if rerender_note:
+                    msg += f" {rerender_note}"
+                return msg
 
             else:
                 return f"Unknown tool: {name}"

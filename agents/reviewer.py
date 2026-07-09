@@ -79,7 +79,8 @@ def score(
     consultation_block = ""
     if consultation_transcript:
         consultation_block = (
-            "\n\nCONSULTATION TRANSCRIPT — the team consulted in two rounds before writing:\n"
+            "\n\nCONSULTATION TRANSCRIPT — the team consulted over three rounds (with Sheraj's "
+            "pause between the second and third) before writing:\n"
         )
         for turn in consultation_transcript:
             agent = turn.get("agent", "?")
@@ -367,7 +368,8 @@ def score_quote_card(
     consultation_block = ""
     if consultation_transcript:
         consultation_block = (
-            "\n\nCONSULTATION TRANSCRIPT — the team consulted in two rounds before this card:\n"
+            "\n\nCONSULTATION TRANSCRIPT — the team consulted over three rounds (with Sheraj's "
+            "pause between the second and third) before this card:\n"
         )
         for turn in consultation_transcript:
             consultation_block += (

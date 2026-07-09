@@ -1,0 +1,296 @@
+# Project Status
+
+This is the shared hand-off document for everyone working on this repo —
+Sheraj and whichever AI coding tool is in the seat (Claude Code, Codex,
+Antigravity, Grok). Read the Snapshot before starting anything nontrivial;
+update it and add one Activity Log entry when you finish a chunk of work.
+See `AGENTS.md` for the full technical orientation — this file is just
+"what's true right now," not how the system works.
+
+**How to keep this useful, not noise:**
+- Snapshot = current reality, edited in place (don't accumulate old facts —
+  delete what's no longer true).
+- Activity Log = one short entry per session, newest first, prepended. A
+  paragraph, not a diff — point at files/commits, don't paste code.
+- Keep the log to roughly the last 15–20 entries. When it grows past that,
+  trim the oldest ones off the bottom — full history is always in `git log`.
+- Note which tool/model did the work; it helps everyone calibrate context
+  ("was this reviewed by a human yet?", "which tool wrote this prompt?").
+
+---
+
+## Snapshot (as of 2026-07-09)
+
+Sheraj approved committing and pushing the current working tree on
+2026-07-09. After that push, start from `git status` as usual before
+making more changes.
+
+**What's live and working** (committed, in production):
+- Bookmark pipeline (Librarian → Artist → consultation → Scribe → Reviewer →
+  Compositor → Canva autofill → Etsy draft) and the Quote Card giveaway
+  pipeline (Ruhi Book 1 only, optional translation).
+- Abigail (the Secretary) — Phases 1–3: dashboard chat + WhatsApp, real
+  Claude tool-calling for every read/write, Google Workspace integration.
+  Phase 4 (recovery rhythms) not started.
+- Trust/Steward reporting, print sheets, X-post giveaway pipeline.
+
+**What's new and committed/pushed on 2026-07-09:**
+- **Native visual layout editor** (both bookmarks and quote cards) —
+  `agents/layout.py`, threaded through both compositors, 3 new API endpoints
+  (`GET/POST /products/{id}/layout`, `.../layout/preview`), and
+  `LayoutEditor.tsx` in the product drawer. Adjusts font/size/position/
+  colour/shading only — never the printed text (verified: locked quote,
+  Ruhi Book 1 restriction, and script-verified translation fonts all hold
+  through it). Built in response to Sheraj's ask for Canva-like editing;
+  Sheraj explicitly chose "build it yourself, skip the Canva round-trip."
+  Grok has already exercised this live in production (see Activity Log
+  2026-07-08 20:0x below) — it works.
+- **Named roster + avatars** — `dashboard/src/lib/utils.ts`'s `ROSTER` maps
+  backend ids to display names (Ruth/Librarian, Theo/Artist, Clara/Scribe,
+  Amos/Reviewer, Nora/Steward, Sofia/Translator, alongside Abigail), wired
+  into the Trust tab and consultation transcript. Display layer only —
+  backend still keys on lowercase ids. **Six avatar portraits were generated
+  via the Artist's xAI pipeline and a montage was sent to Sheraj for
+  approval — his response on whether to keep or regenerate any of them is
+  still pending.** Avatars live in `dashboard/public/roster/` (gitignored,
+  private, like Abigail's photo).
+- **Manual-edit honesty fix** — hand-editing a bookmark's quote via
+  `PATCH /products/{id}` now flags `quote_verified: false` (dashboard shows
+  a warning) and re-renders the printed face, and the honesty scrub
+  (`_sanitize_claims`) now runs on every hand-edited field, closing a
+  pre-existing gap. Owner decision: keep the field editable, don't lock it —
+  just make the edit visibly honest.
+- **Multi-coder infra** (this session, in progress) — `AGENTS.md` created as
+  the canonical tool-agnostic instructions file; `CLAUDE.md` reduced to an
+  `@AGENTS.md` import so Claude Code still auto-loads full context without
+  duplicating it; this file (`STATUS.md`) created; `requirements.txt` fixed
+  (was missing `chromadb`, `chonkie`, `beautifulsoup4`, which are real
+  runtime/setup-script dependencies).
+
+**Deferred / proposed but not started** (from
+`docs/improvement-plan-2026-07-08.md`'s Part 2 audit — Sheraj hasn't asked
+for these yet, listed so nobody re-discovers them from scratch):
+- Retire the vestigial "Operator" and "Producer" labels (they're not real
+  agents — Operator is just a task-assignee string, Producer is one log
+  line at Etsy-publish time).
+- Hide non-persona rows (`compositor`, `consultation`) from the Trust tab —
+  they accumulate trust-table stats but no gate ever reads them.
+- Relabel the Canva-autofill `log_run` entry from `"artist"` to whichever
+  persona ends up representing publishing (currently misattributed).
+- ~~Remove the dead `framing_contribution` scripture entry and unused
+  `GROK_TASK_TYPES` entries~~ — **done, see Activity Log below** (dispatched
+  to Grok as the first real orchestration test).
+- ~~Fix Codex's local-model routing~~ — **worked around 2026-07-09** without
+  touching his config: per-invocation CLI overrides route dispatches to the
+  cloud (`gpt-5.5`); exact command in `AGENTS.md`. The config file itself
+  still points at the never-pulled `gemma4` — only matters if Sheraj wants
+  the desktop app's local mode working.
+- ~~Rule-4 gap in Abigail's `edit_product` tool~~ — **FIXED 2026-07-09**
+  (Sheraj approved; implemented by Grok under Claude supervision, verified
+  live, backend restarted — see Activity Log). Her tool now mirrors the
+  dashboard PATCH path: `_sanitize_claims` scrub, `quote_verified=false`
+  demotion on quote change, re-render that degrades to a note.
+- **New (low severity):** corrupted non-dict `layout_json` crashes
+  `GET /products/{id}/layout` (`layout.py::sanitize` assumes `.get()`);
+  not reachable from the POST endpoints (Pydantic rejects non-dict).
+- **New (UX, advisory):** 5 ranked LayoutEditor improvements from
+  Antigravity's review, top one verified real: the "Saved." badge
+  (`LayoutEditor.tsx:193`) never resets when sliders change afterward;
+  also no unsaved-changes guard on close, no confirm on Reset.
+
+**Blocked on Sheraj:**
+- Avatar approval (keep the six as generated, or regenerate any).
+- Whether to fix the Secretary rule-4 gap + the smaller findings above
+  (recommended next step), and whether to proceed with the older deferred
+  cleanup list.
+
+---
+
+## Activity Log (newest first)
+
+### 2026-07-09 - Codex - committed and pushed current work
+Sheraj asked Codex to push the latest changes to GitHub, then explicitly
+approved committing the current working tree. Codex updated this handoff note
+so it no longer describes the work as waiting for commit approval, then
+packaged the accumulated layout editor, roster/dashboard, Secretary honesty,
+multi-coder docs, architecture, and requirements changes into one commit for
+push to `origin/master`.
+
+### 2026-07-09 — Claude Code (Fable 5), orchestrating Grok — first WRITE
+dispatch: fixed the Secretary rule-4 gap
+Sheraj approved fixing the gap found earlier today. Claude scoped the fix
+itself first (read `api.py::edit_product` 2358-2432 as the reference
+implementation), then dispatched a precisely-specified edit to Grok
+(foreground, `--permission-mode acceptEdits`, Edit/Write allowed, all
+git-mutating commands denied). Grok's diff was exactly in scope: only
+`agents/secretary_tools.py`'s `edit_product` branch, now mirroring the
+dashboard path — `_sanitize_claims` on every edit, `quote_verified=false`
++ face re-render (degrading to a note on failure) on a real quote change,
+and the post-scrub title persisted instead of the raw edit value. Claude
+verified independently: full diff read, `import agents.secretary_tools` +
+`import agents.api` clean (no circular imports from the new lazy imports),
+and a live behavioral test through the REAL tool executor on a throwaway
+product — scrub fired ("handcrafted" → "made-to-order"), demotion + reply
+wording correct, missing-artwork re-render degraded to a note without
+blocking, test row deleted after. Backend restarted per the documented
+procedure (killed PID on :8765, `Start-ScheduledTask`, `/products` → 200)
+so the LIVE Abigail process carries the fix. Note: Grok's handoff text
+didn't come back through the pipe this time (output ended after its
+progress lines) — didn't matter, since verification never trusts the
+handoff anyway.
+
+### 2026-07-09 — Claude Code (Fable 5), orchestrating ALL THREE workers —
+full three-agent orchestration confirmed working
+Per Sheraj's ask to "get them all working and confirm they work": unblocked
+Codex without touching his config file (per-invocation `-c
+model_provider=openai -m gpt-5.5` overrides — the only cloud slugs his
+ChatGPT account accepts are `gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`; the
+`gpt-*-codex` names are rejected), then dispatched three independent
+READ-ONLY tasks in parallel (chosen read-only deliberately — the tree is
+full of uncommitted work, so no dispatch could collide with it or with each
+other). Grok audited hard rule 4 across every listing write path; Codex
+reviewed `layout.py::sanitize()` (it live-probed the function with real
+Python calls, not just reading); Antigravity UX-reviewed `LayoutEditor.tsx`.
+Antigravity's FIRST dispatch misfired instructively: `--print` takes the
+prompt as its own flag value, so `--print --mode plan "<prompt>"` fed it the
+literal string `--mode` as the prompt, and it ran in its own scratch dir
+instead of the repo — both fixed (`-p "<prompt>"` last + `--add-dir`),
+documented in `AGENTS.md`. Every worker claim was independently re-verified
+by Claude reading the actual code before being accepted. Results: **one
+real rule-4 violation found** (Abigail's `edit_product` tool skips the
+honesty scrub — see Snapshot), one low-severity crash edge, five UX
+recommendations (top one verified). No repo code was changed by any worker
+(verified via `git status` — only Claude's own doc edits to AGENTS.md +
+STATUS.md this session). Fixes not yet applied; recommended as next step.
+
+### 2026-07-09 — Claude Code (Sonnet), orchestrating Grok — first real
+multi-agent dispatch test
+Per Sheraj's request to have Claude act as an orchestration layer for
+Grok/Codex/Antigravity ("give them grunt work while you monitor them and
+make sure the goal is achieved"), and his answers to 3 follow-up questions
+(Moderate autonomy — agents may edit + run safe local commands without
+asking, never git push/destructive ops; install Codex now; test it for real
+today): installed the Codex CLI (`npm install -g @openai/codex`) — its
+ChatGPT auth actually works (confirmed via its own log), but local dispatch
+is currently blocked by a pre-existing config pointing at a never-pulled
+Ollama model (`gemma4`) — not something Claude created, left for Sheraj to
+decide. Confirmed Grok and Antigravity (`agy`) are both already installed
+and authenticated on this machine.
+
+Dispatched a real, precisely-scoped task to Grok: remove the dead
+`framing_contribution` entry from `consultation.py`'s `CONSULTATION_SCRIPTURE`
+and the three genuinely-unused entries from `router.py`'s `GROK_TASK_TYPES`
+(Claude first re-verified the original claim with a proper multiline grep
+across every `call_llm()` call site — the real dead set turned out to be
+`{"copywriting", "review", "complex_analysis"}`, not the slightly-wrong set
+noted in an earlier session's audit; `"copy"` stayed because it's used by
+`router.py`'s own manual self-test). First dispatch attempt (backgrounded,
+`--permission-mode acceptEdits`) was correctly blocked by Claude Code's own
+safety classifier for running unsupervised with edit permissions — re-ran in
+the **foreground** instead so a human (Claude, actively) was watching it
+complete. Grok's result was independently re-verified (not just trusted):
+`git diff` read in full, a fresh import check, and a repo-wide grep for the
+removed strings — all confirmed exactly the intended two-file, two-change
+diff, nothing else touched, and Claude's own earlier uncommitted edit to
+`router.py` (the docstring fix, see below) survived untouched.
+
+**Real finding, not assumed going in**: Grok's `--worktree <name>` flag did
+NOT actually isolate the session when combined with headless `--prompt-file`
+mode — `git worktree list` showed no new worktree was created; Grok edited
+the main working tree directly. Isolation can't be assumed and must be
+checked with `git status`/`git diff` after every dispatch — documented as a
+hard caveat in `AGENTS.md`'s new "Dispatching grunt work" section, along
+with the exact working command pattern for future sessions (any tool) to
+reuse rather than rediscover.
+
+### 2026-07-09 — Claude Code (Sonnet)
+Set up multi-coder infrastructure per Sheraj's request (he now has Claude
+Code, Codex, Antigravity, and Grok all working on this repo). Created
+`AGENTS.md` as the single canonical, tool-agnostic instructions file
+(previously `CLAUDE.md`'s content, which was already written generically);
+reduced `CLAUDE.md` to an `@AGENTS.md` import so Claude Code keeps
+auto-loading full context without a second copy to drift. Created this file
+(`STATUS.md`) as the living snapshot + hand-off log, seeded with reconstructed
+history from `git log` and this session's own findings. Audited
+`requirements.txt` against actual imports in `agents/`/`scripts/` and found
+three real gaps (`chromadb`, `chonkie`, `beautifulsoup4` are imported but
+were never listed) — fixed. No application code changed.
+
+### 2026-07-09 — Claude Code (Sonnet) — Part 2 of the editor/roster plan
+Per Sheraj's answers to 4 clarifying questions: (1) manual quote edits stay
+allowed but now flag `quote_verified: false` and re-render + always run the
+honesty scrub (`agents/api.py::edit_product`); (2) named the roster with
+everyday names (Ruth/Theo/Clara/Amos/Nora/Sofia) alongside Abigail; (3)
+generated six avatar portraits via the Artist's own xAI image pipeline in a
+consistent Persian-miniature style (~$0.30 metered spend) — sent to Sheraj
+as a montage for approval, **response still pending**; (4) avatars kept
+private/gitignored like Abigail's photo. Wired the roster into
+`TrustPanel.tsx` and `ConsultationTranscript.tsx` via a new `RosterAvatar`
+component (falls back to an initial if the image is missing) and a
+`ROSTER`/`rosterFor()` registry in `dashboard/src/lib/utils.ts` — display
+layer only, backend trust/log keys unchanged. Also fixed two small stale-
+docs issues found during the earlier audit: `router.py`'s docstring falsely
+claiming the Secretary's tool-calling path is read-only, and Reviewer
+prompts saying "the team consulted in two rounds" when it's actually three.
+Verified live: dashboard typecheck clean, `edit_product` tested end-to-end
+against a real product (no-op edit, quote-change flag + re-render, then
+fully restored to original state).
+
+### 2026-07-08 ~20:00–20:03 — Grok (discovered via DB inspection, not
+observed live)
+While unattended, Grok exercised the newly-built layout editor on a real
+quote card (`0eaf3ea5`, "The betterment of the world…") — saved a custom
+layout (Palatino regular, 75% text size, stronger vignette) that rendered
+correctly, including the Chinese translation correctly keeping its own
+script-verified font untouched by the English-side font/colour change (rule
+9 held). Also ran a fresh card pipeline end-to-end, producing a new card
+(`ccfbf8f4`, "Beware, O people of Bahá…", Spanish translation, requoted once
+during revision). Both actions went through the running app cleanly with no
+code changes — this was live validation that the layout editor works in
+production, found by a later Claude Code session reviewing `workforce.db`
+timestamps and `task_runs` after the fact.
+
+### 2026-07-08 — Claude Code (Fable 5 / Sonnet) — visual layout editor
+(Part 1) + full roster/consultation audit (Part 2, written up as a plan)
+Researched Canva's Connect API capabilities (autofill, editor return-
+navigation, import/export — confirmed no server-side design-editing API
+exists for partner integrations) and wrote
+`docs/improvement-plan-2026-07-08.md` covering: a proposed editor
+architecture, a full audit of every real agent (Librarian/Artist/Scribe/
+Reviewer/Translator/Abigail, plus debunking "Operator"/"Producer"/"Steward"
+as non-agents), and a consultation-logic health check (all 6 scripture
+citations verified authentic and correctly attributed; rules 11/12's Ruhi
+Book 1 restriction and grounding re-check confirmed airtight). Sheraj's
+response: skip the Canva round-trip entirely, "build it out yourself." Built
+the native editor: `agents/layout.py` (font registry, defaults, the
+`sanitize()` boundary that clamps untrusted input and never carries text),
+threaded `layout`/`dest_stem` params through `compositor.py` and
+`card_compositor.py` (defaults reproduce the pre-editor render byte-for-
+byte — verified), added `layout_json` column + 3 API endpoints, and built
+`LayoutEditor.tsx`. Verified offline (render tests both product types) and
+live (real HTTP calls against the running server, save + persistence + a
+visual read-back of the rendered PNGs).
+
+### 2026-07-07 — commit `bada6fc`
+"Migrate Secretary to real tool-calling, add WhatsApp + Google Workspace,
+and give her a Products-tab presence." Replaced the earlier custom
+`<remember>`/`<task>`/`<event>`/`<remind>` text-tag design with real Claude
+tool-calling (`router.call_claude_agentic` + `agents/secretary_tools.py`) —
+the text-tag approach was unreliable in long sessions (Abigail would narrate
+an action with no tag behind it). Added WhatsApp (Meta Cloud API, her own
+number) and the full Google Workspace suite (Gmail, Drive, Docs, Sheets,
+Slides) behind one shared OAuth module.
+
+### 2026-07-06 — commits `dcbf5af`, `a0430d9`
+Print sheet generation (`agents/print_sheet.py`, cut-tolerant multi-up PDF).
+Secretary Phases 1–2 (calendar, badí dates, scheduler) plus hardening of
+Etsy honesty/pricing rules and the deterministic quote-grounding re-check.
+
+### 2026-07-05 — commit `b692419`
+Added the Quote Cards giveaway product line (Ruhi Book 1 restricted
+sourcing, multi-script rendering, translation) and improved the multi-agent
+consultation to its current 3-round-with-human-pause structure.
+
+*(Earlier history — n8n retirement, the original async pipeline, Etsy
+integration, initial Phases 1–4 — is in `git log`; not reproduced here to
+keep this file readable. Run `git log --oneline` for the full list.)*

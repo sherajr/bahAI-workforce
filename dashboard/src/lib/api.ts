@@ -5,7 +5,8 @@
 import type {
   AgentStatus, CanvaStatus, CardLanguage, Contact, EditProductPayload, EditProductResult,
   EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobBase, JobStep, JobSummary, PipelineResult,
-  GoogleStatus, NoteRow, PendingApproval, PendingXPost, ProductRow, RegenerateCardImageResult,
+  GoogleStatus, LayoutOptions, LayoutRenderResult, NoteRow, PendingApproval, PendingXPost,
+  ProductLayout, ProductRow, RegenerateCardImageResult,
   RegenerateCardQuoteResult, RegenerateImageResult, RegenerateQuoteResult, ReminderRow,
   SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus, SecretaryUpcoming,
   StewardReport, TaskRow, TrustReport, WhatsAppStatus, XPostApproveResult, XPostEditResult,
@@ -318,6 +319,21 @@ export const api = {
       ts, method: "PRINT", path, status: "OK", ms: Math.round(performance.now() - started),
       detail: `Downloaded printable sheet for product ${id}.`,
     });
+  },
+  // Visual layout editor — presentation only, never text. previewLayout is a
+  // silent, high-frequency call (fires as sliders move); saveLayout is logged.
+  getLayout: (id: string) =>
+    request<LayoutOptions>("GET", `/products/${id}/layout`, undefined, { silent: true }),
+  previewLayout: (id: string, layout: ProductLayout) =>
+    request<LayoutRenderResult>("POST", `/products/${id}/layout/preview`, { layout }, { silent: true }),
+  saveLayout: async (id: string, layout: ProductLayout) => {
+    const res = await post<LayoutRenderResult>(`/products/${id}/layout`, { layout });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "LAYOUT", path: id, status: "OK", ms: 0,
+      detail: `Saved layout for product ${id} (font ${layout.font}, text ${layout.text_color}).`,
+    });
+    return res;
   },
   recordFeedback: async (id: string, text: string) => {
     const res = await post<{ product_id: string; recipient_feedback: string }>(

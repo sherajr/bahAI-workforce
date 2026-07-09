@@ -13,6 +13,13 @@ no Etsy. See `docs/fable5-briefing-quote-cards.md` for the design brief.
 
 **How the app works, visually: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).**
 
+> **AI coding agent? Start here.** Read [AGENTS.md](AGENTS.md) (full dev
+> orientation — commands, pipelines, 28 hard rules, gotchas; canonical for
+> every tool, not just Claude Code) and [STATUS.md](STATUS.md) (what's
+> currently in progress and what recent sessions did) before making changes.
+> This repo is worked on by more than one AI coding tool — check
+> `git status` and STATUS.md for in-flight work before you start.
+
 ## Running it
 
 ```bash
@@ -30,8 +37,12 @@ plus API keys in `.env` (xAI for Grok + image generation; Canva and Etsy optiona
 
 | Path | What it is |
 |---|---|
+| `AGENTS.md` | **Canonical dev orientation for any AI coding tool** — commands, pipelines, hard rules, gotchas |
+| `CLAUDE.md` | Thin `@AGENTS.md` import so Claude Code auto-loads the same content — don't edit directly |
+| `STATUS.md` | Living snapshot of what's in progress + a running log of recent sessions across all tools |
 | `agents/api.py` | FastAPI backend — all endpoints + the pipeline orchestration |
-| `agents/consultation.py` | The 4-agent, 2-round consultation (scripture-grounded prompts) |
+| `agents/layout.py` | Visual layout editor's presentation knobs + the `sanitize()` boundary (never carries text) |
+| `agents/consultation.py` | The 4-agent, 3-round consultation (scripture-grounded prompts, one human pause) |
 | `agents/librarian.py` | Vector search over Bahá'í writings (ChromaDB); citation verification |
 | `agents/artist.py` | Image prompt building + xAI image generation |
 | `agents/scribe.py` | Writes/revises the Etsy listing; mechanical edit application; honesty scrubbing |
@@ -43,10 +54,11 @@ plus API keys in `.env` (xAI for Grok + image generation; Canva and Etsy optiona
 | `agents/state.py` | SQLite persistence (`workforce.db`): tasks, runs, agents, products |
 | `agents/canva.py` / `agents/etsy.py` | OAuth + publishing integrations |
 | `agents/system_prompt_builder.py` | Builds each agent's system prompt from the constitution |
-| `dashboard/` | React + TypeScript + Tailwind UI (Pipeline, Products, Trust, Settings tabs) |
+| `dashboard/` | React + TypeScript + Tailwind UI (Pipeline, Products, Trust, Secretary, Settings tabs) |
 | `bahai-workforce-constitution.md` | The 9 principles every product is scored against |
 | `scripts/` | One-time setup (`download_texts`, `ingest_texts`) and diagnostics |
 | `docs/ARCHITECTURE.md` | Diagrams + deeper conventions for anyone (human or AI) changing the code |
+| `docs/improvement-plan-2026-07-08.md` | Proposal doc: layout editor architecture + full agent-roster/consultation audit |
 
 Generated at runtime (gitignored): `workforce.db`, `outputs/` (images),
 `vector_store/` (ChromaDB), `texts/` (source writings), `canva_token.json`.

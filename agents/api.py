@@ -42,6 +42,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"), override=True)
 
 from agents.librarian import retrieve, retrieve_ruhi_book1
+from agents import layout as layout_opts
 from agents.state import (
     init_db, create_task, update_task_status, log_run, get_all_agent_statuses,
     create_product, update_product, get_all_products,
@@ -2357,9 +2358,23 @@ class ProductEditRequest(BaseModel):
 @app.patch("/products/{product_id}")
 def edit_product(product_id: str, req: ProductEditRequest):
     """Directly overwrite one or more listing fields with human-supplied text.
-    Bypasses the Scribe/Reviewer pipeline entirely — for when Sheraj wants to
-    hand-fix a listing rather than re-run consultation."""
+    Bypasses the Scribe/Reviewer pipeline — for when Sheraj wants to hand-fix a
+    listing rather than re-run consultation. Two honesty guardrails still apply
+    and are NOT bypassable by a hand edit:
+
+      * the same deterministic scrub every pipeline write ends in
+        (scribe._sanitize_claims) runs on the edited marketing text, so a typed
+        "handcrafted" or motif count is normalised exactly as if an agent had
+        written it (rules 4 & 8). It only touches title/description/price_note/
+        tags — never the quote itself.
+      * editing bookmark_quote is allowed (owner decision, 2026-07) but the
+        result is no longer Librarian-verified: the product is flagged
+        quote_verified=false (the dashboard shows a "quote no longer verified"
+        note), and the printed face is re-rendered on the same artwork so the
+        image never silently disagrees with the new words.
+    """
     from agents.state import _connect
+    from agents.scribe import _sanitize_claims
 
     with _connect() as conn:
         row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
@@ -2377,15 +2392,161 @@ def edit_product(product_id: str, req: ProductEditRequest):
     if not edits:
         raise HTTPException(status_code=400, detail="No fields provided to edit")
 
+    old_quote = (listing.get("bookmark_quote") or "").strip()
     for field, value in edits.items():
         listing[field] = value
+    new_quote = (listing.get("bookmark_quote") or "").strip()
+    quote_changed = "bookmark_quote" in edits and new_quote != old_quote
+
+    # Non-bypassable honesty scrub (marketing text only; never the quote).
+    listing = _sanitize_claims(listing)
+
+    if quote_changed:
+        # A hand-typed quote is not Librarian-verified — mark it so nothing
+        # downstream or on the dashboard presents it as grounded scripture.
+        listing["quote_verified"] = False
 
     update_kwargs = {"listing_copy": json.dumps(listing)}
     if "title" in edits:
-        update_kwargs["title"] = edits["title"]
+        update_kwargs["title"] = listing.get("title")
+
+    rerender_note = None
+    if quote_changed:
+        # Keep the printed face in sync with the new quote — same artwork, the
+        # product's saved layout. A re-render hiccup must never block the text
+        # edit, so it degrades to a note.
+        try:
+            from agents.compositor import render_bookmark_pair
+            layout = layout_opts.sanitize("bookmark", json.loads(product.get("layout_json") or "null"))
+            rendered = render_bookmark_pair(product.get("image_url") or "",
+                                            listing.get("bookmark_quote") or "", layout=layout)
+            update_kwargs["front_image"] = rendered["front_path"]
+            update_kwargs["back_image"] = rendered["back_path"]
+        except Exception as e:
+            rerender_note = f"Text saved, but the printed face could not be re-rendered ({e})."
+
     update_product(product_id, **update_kwargs)
 
-    return {"product_id": product_id, "listing": listing}
+    return {"product_id": product_id, "listing": listing,
+            "quote_verified": listing.get("quote_verified", True),
+            "rerender_note": rerender_note}
+
+
+# --- Visual layout editor (both product types) -------------------------------
+#
+# Lets Sheraj adjust how a face LOOKS — font, text size/position, colour,
+# gradient/vignette, the star/rule toggles — and re-render, without ever
+# touching what it SAYS. The printed quote, citation, translation, and the
+# code-written disclaimers are pulled from the product's stored data at render
+# time (below); nothing about the text can be edited through this path, so the
+# honesty rules that govern that text (locked bookmark quote, verbatim Ruhi
+# Book 1 card quote, script-verified translation fonts, code-appended
+# disclosures) are preserved by construction. agents.layout.sanitize clamps
+# every incoming value to a safe range before it reaches a compositor.
+
+def _render_product_faces(product: dict, layout: dict, dest_stem: str | None = None) -> dict:
+    """
+    Re-render a product's front/back faces with the given (already-sanitised)
+    layout, reading ALL text from the product's stored data — never from the
+    request. Dispatches on product_type. Returns {front_path, back_path}.
+    Raises HTTPException(422) on a missing artwork or text that won't fit.
+    """
+    ptype = product.get("product_type") or "bookmark"
+    image_path = product.get("image_url") or ""
+    if not image_path or not Path(image_path).exists():
+        raise HTTPException(
+            status_code=422,
+            detail="This product's original artwork file is missing, so it can't be re-rendered.",
+        )
+    try:
+        if ptype == "quote_card":
+            from agents.card_compositor import render_quote_card
+            card_copy = json.loads(product.get("listing_copy") or "{}")
+            return render_quote_card(
+                image_path,
+                card_copy.get("quote") or "",
+                card_copy.get("citation") or "",
+                translation=_card_translation_dict(card_copy),
+                layout=layout, dest_stem=dest_stem,
+            )
+        from agents.compositor import render_bookmark_pair
+        listing = json.loads(product.get("listing_copy") or "{}")
+        return render_bookmark_pair(
+            image_path, listing.get("bookmark_quote") or "",
+            layout=layout, dest_stem=dest_stem,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # Card compositor raises when text won't fit legibly (e.g. text size
+        # cranked too high) — surface it as guidance, not a 500.
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not re-render the faces: {e}")
+
+
+class LayoutRequest(BaseModel):
+    layout: dict = {}
+
+
+@app.get("/products/{product_id}/layout")
+def get_product_layout(product_id: str):
+    """Current layout (defaults filled in) plus the fonts/colours/ranges the
+    dashboard needs to render the editor controls for this product type."""
+    product = _load_product_or_404(product_id)
+    ptype = product.get("product_type") or "bookmark"
+    saved = None
+    if product.get("layout_json"):
+        try:
+            saved = json.loads(product["layout_json"])
+        except (json.JSONDecodeError, TypeError):
+            saved = None
+    return {
+        "product_id": product_id,
+        "current": layout_opts.sanitize(ptype, saved),
+        "has_saved": bool(saved),
+        **layout_opts.options(ptype),
+    }
+
+
+@app.post("/products/{product_id}/layout/preview")
+def preview_product_layout(product_id: str, req: LayoutRequest):
+    """Re-render with the requested layout to temporary per-product preview
+    files WITHOUT saving — drives the live preview as Sheraj adjusts controls."""
+    product = _load_product_or_404(product_id)
+    ptype = product.get("product_type") or "bookmark"
+    clean = layout_opts.sanitize(ptype, req.layout)
+    rendered = _render_product_faces(product, clean, dest_stem=f"layout-preview-{product_id}")
+    return {
+        "front_image_web": _web_image_path(rendered["front_path"]),
+        "back_image_web": _web_image_path(rendered["back_path"]),
+        "layout": clean,
+    }
+
+
+@app.post("/products/{product_id}/layout")
+def save_product_layout(product_id: str, req: LayoutRequest):
+    """Re-render with the requested layout and SAVE it as the product's
+    front/back faces (and remember the layout for next time). Text is untouched;
+    only presentation changes, so no review/score is affected."""
+    product = _load_product_or_404(product_id)
+    ptype = product.get("product_type") or "bookmark"
+    clean = layout_opts.sanitize(ptype, req.layout)
+    rendered = _render_product_faces(product, clean)  # fresh files for the durable render
+    update_product(
+        product_id,
+        front_image=rendered["front_path"], back_image=rendered["back_path"],
+        layout_json=json.dumps(clean),
+    )
+    # Mechanical human-driven edit — passed_review=None so it never moves the
+    # compositor's trust score (CLAUDE.md rule 14).
+    log_run(product_id, "compositor", "layout_edit", ptype, json.dumps(clean)[:200])
+    return {
+        "product_id": product_id,
+        "front_image_web": _web_image_path(rendered["front_path"]),
+        "back_image_web": _web_image_path(rendered["back_path"]),
+        "layout": clean,
+    }
 
 
 # --- Canva Connect API endpoints ---

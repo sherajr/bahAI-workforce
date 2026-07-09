@@ -35,7 +35,7 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 # Task types routed to Grok; everything else goes local.
 # Sheraj's directive (2026-07): only the Reviewer and Artist use the paid xAI API
 # (they need vision); the Scribe and Librarian run on the local model.
-GROK_TASK_TYPES = {"copy", "copywriting", "review", "creative_writing", "complex_analysis", "reviewer"}
+GROK_TASK_TYPES = {"copy", "creative_writing", "reviewer"}
 
 # Flat per-call cost estimates (USD) for the Steward's metered P&L. Rough but
 # consistent — refine against real xAI invoices; the point is that repaint-heavy
@@ -231,10 +231,13 @@ def _claude_round(messages: list[dict], system: str, max_tokens: int, tools=None
 def call_claude_agentic(messages: list[dict], system: str, tools: list[dict],
                         executor, max_tokens: int = 1500, max_rounds: int = 6) -> str:
     """
-    Multi-round tool-calling loop for the Secretary (CLAUDE.md rule 22: this
-    path is READ-ONLY — every write she can make stays on the deterministic
-    intent-tag system in secretary.py, never here). A manual loop rather than
-    the SDK's beta tool-runner, so every round is individually metered as
+    Multi-round tool-calling loop for the Secretary. Every action she takes —
+    read OR write — is a real Claude tool call executed here (CLAUDE.md rule 22;
+    migrated 2026-07-07 off the earlier design where writes were custom intent
+    tags parsed out of her reply text). Each write tool's own handler in
+    secretary_tools.make_executor enforces its ownership/approval gate, so the
+    safety model lives in the executor, not in this loop. A manual loop rather
+    than the SDK's beta tool-runner, so every round is individually metered as
     "claude_chat" (a 4-round tool conversation must show 4 spend entries, not
     one merged line) and a hard round cap always terminates the conversation.
 

@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { AgentStatus } from "../lib/types";
-import { badgeClasses, cn, formatDate } from "../lib/utils";
-import { BadgePill, Card, CardContent, CardHeader, CardTitle, ErrorNote, ProgressBar } from "./ui";
+import { badgeClasses, cn, formatDate, rosterFor } from "../lib/utils";
+import { BadgePill, Card, CardContent, CardHeader, CardTitle, ErrorNote, ProgressBar, RosterAvatar } from "./ui";
 
 const LEVEL_STYLES: Record<number, string> = {
   0: "bg-slate-700/40 text-slate-300 border-slate-600",
@@ -48,10 +48,20 @@ export function TrustPanel() {
               scores will appear here.
             </p>
           )}
-          {agents.data?.filter((a) => a.total_runs > 0).map((a) => (
+          {agents.data?.filter((a) => a.total_runs > 0).map((a) => {
+            const r = rosterFor(a.name);
+            return (
             <div key={a.name} className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <span className="text-sm font-semibold capitalize text-slate-100">{a.name}</span>
+                <div className="flex items-center gap-2.5">
+                  <RosterAvatar src={r?.avatar} name={r?.name ?? a.name} className="h-8 w-8" />
+                  <div className="leading-tight">
+                    <span className="block text-sm font-semibold text-slate-100">
+                      {r?.name ?? a.name.charAt(0).toUpperCase() + a.name.slice(1)}
+                    </span>
+                    <span className="block text-xs text-slate-500">{r?.role ?? "agent"}</span>
+                  </div>
+                </div>
                 <BadgePill className={cn(LEVEL_STYLES[a.trust_level] ?? LEVEL_STYLES[0])}>
                   {a.trust_level_name}
                 </BadgePill>
@@ -76,7 +86,8 @@ export function TrustPanel() {
                 <span>{promotionNote(a)}</span>
               </div>
             </div>
-          ))}
+            );
+          })}
         </CardContent>
       </Card>
 

@@ -13,9 +13,18 @@ export function ListingDetail({ listing }: { listing: Listing }) {
           <div className="mt-1 text-slate-100">{listing.title}</div>
         </div>
         {listing.bookmark_quote && (
-          <blockquote className="border-l-2 border-amber-400/60 pl-4 font-display text-base italic leading-relaxed text-amber-100/90">
-            {listing.bookmark_quote}
-          </blockquote>
+          <div className="space-y-1.5">
+            <blockquote className="border-l-2 border-amber-400/60 pl-4 font-display text-base italic leading-relaxed text-amber-100/90">
+              {listing.bookmark_quote}
+            </blockquote>
+            {listing.quote_verified === false && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                Quote no longer Librarian-verified — it was edited by hand, so it hasn't been
+                checked against the source texts. The pipeline's grounding guarantee doesn't
+                cover this wording.
+              </div>
+            )}
+          </div>
         )}
         <div>
           <div className="text-xs uppercase tracking-widest text-slate-500">Description</div>

@@ -1,7 +1,7 @@
 import type { ConsultationTurn } from "../lib/types";
 import { imageUrl } from "../lib/api";
-import { AGENT_COLORS, cn } from "../lib/utils";
-import { Card, CardContent, CardHeader, CardTitle } from "./ui";
+import { AGENT_COLORS, cn, rosterFor } from "../lib/utils";
+import { Card, CardContent, CardHeader, CardTitle, RosterAvatar } from "./ui";
 
 // The four-turn agent consultation, rendered as a meeting record.
 export function ConsultationTranscript({ turns }: { turns: ConsultationTurn[] }) {
@@ -15,6 +15,11 @@ export function ConsultationTranscript({ turns }: { turns: ConsultationTurn[] })
         {turns.map((t, i) => {
           const colors = AGENT_COLORS[t.agent] ?? "border-l-slate-500 text-slate-300";
           const [borderColor, textColor] = colors.split(" ");
+          const r = rosterFor(t.agent);
+          // Named agents (Ruth/Theo/…) show their name with the role as context;
+          // non-persona turns (Sheraj, System) keep their plain label.
+          const displayName = r ? r.name : t.agent;
+          const roleText = r ? `${r.role} · ${t.role}` : t.role;
           return (
             <div
               key={i}
@@ -23,9 +28,10 @@ export function ConsultationTranscript({ turns }: { turns: ConsultationTurn[] })
                 borderColor
               )}
             >
-              <div className="mb-1 flex items-baseline gap-2">
-                <span className={cn("text-sm font-semibold", textColor)}>{t.agent}</span>
-                <span className="text-xs text-slate-500">{t.role}</span>
+              <div className="mb-1 flex items-center gap-2">
+                {r && <RosterAvatar src={r.avatar} name={r.name} className="h-6 w-6" />}
+                <span className={cn("text-sm font-semibold", textColor)}>{displayName}</span>
+                <span className="text-xs text-slate-500">{roleText}</span>
               </div>
               {t.image && (
                 <img

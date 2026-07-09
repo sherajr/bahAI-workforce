@@ -1,6 +1,39 @@
-import { forwardRef, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
+import {
+  forwardRef, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode,
+} from "react";
 import { Loader2, X } from "lucide-react";
 import { cn } from "../lib/utils";
+
+/**
+ * Round agent avatar. Falls back to a coloured initial if the image is missing
+ * (avatars are gitignored/private, so a fresh checkout won't have them) — the
+ * roster still reads clearly without the picture.
+ */
+export function RosterAvatar({
+  src, name, className,
+}: {
+  src?: string;
+  name: string;
+  className?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const base = cn("flex shrink-0 items-center justify-center overflow-hidden rounded-full", className);
+  if (!src || failed) {
+    return (
+      <div className={cn(base, "border border-amber-400/30 bg-slate-800 text-amber-200")}>
+        <span className="text-[0.7em] font-semibold">{name.charAt(0).toUpperCase()}</span>
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={name}
+      onError={() => setFailed(true)}
+      className={cn(base, "border border-slate-700 object-cover")}
+    />
+  );
+}
 
 // Minimal styled primitives (shadcn-style aesthetic, zero extra dependencies).
 

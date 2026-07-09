@@ -7,6 +7,9 @@ export interface Listing {
   tags: string[];
   materials: string[];
   price_note: string;
+  // false only after the quote was hand-edited via manual edit (no longer
+  // Librarian-verified); absent/true for pipeline-produced quotes.
+  quote_verified?: boolean;
 }
 
 export interface PrincipleScore {
@@ -95,6 +98,54 @@ export interface PipelineResult {
   target_reached: boolean;
   badge: string;
   consultation: ConsultationTurn[];
+}
+
+// ── Visual layout editor ──────────────────────────────────────────────────────
+// Presentation-only knobs for a product face (agents/layout.py). Never carries
+// any text — the printed quote/citation/translation/disclaimers come from the
+// product's stored data at render time, so the editor can't rewrite them.
+export interface ProductLayout {
+  font: string;
+  text_scale: number;
+  text_color: string;
+  // bookmark-only
+  text_offset?: number;
+  gradient?: number;
+  show_star?: boolean;
+  show_rule?: boolean;
+  // card-only
+  vignette?: number;
+}
+
+export interface LayoutChoice {
+  key: string;
+  label: string;
+}
+
+export interface LayoutRange {
+  min: number;
+  max: number;
+  step: number;
+}
+
+// GET /products/{id}/layout
+export interface LayoutOptions {
+  product_id: string;
+  product_type: string;
+  current: ProductLayout;
+  has_saved: boolean;
+  defaults: ProductLayout;
+  fonts: LayoutChoice[];
+  colors: LayoutChoice[];
+  ranges: Record<string, LayoutRange>;
+}
+
+// POST /products/{id}/layout and .../layout/preview
+export interface LayoutRenderResult {
+  product_id?: string;
+  front_image_web: string;
+  back_image_web: string;
+  layout: ProductLayout;
 }
 
 export interface JobStep {
@@ -298,6 +349,10 @@ export interface EditProductPayload {
 export interface EditProductResult {
   product_id: string;
   listing: Listing;
+  // false when the hand edit changed the quote (no longer Librarian-verified).
+  quote_verified?: boolean;
+  // set if the printed face couldn't be re-rendered after a quote change.
+  rerender_note?: string | null;
 }
 
 export interface EtsyPublishResult {

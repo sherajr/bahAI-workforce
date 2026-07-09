@@ -40,5 +40,7 @@ dashboard/node_modules/
 dashboard/dist/
 dashboard/*.tsbuildinfo
 
-# Abigail's avatar — Sheraj's choice to keep her image out of the public repo
+# Agent avatars — kept out of the public repo (Sheraj's choice, same as Abigail).
+# Abigail's own photo plus the generated roster portraits (Ruth/Theo/Clara/…).
 dashboard/public/abigail*
+dashboard/public/roster/
