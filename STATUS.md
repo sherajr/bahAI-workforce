@@ -98,15 +98,47 @@ for these yet, listed so nobody re-discovers them from scratch):
   (`LayoutEditor.tsx:193`) never resets when sliders change afterward;
   also no unsaved-changes guard on close, no confirm on Reset.
 
+- **New (docs, tiny):** `api.py:2762`'s endpoint docstring claims the Etsy
+  price is "parsed from price_note" — the code correctly uses
+  `etsy.BOOKMARK_PRICE` (rule 13); only the docstring is wrong (found by
+  Grok during the 2026-07-09 reality audit).
+
 **Blocked on Sheraj:**
 - Avatar approval (keep the six as generated, or regenerate any).
-- Whether to fix the Secretary rule-4 gap + the smaller findings above
-  (recommended next step), and whether to proceed with the older deferred
-  cleanup list.
+- Whether to fix the smaller findings above (layout GET crash edge,
+  LayoutEditor UX list, docstring), and whether to proceed with the older
+  deferred cleanup list.
 
 ---
 
 ## Activity Log (newest first)
+
+### 2026-07-09 — Claude Code (Fable 5), orchestrating ALL THREE workers —
+full app scan + honest README rewrite
+Per Sheraj's ask ("update the README so it reflects the actual app right
+now — no Etsy integration, you download a file and take it to a printer"),
+Claude first verified the central claim itself (no `etsy_token.json`
+exists; 0 of 84 products have an `etsy_listing_id` — Etsy publishing has
+NEVER run), then dispatched three parallel read-only scans: Codex on
+principles-as-code + architecture + grounded future directions; Grok on a
+reality audit (what actually works vs built-but-dormant, with DB/file
+evidence); Antigravity on a tab-by-tab dashboard walkthrough. Load-bearing
+claims were re-verified by Claude against the DB before use: Canva
+autofill has failed ALL 10 attempts ever made (same 400, last 2026-07-05)
+despite an authorised token; the X giveaway is real (2 live posts on
+@peaceAntz); no product has ever hit the 9.0 target (median bookmark
+score 7.6); total metered+legacy spend ≈ $13.72, revenue $0. `README.md`
+was fully rewritten from these findings: leads with what the app actually
+produces today (300 DPI faces + cut-tolerant print-sheet PDF → print
+shop), an "Honest status: what's real, what's not" table (Etsy built but
+never connected; Canva built but broken; pipelines/editor/Secretary/X all
+real), why-this-exists (principles enforced as code, with the concrete
+mechanisms), the named roster, the user-facing workflow, corrected run
+instructions (backend runs as a Scheduled Task — the old README's
+`python agents/api.py` advice reintroduced the double-server bug), an
+updated file map, and code-grounded future directions. Grok also surfaced
+one tiny docs bug (see Snapshot). No code changed — README.md and this
+file only.
 
 ### 2026-07-09 - Codex - committed and pushed current work
 Sheraj asked Codex to push the latest changes to GitHub, then explicitly
