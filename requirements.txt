@@ -13,3 +13,4 @@ tweepy>=4.14.0
 chromadb>=0.5           # vector_store/ — agents/librarian.py, scripts/ingest_*.py
 chonkie>=0.2             # text chunking — scripts/ingest_texts.py
 beautifulsoup4>=4.12     # HTML scraping — scripts/download_texts.py
+pypdf>=6.0               # PDF text extraction — scripts/verify_ruhi_book1.py

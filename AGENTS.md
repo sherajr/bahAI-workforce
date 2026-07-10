@@ -94,24 +94,25 @@ before considering the work done. Precisely scope the task yourself first
 imprecisely-scoped task description is the most likely way a dispatched
 agent does the wrong thing confidently.
 
-**Codex status (WORKING as of 2026-07-09, via per-invocation overrides)**:
-`~/.codex/config.toml` still has `model_provider = "ollama-launch-codex-app"`
-/ `model = "gemma4"` — a local-Ollama routing config pointing at a model
-that was never pulled. That file is shared with (and rewritten by) the
-Codex desktop app, so it was deliberately left untouched; instead, dispatch
-with CLI overrides that route just that one invocation to the cloud
-(ChatGPT auth already works):
+**Codex status (WORKING as of 2026-07-09; cloud is the DEFAULT as of
+2026-07-10)**: `~/.codex/config.toml` now has `model = "gpt-5.5"` /
+`model_provider = "openai"` / `model_catalog_json = merged-models.json`
+(Sheraj asked for GPT-5 by default on 2026-07-10; the previous local-Ollama
+routing pointed at a never-pulled `gemma4` and was broken for him too — a
+pre-edit backup sits at `~/.codex/config.toml.backup-2026-07-10`). So a
+plain dispatch now works with no overrides:
 ```bash
-codex exec -c model_provider=openai -m gpt-5.5 \
-  -c model_catalog_json="C:/Users/Sheraj/.codex/merged-models.json" \
-  -s read-only - < <prompt-file>
+codex exec -s read-only - < <prompt-file>
 ```
-Valid cloud model slugs for this account (from
+Caveat: the Codex desktop app also writes this file — if it ever reverts
+the model lines, re-apply them or fall back to per-invocation overrides
+(`-c model_provider=openai -m gpt-5.5 -c model_catalog_json=...`), which
+always win over the file. Valid cloud model slugs for this account (from
 `~/.codex/models_cache.json`): `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` — the
 various `gpt-*-codex` names are rejected on a ChatGPT account. Sandbox
 levels: `read-only` / `workspace-write` / `danger-full-access`; the prompt
-is read from stdin when the positional arg is `-`. Proven with a real
-read-only review dispatch 2026-07-09 (see STATUS.md).
+is read from stdin when the positional arg is `-`. Proven with real
+dispatches 2026-07-09/10 (see STATUS.md).
 
 **Antigravity (agy) status (WORKING as of 2026-07-09)**: installed,
 authenticated, and proven with a real read-only dispatch. Two hard-won
@@ -254,10 +255,21 @@ Products carry `product_type`; bookmark-only endpoints reject cards via
    disjointed LTR letters — `card_compositor` shapes RTL per line with
    arabic-reshaper + python-bidi, and every font in `LANGUAGES.font_paths` was
    verified by eye. Adding a language = config entry + a viewed sample PNG.
-10. **Bookmark consultation prompts are frozen via `_PRODUCT_FRAMES`.** The
-    "bookmark" frame values in `consultation.py` reproduce the original prompt
-    strings character-for-character; card wording changes go in the
-    "quote_card" frame, never inline in the shared prompt bodies.
+10. **Product-specific consultation wording goes through `_PRODUCT_FRAMES`,
+    never inline in the shared prompt bodies.** (The original "frozen
+    character-for-character" bookmark prompts were deliberately restyled
+    2026-07-09 at Sheraj's request — turns now ask for short natural
+    first-person sentences instead of bullet fragments, same content
+    requirements and word caps. That was an owner decision, not drift; the
+    frame discipline itself still holds.) Two hard sub-invariants survived
+    the restyle and must keep surviving: the Librarian's round-turn
+    VERDICT/VERIFIED QUOTE/SOURCE/REASONING format block is machine-parsed
+    (`_parse_verdict_grounded` + the quote-extraction loop) and must stay
+    exact, and the revision-consult decision JSON contract
+    ({action, action_guidance, team_note} + the REOPENING literals) is
+    machine-executed. The dashboard renders the Librarian's block as a
+    friendly verification card (`ConsultationTranscript.tsx`); humanize
+    display there, never her output format.
 11. **Quote cards may only quote Ruhi Book 1.** `librarian.retrieve_ruhi_book1()`
     (backed by `agents/ruhi_book1_source.py` + `scripts/ingest_ruhi_book1.py`'s
     own ChromaDB collection) is the ONLY retrieval path `_run_card_pipeline`

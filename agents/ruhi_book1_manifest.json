@@ -1,0 +1,274 @@
+{
+  "edition": "4.1.2.PE (May 2020)",
+  "verified_count": 67,
+  "quotes": [
+    {
+      "sha256": "82ea2b22a053d17e6db5e54112f1d352f9db4ae15540530515d14c8fdbb1f392",
+      "section": "Ruhi Book 1, Unit 1 ref. 1 \u2014 Shoghi Effendi, The Advent of Divine Justice, par. 39, pp. 36\u201337"
+    },
+    {
+      "sha256": "276d2bc760055e7713781298b6b425c87daed07c899248cf58525a8b919c22be",
+      "section": "Ruhi Book 1, Unit 1 ref. 2 \u2014 CXXXIX, par. 8, p. 345"
+    },
+    {
+      "sha256": "f19ea3087ab3f1207a3806ad8859a6569ac0772b0ff2552132494b740f8c5c41",
+      "section": "Ruhi Book 1, Unit 1 ref. 3 \u2014 Arabic no. 31, p. 11"
+    },
+    {
+      "sha256": "408a6d0fcbc99fddb59c489c5ac5fe9ccf4f022a1d52ed732038b7c9b1fe5606",
+      "section": "Ruhi Book 1, Unit 1 ref. 4 \u2014 Persian no. 5, p. 24"
+    },
+    {
+      "sha256": "b41ed140b5a69b6b2eeb76aea0ace2662f9a399540cfa517343fe06f370e9a1a",
+      "section": "Ruhi Book 1, Unit 1 ref. 5 \u2014 Persian no. 69, p. 46"
+    },
+    {
+      "sha256": "98a97b049b4e9c4b0aad4da76cc4be0de1ddb84aefdc032836a066d0774a0248",
+      "section": "Ruhi Book 1, Unit 1 ref. 6 \u2014 Shoghi Effendi, The Advent of Divine Justice, par. 40, p. 39"
+    },
+    {
+      "sha256": "f100280c3655584fd089f5190221a5cd088599fe54237ec026dadaeefe49a615",
+      "section": "Ruhi Book 1, Unit 1 ref. 7 \u2014 Shoghi Effendi, The Advent of Divine Justice, par. 40, p. 39"
+    },
+    {
+      "sha256": "8c194a8aa4b44b83c2f62d7893494a446d0a4df57f7b027e08600e3bfc455a83",
+      "section": "Ruhi Book 1, Unit 1 ref. 8 \u2014 CXXXVI, par. 6, p. 336"
+    },
+    {
+      "sha256": "0fa651f20eb6b00d3e37276ef1b3e002c376966e5150b44e840d20d2f4d3b070",
+      "section": "Ruhi Book 1, Unit 1 ref. 9 \u2014 no. 9.5, p. 138"
+    },
+    {
+      "sha256": "8c27f4da38eafb5e6c70181ed99e33aaca72a9557e5b7a53810a9e1f992385ef",
+      "section": "Ruhi Book 1, Unit 1 ref. 10 \u2014 CXXXVII, par. 3, p. 338"
+    },
+    {
+      "sha256": "b6f1e43af3e779bb8c5906087d6e80a9912926eb3d83d919c36f49a62cec918f",
+      "section": "Ruhi Book 1, Unit 1 ref. 11 \u2014 CXXXII, par. 5, p. 327"
+    },
+    {
+      "sha256": "47a94919e70edacc0316f80e4ec0270c2ded0187035f445ef8b2340177956b2f",
+      "section": "Ruhi Book 1, Unit 1 ref. 12 \u2014 p. 26"
+    },
+    {
+      "sha256": "f53ef680fd7ee660fb05c28c7443a870ff71e3087fabb84e0fd7c72189cb48e1",
+      "section": "Ruhi Book 1, Unit 1 ref. 13 \u2014 V, par. 5, p. 8"
+    },
+    {
+      "sha256": "159902c82a6f8171a041ac3c06d374a0409ee88d466b9d6e031e17f3136a801c",
+      "section": "Ruhi Book 1, Unit 1 ref. 14 \u2014 talk of 16\u201317 October 1911, no. 1.7, p. 6"
+    },
+    {
+      "sha256": "f453c6966b946737d49f5b0ca5830e74a16303caeeff0e865e2b8526890f6e34",
+      "section": "Ruhi Book 1, Unit 1 ref. 15 \u2014 talk of 21 October 1911, no. 6.7, p. 22"
+    },
+    {
+      "sha256": "e22a44e5dd6ad353965326993fa51f8e180cae5be6d51370566ff4f89efac952",
+      "section": "Ruhi Book 1, Unit 1 ref. 16 \u2014 CXXV, par. 3, p. 300"
+    },
+    {
+      "sha256": "79bfb8d9b8ef6d0d026447814f58df2831d7f5610db32ad44e3b2fe41745103a",
+      "section": "Ruhi Book 1, Unit 1 ref. 17 \u2014 Arabic no. 27, p. 10"
+    },
+    {
+      "sha256": "93bc5da37a50ebf676af36163878d0d8bfb62f5f91573f8c9cd37248c9f3eb4c",
+      "section": "Ruhi Book 1, Unit 1 ref. 18 \u2014 Persian no. 44, p. 37"
+    },
+    {
+      "sha256": "509c3feb96ef977ea43c97e55490fd14413ea9ceb5f233b8770640e382ec6101",
+      "section": "Ruhi Book 1, Unit 1 ref. 19 \u2014 Arabic no. 26, p. 10"
+    },
+    {
+      "sha256": "4edd88bbd3b25894a52b40f2cfda345fa6b0f40928c94d73b621496d718e7a07",
+      "section": "Ruhi Book 1, Unit 1 ref. 20 \u2014 LXX, par. 2, p. 154"
+    },
+    {
+      "sha256": "1d9418aaf9f8b25c62ee15860fa0adc156890373b07aadeb4c22fe666942fe59",
+      "section": "Ruhi Book 1, Unit 2 ref. 1 \u2014 XLIII, par. 4, p. 105"
+    },
+    {
+      "sha256": "f05f8318746ee6c5e4008877da1e4d8426bfa7cf6e174f1f0808407c7eabf233",
+      "section": "Ruhi Book 1, Unit 2 ref. 2 \u2014 no. 21, p. 5"
+    },
+    {
+      "sha256": "0a34d58cf515683cd79b70e409edea240dff5af83756ef7bbcb0bc7cdcae51f8",
+      "section": "Ruhi Book 1, Unit 2 ref. 3 \u2014 no. 2.43, p. 31"
+    },
+    {
+      "sha256": "162f7044c5bc92bc25ed8d039f106f19615b0b61e386822f4e51b73927a3d609",
+      "section": "Ruhi Book 1, Unit 2 ref. 4 \u2014 talk of 5 May 1912, p. 127"
+    },
+    {
+      "sha256": "3cbd1c8d344e55ea909282c1f47eb5baab53116998bff9c9a9c77b7bfc87e2cf",
+      "section": "Ruhi Book 1, Unit 2 ref. 5 \u2014 Arabic no. 13, pp. 6\u20137"
+    },
+    {
+      "sha256": "c4ae0ffd7e59bba2ac58b95e85ff796e81c4960a662a1d9fe4eff2527faeaedf",
+      "section": "Ruhi Book 1, Unit 2 ref. 6 \u2014 letter dated 8 December 1935, no. 71, p. 31"
+    },
+    {
+      "sha256": "7a5da70ad2ad699cb341f3b0bbed825fc2ade422d6a309744d0ee90448042ad8",
+      "section": "Ruhi Book 1, Unit 2 ref. 7 \u2014 p. 106"
+    },
+    {
+      "sha256": "630520f447dbed4d8d608b072d8c13b58616554bd033c54abcc499702ca06e8a",
+      "section": "Ruhi Book 1, Unit 2 ref. 8 \u2014 p. 106"
+    },
+    {
+      "sha256": "ebfb023c538c76933a25460c68761d24bba9f9d4648c474efd34b58b69dc8e5a",
+      "section": "Ruhi Book 1, Unit 2 ref. 9 \u2014 pp. 7\u20138"
+    },
+    {
+      "sha256": "5cd40f4903344b937628dd08424898d6648f355e893b8cd7c83169d160b1497c",
+      "section": "Ruhi Book 1, Unit 2 ref. 10 \u2014 p. 9"
+    },
+    {
+      "sha256": "99fe58cbf3903984d1600f3153038d0d83edcda5ce6eacaf62c0452d524f56ba",
+      "section": "Ruhi Book 1, Unit 2 ref. 11 \u2014 vol. 8, no. 4 (17 May 1917), p. 41"
+    },
+    {
+      "sha256": "e86df2865cb3b1822e38b4e45a59407035558e8330933d804f709f2d244085b3",
+      "section": "Ruhi Book 1, Unit 2 ref. 12 \u2014 CXXXVI, par. 2, p. 334"
+    },
+    {
+      "sha256": "d09f0d30f08130c3ad410bb35e3bfaed6c7bc465ea16773b195836038f59af43",
+      "section": "Ruhi Book 1, Unit 2 ref. 13 \u2014 pp. 8\u20139"
+    },
+    {
+      "sha256": "8314a0306e2b555ca9e39aeb8cb80de99be16a41e42d3144f000070a5d0d65af",
+      "section": "Ruhi Book 1, Unit 2 ref. 14 \u2014 p. 12"
+    },
+    {
+      "sha256": "ed517944ff09b52d5f6fb813525396ee16ce07e02c6c292249c1604469415fc9",
+      "section": "Ruhi Book 1, Unit 2 ref. 15 \u2014 no. 24, p. 7"
+    },
+    {
+      "sha256": "2fe657f3aacfe79e1933156810ee140764098f59caf76ef0f9d100f6431db48e",
+      "section": "Ruhi Book 1, Unit 2 ref. 16 \u2014 talk of 5 August 1912, p. 345"
+    },
+    {
+      "sha256": "3e892de7adf290a52566a894ff358c1aab80c08bb569c34e61289409beee9fb0",
+      "section": "Ruhi Book 1, Unit 2 ref. 17 \u2014 no. 22.1, pp. 75\u201376"
+    },
+    {
+      "sha256": "91ebbeee76046eb2c431c566cd08b0f50eb19c24f6d2b0db80401115e2225ea9",
+      "section": "Ruhi Book 1, Unit 2 ref. 20 \u2014 Short Obligatory Prayer, p. 4"
+    },
+    {
+      "sha256": "c9af3d46d9fff3ec1d9cee4afa41f945699c6ec9eac70531f6d47fb753339778",
+      "section": "Ruhi Book 1, Unit 2 ref. 21 \u2014 no. 68, p. 29"
+    },
+    {
+      "sha256": "3d7cef8a8717999a6ebdabde34e9966975c95233eb040aaeb647aee61fe82925",
+      "section": "Ruhi Book 1, Unit 2 ref. 22 \u2014 message dated 29 December 2015, no. 35.49, p. 232"
+    },
+    {
+      "sha256": "22cfe75ad18ede62f2a5d4d3520d537a04133794208b931d70b42ee3e78b2738",
+      "section": "Ruhi Book 1, Unit 3 ref. 1 \u2014 talk of 10 November 1911, no. 29.12\u201313, p. 109"
+    },
+    {
+      "sha256": "c9f1b2997b17d6dbaa4340e0d5995130d0cfa1f9a0142e248b82470108042fe8",
+      "section": "Ruhi Book 1, Unit 3 ref. 4 \u2014 no. 66.3, pp. 352\u201353"
+    },
+    {
+      "sha256": "155d4502a513db776d4c783fb0053bac60e4fac4e74ae44f8cfabb1a8af43d07",
+      "section": "Ruhi Book 1, Unit 3 ref. 5 \u2014 no. 38.5, p. 220"
+    },
+    {
+      "sha256": "43139f93d0544a31b5ab7c77da1e15b1f6b8607b454cf8033ad85fd21b43cd38",
+      "section": "Ruhi Book 1, Unit 3 ref. 6 \u2014 talk of 9 November 1911, no. 28.16, p. 104"
+    },
+    {
+      "sha256": "37254e28d854956699c807b47d296cb017e7eea319f0c3152b7b762d56393d94",
+      "section": "Ruhi Book 1, Unit 3 ref. 7 \u2014 letter dated 31 December 1937, no. 680, p. 204"
+    },
+    {
+      "sha256": "6f639868376a0a62a73e534b797d4a6bdf44818ea2804a626e7493644c7cdff1",
+      "section": "Ruhi Book 1, Unit 3 ref. 8 \u2014 LXXXII, par. 8, p. 183"
+    },
+    {
+      "sha256": "c9d04836a5e9f7d3d2c7a7718e6292a3bf0982b674103164a6fbe68da0a56915",
+      "section": "Ruhi Book 1, Unit 3 ref. 9 \u2014 no. 61.1\u20132, p. 334"
+    },
+    {
+      "sha256": "1b3b680caa246bbad501c49e5300d94c542fade61afe05d1e6b184fdae5ec193",
+      "section": "Ruhi Book 1, Unit 3 ref. 10 \u2014 LXXX, par. 2, p. 174"
+    },
+    {
+      "sha256": "df043a059418d7e052484313519f702d4b841ac4013144bf27260f859e7a8606",
+      "section": "Ruhi Book 1, Unit 3 ref. 11 \u2014 LXXXI, par. 1, p. 176"
+    },
+    {
+      "sha256": "0259e0bcac5b1830de1977e3fdaa4bb45d33d8a579eb3045c67ce6f13e61060d",
+      "section": "Ruhi Book 1, Unit 3 ref. 12 \u2014 CLXV, par. 2, pp. 391\u201392"
+    },
+    {
+      "sha256": "21d83ae20cb2cd984b11b62aeeec6f9da66c73a052be061e2b27ed83f7dc1762",
+      "section": "Ruhi Book 1, Unit 3 ref. 13 \u2014 Arabic no. 32, p. 11"
+    },
+    {
+      "sha256": "edb60ce7f074ecfdbeeddf4264a3d936ffcbc4046063b42756d4a115b8635fb4",
+      "section": "Ruhi Book 1, Unit 3 ref. 14 \u2014 talk of 6 July 1912, pp. 315\u201316"
+    },
+    {
+      "sha256": "ac5b8cfbba000f75c351857bc416df39acc6706ccf53a556318769bc21c1ec96",
+      "section": "Ruhi Book 1, Unit 3 ref. 15 \u2014 V, par. 4, p. 8"
+    },
+    {
+      "sha256": "eade076ee4c56a707315103f4a7f91924e68791e75fa608460cc1ceabb0e0423",
+      "section": "Ruhi Book 1, Unit 3 ref. 16 \u2014 LXXXII, par. 1, pp. 179\u201380"
+    },
+    {
+      "sha256": "3b30def4e977bea47434e63511dfbb9fb14288c5b8452fbae585f9ebed71d929",
+      "section": "Ruhi Book 1, Unit 3 ref. 17 \u2014 CLIII, par. 6, pp. 370\u201371"
+    },
+    {
+      "sha256": "9401f28d8ea12d4d2587b4f299e61ce2d91a17452b6e40f6c90e9ddc52ef9bd5",
+      "section": "Ruhi Book 1, Unit 3 ref. 18 \u2014 XXVII, par. 2, pp. 72\u201373"
+    },
+    {
+      "sha256": "9c9f67fe84b2dac288a0da271558b49c0296dc79ecb9a064fed97b285f69da0a",
+      "section": "Ruhi Book 1, Unit 3 ref. 19 \u2014 XXVII, par. 3, p. 73"
+    },
+    {
+      "sha256": "920ccf25f41de64b35c86bef2030eefe8a680095125be6af868bfba4a8f45720",
+      "section": "Ruhi Book 1, Unit 3 ref. 20 \u2014 XXI, par. 1, pp. 54\u201355"
+    },
+    {
+      "sha256": "3814354a2246172f172035c643c46d6aec6e3b2305b4045bdcb738d1e4f56088",
+      "section": "Ruhi Book 1, Unit 3 ref. 21 \u2014 LXXXI, par. 1, p. 177"
+    },
+    {
+      "sha256": "9dac49d07dc19b2266b387622f251b8efb25e4fa04948a4051790739b82ea3c2",
+      "section": "Ruhi Book 1, Unit 3 ref. 22 \u2014 CXXII, par. 1, pp. 293\u201394"
+    },
+    {
+      "sha256": "84601571ac5d5dcc22ed4a0a7b1012b75de6af6b62b4e6e62af1bee5193a9edf",
+      "section": "Ruhi Book 1, Unit 3 ref. 23 \u2014 LXXXII, par. 7, p. 182"
+    },
+    {
+      "sha256": "c8e9e07bb45fc6a3dd4c1d90f6e85d218facf8970c0684225c19e08967971a31",
+      "section": "Ruhi Book 1, Unit 3 ref. 24 \u2014 LXXXI, par. 1, pp. 176\u201377"
+    },
+    {
+      "sha256": "e4dbf926ff0edc08da3a98541f1db83ecac51d0f8c6ff45283776db5dc5a9848",
+      "section": "Ruhi Book 1, Unit 3 ref. 25 \u2014 CXXV, par. 3, pp. 300\u20131"
+    },
+    {
+      "sha256": "7d0143caa35dbe07ec9354e23d4e3c5f398c7e435941fee18fff208ab0931319",
+      "section": "Ruhi Book 1, Unit 3 ref. 26 \u2014 no. 62.3, pp. 340\u201341"
+    },
+    {
+      "sha256": "1ecca77c633790ca045a9adf5cfe7cd95c232a3300b658e2e1cb8467841c3fc5",
+      "section": "Ruhi Book 1, Unit 3 ref. 27 \u2014 no. 149.3\u20134, pp. 246\u201347"
+    },
+    {
+      "sha256": "1be5acc76e0035468dc2dbd8b5eeecd07c8895cf0f746f7094147eadd988ef9a",
+      "section": "Ruhi Book 1, Unit 3 ref. 28 \u2014 LXXXVI, par. 1, pp. 192\u201393"
+    },
+    {
+      "sha256": "194a67d2d18bb67fc2730b8f4f7d5ea3071c94b074cb4fee04c321f1a643b3eb",
+      "section": "Ruhi Book 1, Unit 3 ref. 29 \u2014 CLIII, par. 9, p. 373"
+    }
+  ]
+}

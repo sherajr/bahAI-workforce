@@ -118,7 +118,8 @@ _PRODUCT_FRAMES = {
         "quote_name": "card quote",
         "quote_spec": (
             "1–3 lines, 60–140 characters total — this is a business-card-sized giveaway, "
-            "shorter is better"
+            "shorter is better; use one of the given citations' own words EXACTLY (its "
+            "opening sentence alone is fine), never your own rewording"
         ),
         "reviewer_risk": (
             "ring hollow, feel esoteric or exclusionary to someone with zero background "
@@ -142,11 +143,18 @@ _PRODUCT_FRAMES = {
         # book (see librarian.retrieve_ruhi_book1 and api.py's card pipeline) —
         # this note is defense in depth against the model substituting a
         # different, well-known passage from memory instead of the ones given.
+        # "adapted at most lightly" (the original wording here) invited the
+        # consultation to reword — the pipeline always snapped the printed text
+        # back to the verbatim passage, but the transcript then disagreed with
+        # the finished card. Word-for-word is the actual contract (2026-07-10;
+        # api._assert_ruhi_verbatim now also enforces it in code at render time).
         "source_scope": (
             " These citations are drawn specifically from Reflections on the Life of the "
-            "Spirit (Ruhi Institute, Book 1) — this card's quote must be one of them, "
-            "adapted at most lightly; never substitute a different Bahá'í passage from "
-            "memory, however well known or fitting it may seem."
+            "Spirit (Ruhi Institute, Book 1) — this card's quote must be one of them "
+            "WORD-FOR-WORD, exactly as given (excerpting is allowed only as whole "
+            "sentences from the passage's beginning); never reword, modernise, trim "
+            "mid-sentence, or substitute a different Bahá'í passage from memory, "
+            "however well known or fitting it may seem."
         ),
     },
     "x_post": {
@@ -279,15 +287,15 @@ def _run_round(
             "You are the Artist agent for bahAI Workforce, a Bahá'í-inspired art and craft "
             f"business run by Sheraj. You just created this image as {frame['artist_context']} "
             f"The requested theme was: {theme}\n\n"
-            "Report back to your team in exactly 4 bullet points, one line each, no preamble:\n"
-            "- Visual elements: colors, light, motifs, composition (one line)\n"
-            "- Bahá'í themes or symbols evoked (one line)\n"
-            f"- Emotional mood — what a {frame['audience']} will feel (one line)\n"
-            f"- What stands out most in {frame['front_region']} (one line)\n\n"
+            "Reply in 3-4 short, natural sentences, the way you'd speak to teammates around "
+            "a table -- first person, plain language, no list markers. In your reply, cover "
+            "the visual elements (colors, light, motifs, composition), the Baha'i themes or "
+            f"symbols evoked, the emotional mood a {frame['audience']} will feel, and what "
+            f"stands out most in {frame['front_region']}.\n\n"
             "Describe motifs qualitatively (a radiant star, a ring of lotus blooms). Do NOT state "
-            "an exact count of rays, points, petals, or arches — image generation cannot guarantee "
+            "an exact count of rays, points, petals, or arches -- image generation cannot guarantee "
             "a requested count actually rendered, so naming a specific number risks asserting a "
-            "fact you haven't verified. Terse and concrete. No throat-clearing, no restating the "
+            "fact you haven't verified. Be concrete. No throat-clearing, no restating the "
             "prompt. Under 60 words total."
         )
         try:
@@ -305,13 +313,14 @@ def _run_round(
             f"Theme: {theme}\n\n"
             f"{CONSULTATION_SCRIPTURE['round2_response']} Ask yourself that, genuinely, about "
             "the Reviewer's round 1 challenge before answering.\n\n"
-            "Answer in exactly 3 bullet points, one line each, no preamble:\n"
-            "- Do you now believe the Reviewer's challenge is more true than your round 1 "
-            "direction? If yes, adopt it and say why in one clause. If no, state your one "
-            "strongest piece of concrete visual evidence — once, without repeating it.\n"
-            "- The single visual element that best expresses the agreed direction\n"
-            f"- What the Scribe should emphasise to connect the {frame['audience']} to it\n\n"
-            "Terse and concrete. Under 50 words total."
+            "Reply in 2-3 short, natural sentences, the way you'd speak to teammates around "
+            "a table -- first person, plain language, no list markers. Say whether you now "
+            "believe the Reviewer's challenge is more true than your round 1 direction; if "
+            "yes, adopt it and say why in one clause, and if no, give your one strongest "
+            "piece of concrete visual evidence once, without repeating it. Also name the "
+            "single visual element that best expresses the agreed direction, and tell the "
+            f"Scribe what to emphasise to connect the {frame['audience']} to it.\n\n"
+            "Be concrete. Under 55 words total."
         )
         artist_msg = call_llm(
             "creative_writing",  # Artist stays on Grok per routing directive
@@ -337,26 +346,28 @@ def _run_round(
 
     if round_number == 1:
         scribe_instruction = (
-            "Answer in exactly 3 bullet points, one line each, no preamble:\n"
-            "- The spiritual truth this image most powerfully expresses (one line)\n"
-            f"- ONE candidate {frame['quote_name']} ({frame['quote_spec']}, "
-            "poetic, no quotation marks)\n"
-            f"- The emotional tone the {frame['output']} should carry (one line)\n\n"
-            "Terse. No throat-clearing, no restating the theme. Under 70 words total "
+            "Reply in 2-3 short, natural sentences, the way you'd speak to teammates around "
+            "a table -- first person, plain language, no list markers. Cover the spiritual "
+            f"truth this image most powerfully expresses and the emotional tone the {frame['output']} "
+            f"should carry. Offer exactly ONE candidate {frame['quote_name']} ({frame['quote_spec']}, "
+            "poetic, no quotation marks) on its own line beginning with My proposal: so the "
+            "team cannot miss it.\n\n"
+            "No throat-clearing, no restating the theme. Under 75 words total "
             "(the quote itself doesn't count against this)."
         )
     else:
         scribe_instruction = (
             f"Round {prev_round_number} is done — now commit. {CONSULTATION_SCRIPTURE['round2_response']} Ask "
             "yourself that about the Reviewer's challenge before you decide.\n\n"
-            "Answer in exactly 3 bullet points, one line each:\n"
-            "- Do you now believe the Reviewer's challenge is more true than your round 1 "
-            "direction? If yes, adopt it plainly and say why. If no, state your case once, "
-            "clearly — not out of attachment to your own first draft.\n"
-            "- THE quote you recommend, offered as the team's best shared direction rather than "
-            f"a personal claim ({frame['quote_spec']}, no quotation marks)\n"
-            "- Why it fits, in one short clause\n\n"
-            "Terse and decisive. Under 50 words total (the quote itself doesn't count against this)."
+            "Reply in 2-3 short, natural sentences, the way you'd speak to teammates around "
+            "a table -- first person, plain language, no list markers. Say whether you now "
+            "believe the Reviewer's challenge is more true than your round 1 direction; if "
+            "yes, adopt it plainly and say why, and if no, state your case once, clearly -- "
+            "not out of attachment to your own first draft. Offer exactly ONE committed quote "
+            "as the team's best shared direction rather than a personal claim on its own line "
+            f"beginning with My proposal: ({frame['quote_spec']}, no quotation marks), then say "
+            "why it fits in one short clause.\n\n"
+            "Be decisive. Under 60 words total (the quote itself doesn't count against this)."
         )
 
     scribe_input = (
@@ -388,13 +399,13 @@ def _run_round(
             f"You are the team's constitutional critic. {CONSULTATION_SCRIPTURE['round1_challenge']} "
             "— so your duty in this round is to supply the differing opinion, not to harmonise "
             f"early. {CONSULTATION_SCRIPTURE['round1_tone']} Challenge the IDEA, never the agent.\n\n"
-            "Answer in exactly 3 bullet points, one line each, no preamble:\n"
-            "- The 1–2 constitution principles most at stake (name only, no explanation)\n"
-            "- Your strongest concrete disagreement with the direction so far — what could "
-            f"{frame['reviewer_risk']}. Only say 'none' if you "
-            "genuinely find no weakness, and name what convinced you.\n"
-            "- One alternative direction the team must weigh\n\n"
-            f"Terse and direct — a challenge, not an essay. Under 60 words total.{frame['reviewer_extra']}"
+            "Reply in 2-3 short, natural sentences, the way you'd speak to teammates around "
+            "a table -- first person, plain language, no list markers. Name the 1-2 constitution "
+            "principles most at stake without explaining them. Give your strongest concrete "
+            f"disagreement with the direction so far -- what could {frame['reviewer_risk']}; "
+            "only say 'none' if you genuinely find no weakness, and name what convinced you. "
+            "End by naming one alternative direction the team must weigh.\n\n"
+            f"Be direct -- a challenge, not an essay. Under 70 words total.{frame['reviewer_extra']}"
         )
     else:
         reviewer_instruction = (
@@ -402,13 +413,15 @@ def _run_round(
             "Your job this round is to turn assumption into verified fact: re-examine the attached "
             f"image with fresh eyes rather than confirming what round {prev_round_number} assumed — if you cannot be "
             "certain of a specific visual detail (especially a count), say so, don't assert it.\n\n"
-            "Answer in exactly 3 bullet points, one line each, no preamble:\n"
-            f"- Was your round {prev_round_number} challenge adopted, adapted, rebutted, or ignored? Say which.\n"
-            "- Does the committed quote serve the constitution? One principle name + confirm/flag.\n"
-            f"- Green-light or hold, plus one short reason. {CONSULTATION_SCRIPTURE['round2_decision']} "
-            "A green-light here becomes the WHOLE team's decision, not just your preference — hold "
+            "Reply in 2-3 short, natural sentences, the way you'd speak to teammates around "
+            "a table -- first person, plain language, no list markers. Say plainly whether "
+            f"your round {prev_round_number} challenge was adopted, adapted, rebutted, or ignored. "
+            "Say whether the committed quote serves the constitution, naming one principle and "
+            "confirming or flagging it. End with either \"I'm green-lighting this\" or "
+            f"\"I'm holding\", plus one short reason. {CONSULTATION_SCRIPTURE['round2_decision']} "
+            "A green-light here becomes the WHOLE team's decision, not just your preference -- hold "
             "if an ignored concern still matters; never green-light just to keep the peace.\n\n"
-            "Terse and direct. Under 50 words total."
+            "Be direct. Under 60 words total."
         )
 
     reviewer_input = (
@@ -897,10 +910,11 @@ def run_card_revision_consultation(
         f"You are the Artist agent for bahAI Workforce. The Reviewer just scored this printed "
         f"quote card {review.get('overall', '?')}/10 for theme \"{theme}\". Weak points it flagged:\n"
         f"{weak_notes}\n\n"
-        "Answer in exactly 2 bullet points, one line each, no preamble:\n"
-        "- Do you believe the ARTWORK is the actual problem, or is it the quote/text? Say which, plainly.\n"
-        "- If it's the artwork, the one concrete visual change you'd make; if not, say 'not the artwork'.\n\n"
-        "Terse and concrete. Under 55 words total."
+        "Reply in 2 short, natural sentences, the way you'd speak to teammates around a table -- "
+        "first person, plain language, no list markers. Say plainly whether you believe the ARTWORK "
+        "is the actual problem or whether it is the quote/text. If it is the artwork, name the one "
+        "concrete visual change you'd make; if not, say 'not the artwork'.\n\n"
+        "Be concrete. Under 60 words total."
     )
     try:
         artist_msg = call_grok_vision(front_image_path, artist_prompt,
@@ -923,12 +937,12 @@ def run_card_revision_consultation(
         f"search can surface others from the same pool, but never anything outside it):\n"
         f"{other_passages}"
         f"{history_block}\n"
-        "Answer in exactly 2 bullet points, one line each, no preamble:\n"
-        "- Is the QUOTE itself the problem (fit, length, clarity)? Say plainly — and if the "
-        "pool genuinely has no better option, say so rather than proposing a change for its own sake.\n"
-        "- If yes and a real alternative exists above, name it by number and why in one clause; "
-        "otherwise say 'keep it'.\n\n"
-        "Terse. Under 55 words total."
+        "Reply in 2 short, natural sentences, the way you'd speak to teammates around a table -- "
+        "first person, plain language, no list markers. Say plainly whether the QUOTE itself is "
+        "the problem (fit, length, clarity), and if the pool genuinely has no better option, say so "
+        "rather than proposing a change for its own sake. If a real alternative exists above, name "
+        "it by number and why in one clause; otherwise say 'keep it'.\n\n"
+        "Under 60 words total."
     )
     try:
         librarian_msg = call_llm(
@@ -984,11 +998,22 @@ def run_card_revision_consultation(
     except Exception:
         pass  # keep the Reviewer's own scored action/guidance as the fallback
 
-    summary = f"Action: {action}."
-    if action_guidance:
+    if action == "ship":
+        summary = "My call: we ship it as-is."
+    elif action == "requote":
+        summary = "My call: find a different quote"
+    elif action == "repaint":
+        summary = "My call: redo the artwork"
+    else:
+        summary = f"My call: {action}."
+    if action_guidance and action in ("requote", "repaint"):
+        summary += f" -- {action_guidance}"
+    elif action_guidance:
         summary += f" {action_guidance}"
+    if not summary.endswith("."):
+        summary += "."
     if team_note:
-        summary += f"\n{team_note}"
+        summary += f" {team_note}"
     _emit({"agent": "Reviewer", "role": f"revision consult {attempt} — final call", "message": summary})
 
     return {"transcript": transcript, "action": action, "action_guidance": action_guidance}
@@ -1114,11 +1139,11 @@ def run_x_post_revision_consultation(
         f"{review.get('overall', '?')}/10 for topic \"{topic}\". The tweet:\n{tweet}\n\n"
         f"Weak points it flagged:\n{weak_notes}"
         f"{mech_block}\n\n"
-        "Answer in exactly 2 bullet points, one line each, no preamble:\n"
-        "- Do you believe the ARTWORK is the actual problem, or is it the tweet's text/quote? "
-        "Say which, plainly.\n"
-        "- If it's the artwork, the one concrete visual change you'd make; if not, say 'not the artwork'.\n\n"
-        "Terse and concrete. Under 55 words total."
+        "Reply in 2 short, natural sentences, the way you'd speak to teammates around a table -- "
+        "first person, plain language, no list markers. Say plainly whether you believe the ARTWORK "
+        "is the actual problem or whether it is the tweet's text/quote. If it is the artwork, name "
+        "the one concrete visual change you'd make; if not, say 'not the artwork'.\n\n"
+        "Be concrete. Under 60 words total."
     )
     try:
         artist_msg = call_grok_vision(image_path, artist_prompt, temperature=0.6, max_tokens=200).strip()
@@ -1147,14 +1172,14 @@ def run_x_post_revision_consultation(
         f"Other candidate passages already retrieved for this topic (a differently-worded search "
         f"can surface others, but never anything invented):\n{other_passages}"
         f"{history_block}\n"
-        "Answer in exactly 2 bullet points, one line each, no preamble:\n"
-        + ("- Is the QUOTE itself the problem (fit with the topic or the image, mismatch, length)? "
-           "Say plainly.\n"
+        "Reply in 2 short, natural sentences, the way you'd speak to teammates around a table -- "
+        "first person, plain language, no list markers. "
+        + ("Say plainly whether the QUOTE itself is the problem (fit with the topic or the image, mismatch, length). "
            if include_quote else
-           "- Is the INSPIRATION itself the problem (fit with the topic or the image)? Say plainly.\n") +
-        "- If yes and a real alternative exists above, name it by number and why in one clause; "
+           "Say plainly whether the INSPIRATION itself is the problem (fit with the topic or the image). ") +
+        "If yes and a real alternative exists above, name it by number and why in one clause; "
         "otherwise suggest a new search phrase, or say 'keep it' if nothing would help.\n\n"
-        "Terse. Under 55 words total."
+        "Under 60 words total."
     )
     try:
         librarian_msg = call_llm(
@@ -1210,11 +1235,24 @@ def run_x_post_revision_consultation(
     except Exception:
         pass  # keep the safe fallback ("revise_text") — a broken decision must never silently ship
 
-    summary = f"Action: {action}."
-    if action_guidance:
+    if action == "ship":
+        summary = "My call: we ship it as-is."
+    elif action == "revise_text":
+        summary = "My call: revise the wording"
+    elif action == "repaint":
+        summary = "My call: redo the artwork"
+    elif action == "requote":
+        summary = "My call: find a different quote"
+    else:
+        summary = f"My call: {action}."
+    if action_guidance and action in ("revise_text", "repaint", "requote"):
+        summary += f" -- {action_guidance}"
+    elif action_guidance:
         summary += f" {action_guidance}"
+    if not summary.endswith("."):
+        summary += "."
     if team_note:
-        summary += f"\n{team_note}"
+        summary += f" {team_note}"
     _emit({"agent": "Reviewer", "role": f"revision consult {attempt} — final call", "message": summary})
 
     return {"transcript": transcript, "action": action, "action_guidance": action_guidance}

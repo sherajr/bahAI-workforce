@@ -113,6 +113,72 @@ for these yet, listed so nobody re-discovers them from scratch):
 
 ## Activity Log (newest first)
 
+### 2026-07-10 — Claude Code (Fable 5), orchestrating (Codex dispatch rejected) —
+card quotes now machine-verified character-exact against the official Ruhi Book 1 PDF
+Sheraj supplied the official PDF (edition 4.1.2.PE, Downloads folder — kept
+out of the repo, copyrighted) and asked for exact-match assurance on card
+quotes. Claude verified all 67 `agents/ruhi_book1_source.py` entries against
+the PDF: 61 already exact, 2 pure extraction artifacts, 2 honestly-marked
+elisions — and **2 real silent splices fixed** (entries "world of the womb"
+and "bird which soareth" now carry the book's own ". . ." elision marks;
+ChromaDB re-ingested afterwards). New: `scripts/verify_ruhi_book1.py`
+(repeatable PDF verification + freezes a SHA256 manifest,
+`agents/ruhi_book1_manifest.json`) and `api._assert_ruhi_verbatim` — a
+render-time gate at BOTH quote-pick sites (initial + requote) that fails the
+job loudly if the about-to-print quote isn't a verbatim prefix of a
+manifest-verified corpus entry (catches stale index / unverified corpus
+edits). Prompt honesty tightened: the card frame's "adapted at most lightly"
+became word-for-word (`consultation.py` source_scope + quote_spec), and the
+Reviewer's quote_citation criterion now says the text is machine-verified —
+judge selection, never propose rewording. Verified by Claude: 67/67 both
+script modes, imports clean, gate positive/prefix/tampered/empty/stale tests
+all correct, live retrieval→trim→gate pass, backend restarted + health 200.
+**Dispatch note:** the Codex worker completed this task logically but
+re-wrote `agents/api.py`/`requirements.txt` with a BOM + cp1252 mojibake
+(every em dash/arrow corrupted) — its output was reverted wholesale and
+re-implemented by Claude directly, reusing its gate logic. Watch for this on
+any future Codex dispatch that edits files on Windows; `git diff` caught it.
+
+### 2026-07-10 — Claude Code (Fable 5) — Codex now defaults to GPT-5.5
+Sheraj reported Codex still using `gemma4` and asked for GPT-5 as an
+option. Edited `~/.codex/config.toml` directly (backup first:
+`~/.codex/config.toml.backup-2026-07-10`): `model = "gpt-5.5"`,
+`model_provider = "openai"`, `model_catalog_json` → `merged-models.json`.
+Nothing else in the file touched (desktop-app sections, plugins, MCP
+intact). Verified with a no-override `codex exec` — answered on gpt-5.5,
+and the old "model metadata not found" warning is gone. Caveat recorded in
+AGENTS.md: the Codex desktop app also rewrites this file; if it reverts,
+re-apply or use the per-invocation overrides (which always win).
+
+### 2026-07-09 — Claude Code (Fable 5), orchestrating Codex + Antigravity —
+consultation transcripts now read as natural speech
+Per Sheraj's ask ("the consultation conversations are bullet points that
+don't really make sense to me"), Claude first mapped the machine-parsed
+anchors in `agents/consultation.py` itself (only two exist: the
+Librarian's VERDICT/VERIFIED QUOTE block, and the revision-consult
+decision JSON — everything else is read only by other LLMs), then
+dispatched in parallel: **Codex** rewrote every turn instruction from
+"exactly N bullet points" to 2-4 natural first-person sentences (same
+content requirements, honesty cautions, scripture references, and word
+caps +≤15; max_tokens/temperatures untouched; the Scribe's quote now
+arrives on a cued "My proposal:" line) and rebuilt the code-built "final
+call" turns as sentences ("My call: find a different quote — ..."), for
+the 3-round consultation AND both card/x-post revision consults;
+**Antigravity** (accept-edits mode, first agy write dispatch) taught
+`ConsultationTranscript.tsx` to render Ruth's rigid VERDICT block as a
+friendly verification card (verdict chip, styled quote, source, reasoning
+as a sentence; non-matching turns render exactly as before). Verified by
+Claude: both diffs read in full (only the two intended files), parsers
+asserted unchanged, `tsc --noEmit` clean, backend restarted, then a REAL
+card pipeline run end-to-end (theme "the healing power of prayer", job
+9bdf69ec → product 8b7517a9): turns read as genuine conversation, the
+Reviewer held twice with reasons, the human pause worked, the revision
+consult requoted to a verbatim 'Abdu'l-Bahá passage, and the final card is
+quote_grounded=True, 6.2/10 best-effort (kept in the DB — Sheraj can
+delete it from the dashboard if unwanted; ~$0.15 metered spend). AGENTS.md
+hard rule 10 rewritten to record the owner-approved restyle and the two
+surviving machine contracts. Uncommitted, awaiting Sheraj's review.
+
 ### 2026-07-09 — Claude Code (Fable 5), orchestrating ALL THREE workers —
 full app scan + honest README rewrite
 Per Sheraj's ask ("update the README so it reflects the actual app right

@@ -21,6 +21,7 @@ Map of this file:
   7. Steward (P&L) + Trust report + health
 """
 
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,7 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=str(Path(__file__).parent.parent / ".env"), override=True)
 
 from agents.librarian import retrieve, retrieve_ruhi_book1
+from agents.ruhi_book1_source import RUHI_BOOK1_QUOTES
 from agents import layout as layout_opts
 from agents.state import (
     init_db, create_task, update_task_status, log_run, get_all_agent_statuses,
@@ -952,6 +954,63 @@ def _trim_card_quote(text: str, limit: int = 150) -> str:
     return text[:cut].strip()
 
 
+# Cache for agents/ruhi_book1_manifest.json — the SHA256 manifest frozen by
+# scripts/verify_ruhi_book1.py after every corpus entry was machine-verified
+# character-exact against the official Ruhi Book 1 PDF (edition 4.1.2.PE).
+_RUHI_MANIFEST_CACHE: Optional[dict] = None
+
+
+def _load_ruhi_manifest() -> dict:
+    global _RUHI_MANIFEST_CACHE
+    if _RUHI_MANIFEST_CACHE is not None:
+        return _RUHI_MANIFEST_CACHE
+    path = Path(__file__).parent / "ruhi_book1_manifest.json"
+    if not path.exists():
+        raise RuntimeError(
+            "The Ruhi Book 1 verification manifest is missing. Run "
+            "python scripts/verify_ruhi_book1.py --pdf <official pdf> --write-manifest "
+            "before rendering quote cards."
+        )
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"The Ruhi Book 1 manifest could not be read: {exc}") from exc
+    quotes = manifest.get("quotes")
+    if not isinstance(quotes, list) or len(quotes) != len(RUHI_BOOK1_QUOTES):
+        raise RuntimeError(
+            "The Ruhi Book 1 manifest does not match the current corpus size. Re-run "
+            "python scripts/verify_ruhi_book1.py --pdf <official pdf> --write-manifest."
+        )
+    _RUHI_MANIFEST_CACHE = manifest
+    return manifest
+
+
+def _assert_ruhi_verbatim(quote: str) -> None:
+    """
+    Fail loudly unless the about-to-print card quote is a prefix (or all) of a
+    manifest-verified Ruhi Book 1 corpus entry. _trim_card_quote only ever
+    takes leading whole sentences, so a legitimate quote is always such a
+    prefix. This catches stale ChromaDB text (index built before a corpus
+    edit) and unverified corpus edits BEFORE a card can render wrong words —
+    same discipline as _sanitize_claims: never trust, verify in code.
+    """
+    quote = (quote or "").strip()
+    if not quote:
+        raise RuntimeError("Empty card quote reached the verbatim gate — refusing to render.")
+    manifest_quotes = _load_ruhi_manifest()["quotes"]
+    for idx, entry in enumerate(RUHI_BOOK1_QUOTES):
+        text = str(entry["text"])
+        if text.strip().startswith(quote) and \
+                manifest_quotes[idx].get("sha256") == hashlib.sha256(text.encode("utf-8")).hexdigest():
+            return
+    raise RuntimeError(
+        "Card quote is not verbatim from the verified Ruhi Book 1 corpus, so the render "
+        f"was stopped. Offending quote starts: {quote[:80]!r}. Likely causes: a stale "
+        "ChromaDB index (re-run scripts/ingest_ruhi_book1.py) or an unverified corpus "
+        "edit (re-run python scripts/verify_ruhi_book1.py --pdf <official pdf> --write-manifest)."
+    )
+
+
 def _best_matching_citation(quote: str, citations: list[dict]) -> dict:
     """
     Bag-of-words overlap: which of the (up to 3) retrieved Ruhi Book 1
@@ -1140,6 +1199,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
             "were retrieved. Build the index (scripts/ingest_ruhi_book1.py) or retry."
         )
     quote = _trim_card_quote(matched["text"])
+    _assert_ruhi_verbatim(quote)  # character-exact against the verified corpus, or the job fails loudly
     quote_grounded = True  # always true — it's a verbatim excerpt of an indexed Book 1 passage
     citation_src = str(matched.get("source") or "").strip()
 
@@ -1259,6 +1319,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
                                                "steer — keeping the best card."})
                 break
             quote = _trim_card_quote(pick["text"])
+            _assert_ruhi_verbatim(quote)  # same gate as the initial pick — requotes get no exemption
             quote_grounded = True
             citation_src = str(pick.get("source") or "").strip() or citation_src
             # passed_review=None — finding a different passage is mechanical;

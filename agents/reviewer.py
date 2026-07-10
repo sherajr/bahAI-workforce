@@ -455,8 +455,10 @@ def score_quote_card(
         "For EVERY criterion below 7 the note must END with 'Fix: <one concrete achievable "
         "change>'.\n\n"
         "Criteria:\n"
-        "  quote_citation: is the quote accurate, well-chosen for the theme, and correctly "
-        "attributed? An ungrounded quote caps this at 4.\n"
+        "  quote_citation: is the quote well-chosen for the theme and correctly attributed? "
+        "Its TEXT is machine-verified character-exact against Ruhi Book 1 before any render — "
+        "judge selection and fit, never suspect a misquote and never propose rewording. "
+        "An ungrounded quote caps this at 4.\n"
         + ("  translation: is the translation faithful and complete, in a natural, reverent "
            "register a native reader would trust? Flag ANY added, dropped, or distorted meaning.\n"
            if translation else "")

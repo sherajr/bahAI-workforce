@@ -396,7 +396,7 @@ RUHI_BOOK1_QUOTES: list[dict] = [
     {
         "text": "In the beginning of his life man was in the world of the womb, wherein he developed the capacity "
                 "and worthiness to advance to this world. The powers necessary for this world he acquired in "
-                "that world. He needed eyes in this world; he obtained them in the world of the womb. It "
+                "that world. He needed eyes in this world; he obtained them in the world of the womb. . . . It "
                 "followeth that in this world too he must prepare for the world beyond. That which he needeth "
                 "in the world of the Kingdom he must obtain and prepare here.",
         "source": "'Abdu'l-Bahá, The Promulgation of Universal Peace",
@@ -424,7 +424,7 @@ RUHI_BOOK1_QUOTES: list[dict] = [
                 "complete and joyous confidence, through the immensity of the heavens, until, impelled to "
                 "satisfy its hunger, it turneth longingly to the water and clay of the earth below it, and, "
                 "having been entrapped in the mesh of its desire, findeth itself impotent to resume its "
-                "flight to the realms whence it came. Wherefore, O My servants, defile not your wings with "
+                "flight to the realms whence it came. . . . Wherefore, O My servants, defile not your wings with "
                 "the clay of waywardness and vain desires, and suffer them not to be stained with the dust "
                 "of envy and hate, that ye may not be hindered from soaring in the heavens of My divine "
                 "knowledge.",
