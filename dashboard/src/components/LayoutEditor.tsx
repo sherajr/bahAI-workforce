@@ -28,9 +28,20 @@ export function LayoutEditor({ product }: { product: ProductRow }) {
 
   const [lay, setLay] = useState<ProductLayout | null>(null);
   const [preview, setPreview] = useState<{ front: string; back: string } | null>(null);
+  const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (opts.data && !lay) setLay(opts.data.current);
+    if (open) {
+      setDirty(false);
+      setLay(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (opts.data && !lay) {
+      setLay(opts.data.current);
+      setDirty(false);
+    }
   }, [opts.data, lay]);
 
   const previewMut = useMutation({
@@ -54,14 +65,32 @@ export function LayoutEditor({ product }: { product: ProductRow }) {
 
   const save = useMutation({
     mutationFn: () => api.saveLayout(product.id, lay as ProductLayout),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+      // Keep the cached layout options honest: reopening the editor re-seeds
+      // from this cache, so "current" must reflect what was just saved.
+      if (lay) {
+        queryClient.setQueryData<LayoutOptions>(["layout", product.id], (old) =>
+          old ? { ...old, current: lay } : old,
+        );
+      }
+      setDirty(false);
+    },
   });
 
   function set<K extends keyof ProductLayout>(k: K, v: ProductLayout[K]) {
     setLay((cur) => (cur ? { ...cur, [k]: v } : cur));
+    setDirty(true);
+    save.reset();
   }
   function reset() {
-    if (opts.data) setLay({ ...opts.data.defaults });
+    if (opts.data) {
+      if (window.confirm("Reset all layout controls to their defaults?")) {
+        setLay({ ...opts.data.defaults });
+        setDirty(true);
+        save.reset();
+      }
+    }
   }
 
   const ranges = opts.data?.ranges ?? {};
@@ -84,7 +113,17 @@ export function LayoutEditor({ product }: { product: ProductRow }) {
               Adjust
             </Button>
           ) : (
-            <Button variant="ghost" onClick={() => setOpen(false)}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (dirty) {
+                  if (!window.confirm("Discard unsaved layout changes?")) {
+                    return;
+                  }
+                }
+                setOpen(false);
+              }}
+            >
               Close
             </Button>
           )}

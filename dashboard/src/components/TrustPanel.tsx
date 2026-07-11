@@ -24,6 +24,8 @@ export function TrustPanel() {
   const agents = useQuery({ queryKey: ["agents"], queryFn: api.getAgents, refetchInterval: 30_000 });
   const trust = useQuery({ queryKey: ["trust"], queryFn: api.getTrustReport, refetchInterval: 60_000 });
 
+  const activePersonas = agents.data?.filter((a) => rosterFor(a.name) && a.total_runs > 0) ?? [];
+
   return (
     <div className="mx-auto max-w-4xl space-y-5">
       <Card>
@@ -40,15 +42,15 @@ export function TrustPanel() {
           {agents.isError && (
             <ErrorNote>Could not load agents: {(agents.error as Error).message}</ErrorNote>
           )}
-          {/* Only agents that have actually done reviewed work — listing
+          {/* Only real personas that have actually done reviewed work — listing
               never-run roles here would be a promise without a deed. */}
-          {agents.data && agents.data.every((a) => a.total_runs === 0) && (
+          {agents.data && activePersonas.length === 0 && (
             <p className="text-sm text-slate-500">
               No agent has completed a reviewed run yet — run the pipeline once and trust
               scores will appear here.
             </p>
           )}
-          {agents.data?.filter((a) => a.total_runs > 0).map((a) => {
+          {activePersonas.map((a) => {
             const r = rosterFor(a.name);
             return (
             <div key={a.name} className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">

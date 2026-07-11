@@ -94,12 +94,13 @@ def _as_bool(value, default: bool) -> bool:
 def sanitize(product_type: str, raw: dict | None) -> dict:
     """
     Coerce an untrusted layout dict from the dashboard into a safe, complete
-    one. Unknown keys are dropped; every value is clamped to its allowed range
+    one. Non-dicts (None, corrupted layout_json, etc.) are treated as empty.
+    Unknown keys are dropped; every value is clamped to its allowed range
     or reset to its default. Always returns a full dict (defaults filled in),
     so a compositor can rely on every key being present. No text ever flows
     through here — only presentation knobs.
     """
-    raw = raw or {}
+    raw = raw if isinstance(raw, dict) else {}
     is_card = (product_type or "bookmark") == "quote_card"
     d = dict(CARD_DEFAULTS if is_card else BOOKMARK_DEFAULTS)
 

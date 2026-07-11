@@ -115,6 +115,11 @@ def init_db():
                 status TEXT DEFAULT 'pending',    -- 'pending' | 'approved' | 'rejected' | 'done' | 'failed'
                 created_at TEXT DEFAULT (datetime('now', 'localtime'))
             );
+
+            CREATE TABLE IF NOT EXISTS wa_seen (   -- WhatsApp webhook dedupe (ids only, never content)
+                message_id TEXT PRIMARY KEY,
+                seen_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
         """)
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('quiet_hours', '22:30-07:30')"
@@ -138,6 +143,17 @@ def init_db():
         # constraint reapplying itself.
         try:
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)")
+        except sqlite3.OperationalError:
+            pass
+        # Migration: wa_seen table for Meta webhook retry dedupe (ids only).
+        # CREATE TABLE IF NOT EXISTS in the script above covers fresh DBs;
+        # re-run here so existing private/secretary.db files get it too.
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS wa_seen ("
+                "message_id TEXT PRIMARY KEY, "
+                "seen_at TEXT DEFAULT (datetime('now', 'localtime')))"
+            )
         except sqlite3.OperationalError:
             pass
         conn.commit()
@@ -417,6 +433,26 @@ def resolve_pending_action(action_id: int, status: str):
     with _connect() as conn:
         conn.execute("UPDATE pending_actions SET status = ? WHERE id = ?", (status, action_id))
         conn.commit()
+
+
+# --- WhatsApp webhook dedupe (message ids only — never content; rule 15) ---
+
+def seen_wa_message(message_id: str) -> bool:
+    """Record a Meta message id and report whether it was already present.
+
+    INSERT OR IGNORE: first call returns False (new), subsequent calls return
+    True (already seen). Empty/missing ids are the caller's problem — this
+    only stores non-empty ids. Ids live only in private/secretary.db.
+    """
+    if not message_id:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO wa_seen (message_id) VALUES (?)",
+            (message_id,))
+        conn.commit()
+        # rowcount 0 => ignored because the PRIMARY KEY already existed
+        return cur.rowcount == 0
 
 
 # --- Settings ---

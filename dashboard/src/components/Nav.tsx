@@ -1,6 +1,7 @@
 import { Sparkles, Images, Handshake, Settings, MessageCircleHeart, Send } from "lucide-react";
 import { cn } from "../lib/utils";
 import { NineStar } from "./NineStar";
+import { RosterAvatar } from "./ui";
 
 export type Tab = "pipeline" | "products" | "x-posts" | "secretary" | "trust" | "settings";
 
@@ -36,7 +37,7 @@ export function Nav({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void })
             )}
           >
             {avatar ? (
-              <img src={avatar} alt="" className="h-5 w-5 rounded-full object-cover" />
+              <RosterAvatar src={avatar} name={label} className="h-5 w-5" />
             ) : (
               <Icon className="h-4 w-4" />
             )}

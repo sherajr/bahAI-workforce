@@ -766,9 +766,18 @@ def make_executor(event_map: dict, effects: dict):
                     return f"Bad file_id or action ({action!r}) — nothing done."
                 already_hers = gdrive.is_in_her_folder(file_id)
                 if action == "move_to_mine":
-                    gdrive.move_file(file_id, gdrive.ensure_secretary_folder())
-                    effects["workspace"].append(f"moved file {file_id} into your Drive folder")
-                    return f"Moved file {file_id} into your Drive folder."
+                    # Rule 24: free only when already in her sandbox. Moving a
+                    # file INTO her folder from outside still needs approval —
+                    # move_file strips ALL old parents, so this is a real write
+                    # on an owned-elsewhere file, not a no-op re-home.
+                    if already_hers:
+                        gdrive.move_file(file_id, gdrive.ensure_secretary_folder())
+                        effects["workspace"].append(f"moved file {file_id} into your Drive folder")
+                        return f"Moved file {file_id} into your Drive folder."
+                    aid = _queue("drive_write", f"Move file {file_id} into your Drive folder",
+                                {"action": "move_to_mine", "file_id": file_id})
+                    effects["queued_for_approval"].append(f"#{aid} Move file {file_id} into your Drive folder")
+                    return f"That file isn't in your Drive folder — queued as action #{aid} for approval."
                 elif action == "rename":
                     if not new_name:
                         return "Missing new_name — nothing renamed."

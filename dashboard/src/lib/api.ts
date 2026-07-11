@@ -10,7 +10,7 @@ import type {
   RegenerateCardQuoteResult, RegenerateImageResult, RegenerateQuoteResult, ReminderRow,
   SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus, SecretaryUpcoming,
   StewardReport, TaskRow, TrustReport, WhatsAppStatus, XPostApproveResult, XPostEditResult,
-  XPostRegenerateImageResult, XPostStatusResult,
+  XPostRegenerateImageResult, XPostStatusResult, DeedsReport, RecentDeed,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -541,6 +541,52 @@ export const api = {
 
   // Steward
   getStewardReport: () => get<StewardReport>("/steward/report"),
+
+  // Deeds
+  getDeeds: () => get<DeedsReport>("/deeds"),
+  recordDeed: async (payload: { kind: "gift" | "gathering" | "digital"; count?: number; product_id?: string; note?: string }) => {
+    const res = await post<RecentDeed>("/deeds", payload);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "DEED", path: "", status: "OK", ms: 0,
+      detail: `Recorded ${payload.kind} deed: ${payload.count ?? 1}x` + (payload.note ? ` ("${payload.note}")` : "") + (payload.product_id ? ` for product ${payload.product_id}` : "") + ".",
+    });
+    return res;
+  },
+  downloadGatheringSheet: async (productIds: string[], duplex?: boolean) => {
+    const started = performance.now();
+    const ts = new Date().toLocaleTimeString();
+    const path = "/print-sheet";
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ product_ids: productIds, duplex }),
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const data = await res.json();
+        detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data);
+      } catch {
+        /* keep statusText */
+      }
+      pushActivity({ ts, method: "POST", path, status: res.status, ms: Math.round(performance.now() - started) });
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `gathering-sheet.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    pushActivity({
+      ts, method: "PRINT", path, status: "OK", ms: Math.round(performance.now() - started),
+      detail: `Downloaded gathering print sheet for ${productIds.length} products.`,
+    });
+  },
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),

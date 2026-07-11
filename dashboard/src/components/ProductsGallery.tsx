@@ -60,7 +60,17 @@ function PaneImage({
   );
 }
 
-function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => void }) {
+function ProductCard({
+  product,
+  onOpen,
+  selected,
+  onToggleSelect,
+}: {
+  product: ProductRow;
+  onOpen: () => void;
+  selected: boolean;
+  onToggleSelect: () => void;
+}) {
   const review = parseReview(product);
   const overall = review?.overall ?? 0;
   const quoteCard = isQuoteCard(product);
@@ -81,7 +91,18 @@ function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => v
     >
       {/* Quote cards are landscape (3.5×2): stack front over back instead of
           the bookmarks' side-by-side portrait panes. */}
-      <div className={`flex h-56 gap-px overflow-hidden bg-slate-950 ${quoteCard ? "flex-col" : ""}`}>
+      <div className={`flex h-56 gap-px overflow-hidden bg-slate-950 ${quoteCard ? "flex-col" : ""} relative`}>
+        <div
+          className="absolute top-2.5 left-2.5 z-10 flex h-6 w-6 items-center justify-center rounded bg-slate-900/90 border border-slate-800"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            className="h-4 w-4 cursor-pointer accent-amber-400"
+          />
+        </div>
         <PaneImage
           key={`f-${front || artwork}`}
           src={front}
@@ -121,7 +142,17 @@ function ProductCard({ product, onOpen }: { product: ProductRow; onOpen: () => v
 
 // ── Detail drawer ─────────────────────────────────────────────────────────────
 
-function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () => void }) {
+function ProductDrawer({
+  product,
+  onClose,
+  selectedIds,
+  onToggleSelect,
+}: {
+  product: ProductRow;
+  onClose: () => void;
+  selectedIds: string[];
+  onToggleSelect: () => void;
+}) {
   const queryClient = useQueryClient();
   const quoteCard = isQuoteCard(product);
   const cardCopy = parseCardCopy(product);
@@ -205,8 +236,16 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
       >
         <div className="mb-4 flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg text-slate-100">{product.title ?? product.theme}</h2>
-            <div className="mt-1 font-mono text-xs text-slate-500">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(product.id)}
+                onChange={onToggleSelect}
+                className="h-4 w-4 cursor-pointer accent-amber-400"
+              />
+              <h2 className="text-lg text-slate-100">{product.title ?? product.theme}</h2>
+            </div>
+            <div className="mt-1 font-mono text-xs text-slate-500 pl-6">
               product {product.id} · {formatDate(product.created_at)}
               {product.etsy_listing_id && ` · Etsy #${product.etsy_listing_id}`}
             </div>
@@ -264,6 +303,7 @@ function ProductDrawer({ product, onClose }: { product: ProductRow; onClose: () 
           )}
           {quoteCard && <CardRedirectCard product={product} />}
           {quoteCard && <FeedbackCard product={product} />}
+          {product.front_image && <RecordDeedCard product={product} />}
           {listing && <ListingDetail listing={listing} />}
 
           {/* Visual layout editor — both product types. Presentation only;
@@ -512,6 +552,72 @@ function FeedbackCard({ product }: { product: ProductRow }) {
   );
 }
 
+function RecordDeedCard({ product }: { product: ProductRow }) {
+  const queryClient = useQueryClient();
+  const [count, setCount] = useState<number>(1);
+  const [kind, setKind] = useState<"gift" | "gathering" | "digital">("gift");
+  const [note, setNote] = useState("");
+
+  const recordDeed = useMutation({
+    mutationFn: () =>
+      api.recordDeed({
+        kind,
+        count,
+        product_id: product.id,
+        note: note.trim(),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+      queryClient.invalidateQueries({ queryKey: ["steward"] });
+      setCount(1);
+      setNote("");
+    },
+  });
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 pt-4">
+        <h3 className="text-sm font-semibold text-slate-100">Record a gift or share</h3>
+        <p className="text-sm text-slate-400">
+          Log when you hand out this physical print or share it digitally.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as any)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+          >
+            <option value="gift">Gift (handed out)</option>
+            <option value="gathering">Served a Gathering</option>
+            <option value="digital">Shared Digitally</option>
+          </select>
+          <input
+            type="number"
+            min="1"
+            value={count}
+            onChange={(e) => setCount(Math.max(1, parseInt(e.target.value) || 1))}
+            className="w-20 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+          />
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Optional note..."
+            className="flex-1 min-w-[150px] rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-600"
+          />
+          <Button
+            variant="secondary"
+            loading={recordDeed.isPending}
+            onClick={() => recordDeed.mutate()}
+          >
+            Record
+          </Button>
+        </div>
+        {recordDeed.isError && <ErrorNote>{(recordDeed.error as Error).message}</ErrorNote>}
+      </CardContent>
+    </Card>
+  );
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block space-y-1">
@@ -680,6 +786,8 @@ function DrawerImage({ label, src, downloadName }: { label: string; src: string;
 
 export function ProductsGallery() {
   const [openId, setOpenId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [duplex, setDuplex] = useState(true);
 
   const products = useQuery({
     queryKey: ["products"],
@@ -693,43 +801,145 @@ export function ProductsGallery() {
     refetchInterval: 60_000,
   });
 
+  const printGathering = useMutation<void, Error, void>({
+    mutationFn: () => api.downloadGatheringSheet(selectedIds, duplex),
+  });
+
+  const handleToggleSelect = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
   const open = products.data?.find((p) => p.id === openId) ?? null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
       {steward.data && (
         <>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-            <Stat label="Products" value={String(steward.data.total_products)} />
-            <Stat label="Revenue" value={usd(steward.data.total_revenue)} />
-            <Stat label="API costs (est.)" value={usd(steward.data.estimated_costs)} />
-            <Stat
-              label="Spend this month"
-              value={usd(steward.data.month_spend)}
-              accent={steward.data.over_ceiling ? "text-rose-300" : undefined}
-            />
-            <Stat
-              label="Est. profit"
-              value={usd(steward.data.estimated_profit)}
-              accent={steward.data.estimated_profit >= 0 ? "text-emerald-300" : "text-rose-300"}
-            />
+          {/* DEEDS HEADLINE */}
+          <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/30 p-4">
+            <div className="text-[11px] uppercase tracking-widest text-slate-400 font-semibold">Deeds for the Betterment of the World</div>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <Stat label="Cards Gifted" value={String(steward.data.deeds?.cards_gifted ?? 0)} accent="text-emerald-400 font-bold" />
+              <Stat label="Gatherings Served" value={String(steward.data.deeds?.gatherings_served ?? 0)} accent="text-amber-400 font-bold" />
+              <Stat label="Digital Shares" value={String(steward.data.deeds?.digital_shares ?? 0)} accent="text-cyan-400 font-bold" />
+              <Stat label="Feedback Received" value={String(steward.data.deeds?.feedback_count ?? 0)} accent="text-indigo-400 font-bold" />
+            </div>
+            
+            {steward.data.deeds?.recent && steward.data.deeds.recent.length > 0 && (
+              <div className="mt-3 border-t border-slate-800/80 pt-3 text-xs">
+                <div className="mb-2 font-semibold text-slate-400">Recent Deeds</div>
+                <div className="space-y-1.5 max-h-32 overflow-y-auto pr-2">
+                  {steward.data.deeds.recent.map((d) => (
+                    <div key={d.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/30 pb-1 last:border-0 last:pb-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`rounded px-1.5 py-0.5 text-[9px] font-mono uppercase font-semibold ${
+                          d.kind === "gift" ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20" :
+                          d.kind === "gathering" ? "bg-amber-500/10 text-amber-300 border border-amber-500/20" :
+                          "bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+                        }`}>
+                          {d.kind}
+                        </span>
+                        <span className="font-medium text-slate-300">
+                          {d.count}x {d.product_title || (d.product_id ? `product ${d.product_id}` : "deed")}
+                        </span>
+                        {d.note && <span className="text-slate-500 italic">({d.note})</span>}
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-500">
+                        {new Date(d.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
-          {steward.data.legacy_estimated_costs > 0 && (
-            <p className="text-xs text-slate-500">
-              Includes {usd(steward.data.legacy_estimated_costs)} estimated for{" "}
-              {steward.data.legacy_products} product
-              {steward.data.legacy_products === 1 ? "" : "s"} made before per-call metering;
-              every run from now on is metered exactly.
-            </p>
-          )}
-          {steward.data.over_ceiling && (
-            <p className="text-xs text-rose-300">
-              This month's API spend ({usd(steward.data.month_spend)}) has passed the{" "}
-              {usd(steward.data.monthly_ceiling)} moderation ceiling — worth a look before the
-              next big run.
-            </p>
-          )}
+
+          {/* MONEY NUMBERS OR ERROR */}
+          <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/10 p-4">
+            <div className="text-[11px] uppercase tracking-widest text-slate-500 font-semibold">Financial Ledger</div>
+            {steward.data.error ? (
+              <ErrorNote>Spend ledger could not be read: {steward.data.error}</ErrorNote>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                  <Stat label="Products" value={String(steward.data.total_products)} />
+                  <Stat label="Revenue" value={usd(steward.data.total_revenue)} />
+                  <Stat label="API costs (est.)" value={usd(steward.data.estimated_costs)} />
+                  <Stat
+                    label="Spend this month"
+                    value={usd(steward.data.month_spend)}
+                    accent={steward.data.over_ceiling ? "text-rose-300" : undefined}
+                  />
+                  <Stat
+                    label="Est. profit"
+                    value={usd(steward.data.estimated_profit)}
+                    accent={steward.data.estimated_profit >= 0 ? "text-emerald-300" : "text-rose-300"}
+                  />
+                </div>
+                {steward.data.legacy_estimated_costs > 0 && (
+                  <p className="text-xs text-slate-500 mt-2">
+                    Includes {usd(steward.data.legacy_estimated_costs)} estimated for{" "}
+                    {steward.data.legacy_products} product
+                    {steward.data.legacy_products === 1 ? "" : "s"} made before per-call metering;
+                    every run from now on is metered exactly.
+                  </p>
+                )}
+                {steward.data.over_ceiling && (
+                  <p className="text-xs text-rose-300 mt-2">
+                    This month's API spend ({usd(steward.data.month_spend)}) has passed the{" "}
+                    {usd(steward.data.monthly_ceiling)} moderation ceiling — worth a look before the
+                    next big run.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
         </>
+      )}
+
+      {/* Gathering sheet print bar */}
+      {selectedIds.length >= 2 && (
+        <Card className="border-amber-500/30 bg-amber-950/10 p-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-semibold text-amber-200">
+                {selectedIds.length} products selected
+              </span>
+              <button
+                onClick={() => setSelectedIds([])}
+                className="text-xs text-slate-400 hover:text-slate-200"
+              >
+                Clear selection
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={duplex}
+                  onChange={(e) => setDuplex(e.target.checked)}
+                  className="h-4 w-4 cursor-pointer accent-amber-400"
+                />
+                Double-sided printer alignment
+              </label>
+              <Button
+                loading={printGathering.isPending}
+                onClick={() => printGathering.mutate()}
+                variant="primary"
+              >
+                <Printer className="h-4 w-4" />
+                {printGathering.isPending ? "Generating PDF..." : "Print gathering sheet"}
+              </Button>
+            </div>
+          </div>
+          {printGathering.isError && (
+            <div className="mt-3">
+              <ErrorNote>{printGathering.error.message}</ErrorNote>
+            </div>
+          )}
+        </Card>
       )}
 
       {products.isLoading && <p className="text-sm text-slate-500">Loading products...</p>}
@@ -749,11 +959,24 @@ export function ProductsGallery() {
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
         {products.data?.map((p) => (
-          <ProductCard key={p.id} product={p} onOpen={() => setOpenId(p.id)} />
+          <ProductCard
+            key={p.id}
+            product={p}
+            onOpen={() => setOpenId(p.id)}
+            selected={selectedIds.includes(p.id)}
+            onToggleSelect={() => handleToggleSelect(p.id)}
+          />
         ))}
       </div>
 
-      {open && <ProductDrawer product={open} onClose={() => setOpenId(null)} />}
+      {open && (
+        <ProductDrawer
+          product={open}
+          onClose={() => setOpenId(null)}
+          selectedIds={selectedIds}
+          onToggleSelect={() => handleToggleSelect(open.id)}
+        />
+      )}
     </div>
   );
 }

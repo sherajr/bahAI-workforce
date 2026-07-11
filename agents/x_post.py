@@ -75,8 +75,10 @@ MAX_ATTEMPTS = 3  # 1 initial draft + 2 revisions
 
 # AI-artwork/provenance disclosure — code-appended, never LLM-written (same
 # class as etsy.AI_ART_DISCLOSURE and the card pipeline's CARD_ART_DISCLOSURE).
-# Appended only at POST time (post_tweet), and only if it still fits.
-AI_DISCLOSURE_SUFFIX = " 🤖"
+# Appended at POST time (post_tweet); drafts must leave room for it
+# (TWEET_DRAFT_MAX) so the disclosure is never silently dropped.
+AI_DISCLOSURE_SUFFIX = " · AI-assisted art"
+TWEET_DRAFT_MAX = TWEET_HARD_MAX - len(AI_DISCLOSURE_SUFFIX)
 
 
 # --- Phase 1: Coordinator Briefing (frozen, no LLM) -------------------------
@@ -257,7 +259,8 @@ def scribe_write_tweet_no_quote(topic: str, tone: str, inspiration: list[dict],
         "This post does NOT quote anyone directly — it's the team's own original reflection, "
         "inspired by (but not reproducing) the background above.\n\n"
         "Rules:\n"
-        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_HARD_MAX} is the hard maximum.\n"
+        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_DRAFT_MAX} is the hard maximum "
+        f"(a short AI-art disclosure is appended at post time).\n"
         "- No quotation marks, and do not name or attribute any words to Bahá'u'lláh, "
         "'Abdu'l-Bahá, Shoghi Effendi, The Báb, or the Universal House of Justice — this is your "
         "own reflection, not their words.\n"
@@ -288,7 +291,8 @@ def scribe_revise_tweet_no_quote(topic: str, tone: str, inspiration: list[dict],
         f"{inspiration_block}\n\n"
         "This post does NOT quote anyone directly — keep it an original reflection.\n\n"
         "Rules:\n"
-        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_HARD_MAX} is the hard maximum.\n"
+        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_DRAFT_MAX} is the hard maximum "
+        f"(a short AI-art disclosure is appended at post time).\n"
         "- No quotation marks, and do not name or attribute any words to Bahá'u'lláh, "
         "'Abdu'l-Bahá, Shoghi Effendi, The Báb, or the Universal House of Justice.\n"
         "- Output ONLY the revised tweet text. The first character of your reply must be the "
@@ -316,7 +320,8 @@ def scribe_write_tweet(topic: str, tone: str, quote: str, author: str,
         f'"..." if needed, but every word you keep must match this text exactly):\n'
         f'"{quote}"\n— {author}\n\n'
         "Rules:\n"
-        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_HARD_MAX} is the hard maximum.\n"
+        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_DRAFT_MAX} is the hard maximum "
+        f"(a short AI-art disclosure is appended at post time).\n"
         f"- Include attribution to {author}.\n"
         "- Warm and grounded, never salesy.\n"
         "- Output ONLY the tweet text. The first character of your reply must be the first "
@@ -340,7 +345,8 @@ def scribe_revise_tweet(topic: str, tone: str, quote: str, author: str,
         "The locked quote you must keep using (verbatim; may shorten with \"...\"):\n"
         f'"{quote}"\n— {author}\n\n'
         "Rules:\n"
-        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_HARD_MAX} is the hard maximum.\n"
+        f"- Aim for about {TWEET_SOFT_TARGET} characters; {TWEET_DRAFT_MAX} is the hard maximum "
+        f"(a short AI-art disclosure is appended at post time).\n"
         f"- Include attribution to {author}.\n"
         "- Output ONLY the revised tweet text. The first character of your reply must be the "
         "first character of the tweet — no preamble, no labels, no explanation.\n"
@@ -433,10 +439,17 @@ def _check_no_named_authors(tweet: str) -> tuple[bool, str]:
 
 
 def _check_length(tweet: str) -> tuple[bool, str]:
+    """Draft budget reserves room for AI_DISCLOSURE_SUFFIX (appended at post time).
+    Never auto-truncate — a too-long draft fails review so the revision loop
+    (or a human edit) shortens it with the quote intact."""
     n = len(tweet)
-    if n > TWEET_HARD_MAX:
-        return False, f"tweet is {n} characters — exceeds the {TWEET_HARD_MAX} hard maximum"
-    return True, f"{n}/{TWEET_HARD_MAX} characters"
+    if n > TWEET_DRAFT_MAX:
+        return False, (
+            f"tweet is {n} characters — exceeds the {TWEET_DRAFT_MAX} draft maximum "
+            f"(must leave room for the AI-art disclosure; posted hard limit is "
+            f"{TWEET_HARD_MAX})"
+        )
+    return True, f"{n}/{TWEET_DRAFT_MAX} draft characters ({TWEET_HARD_MAX} posted max)"
 
 
 def review_tweet(topic: str, tweet: str, quote: str, author: str,
@@ -867,10 +880,17 @@ X_HANDLE = "peaceAntz"
 
 
 def _with_disclosure(tweet_text: str) -> str:
-    """Code-appended, never LLM-written (CLAUDE.md rule 8) — omitted silently
-    if it would push the tweet over the hard character limit."""
+    """Code-appended, never LLM-written (CLAUDE.md rule 8). Always returns text
+    that includes the disclosure — never silently drops it. Drafts must stay
+    within TWEET_DRAFT_MAX so this always fits; if they don't, fail loudly."""
     candidate = f"{tweet_text}{AI_DISCLOSURE_SUFFIX}"
-    return candidate if len(candidate) <= TWEET_HARD_MAX else tweet_text
+    if len(candidate) > TWEET_HARD_MAX:
+        raise ValueError(
+            f"Tweet with AI-art disclosure is {len(candidate)} characters "
+            f"(limit {TWEET_HARD_MAX}). Shorten the draft to at most "
+            f"{TWEET_DRAFT_MAX} characters before posting — disclosure is never omitted."
+        )
+    return candidate
 
 
 def post_tweet(tweet_text: str, image_path: str = None) -> dict:

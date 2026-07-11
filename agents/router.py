@@ -4,7 +4,7 @@ Routes each task type to the right LLM backend:
   grok  → xAI Grok API (paid, higher quality, vision) — task types in GROK_TASK_TYPES
 
 Usage:
-    result = call_llm("copy", messages=[...])
+    result = call_llm("reviewer", messages=[...])
     result = call_llm("plan", messages=[...])
 """
 
@@ -35,7 +35,7 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 # Task types routed to Grok; everything else goes local.
 # Sheraj's directive (2026-07): only the Reviewer and Artist use the paid xAI API
 # (they need vision); the Scribe and Librarian run on the local model.
-GROK_TASK_TYPES = {"copy", "creative_writing", "reviewer"}
+GROK_TASK_TYPES = {"creative_writing", "reviewer"}
 
 # Flat per-call cost estimates (USD) for the Steward's metered P&L. Rough but
 # consistent — refine against real xAI invoices; the point is that repaint-heavy
@@ -315,5 +315,5 @@ if __name__ == "__main__":
     print(f"Local: {reply.strip()}")
 
     print("\nTesting Grok...")
-    reply = call_llm("copy", [{"role": "user", "content": "Say 'Grok OK' and nothing else."}], max_tokens=20)
+    reply = call_llm("reviewer", [{"role": "user", "content": "Say 'Grok OK' and nothing else."}], max_tokens=20)
     print(f"Grok: {reply.strip()}")

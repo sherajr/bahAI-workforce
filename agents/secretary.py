@@ -251,7 +251,12 @@ def execute_pending_action(action_id: int) -> str:
         elif action["kind"] == "whatsapp_send":
             whatsapp.send_best_effort(payload["to"], payload["body"])
         elif action["kind"] == "drive_write":
-            gdrive.apply_write(payload)
+            # move_to_mine is queued by organize_drive_file when the file is
+            # outside her sandbox (rule 24); resolve parent at approval time.
+            if payload.get("action") == "move_to_mine":
+                gdrive.move_file(payload["file_id"], gdrive.ensure_secretary_folder())
+            else:
+                gdrive.apply_write(payload)
         elif action["kind"] == "docs_write":
             gdocs.apply_write(payload)
         elif action["kind"] == "sheets_write":

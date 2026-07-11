@@ -49,11 +49,13 @@ making more changes.
   backend ids to display names (Ruth/Librarian, Theo/Artist, Clara/Scribe,
   Amos/Reviewer, Nora/Steward, Sofia/Translator, alongside Abigail), wired
   into the Trust tab and consultation transcript. Display layer only —
-  backend still keys on lowercase ids. **Six avatar portraits were generated
-  via the Artist's xAI pipeline and a montage was sent to Sheraj for
-  approval — his response on whether to keep or regenerate any of them is
-  still pending.** Avatars live in `dashboard/public/roster/` (gitignored,
-  private, like Abigail's photo).
+  backend still keys on lowercase ids. **Avatars approved by Sheraj
+  2026-07-10** ("pics are good, more zoomed in on their faces though") —
+  all six were re-cropped tight on the faces (originals preserved in
+  `dashboard/public/roster/originals/`; re-crop script pattern: crop from
+  the ORIGINAL each time, per-face centers, so it's idempotent). Avatars
+  live in `dashboard/public/roster/` (gitignored, private, like Abigail's
+  photo).
 - **Manual-edit honesty fix** — hand-editing a bookmark's quote via
   `PATCH /products/{id}` now flags `quote_verified: false` (dashboard shows
   a warning) and re-renders the printed face, and the honesty scrub
@@ -70,13 +72,15 @@ making more changes.
 **Deferred / proposed but not started** (from
 `docs/improvement-plan-2026-07-08.md`'s Part 2 audit — Sheraj hasn't asked
 for these yet, listed so nobody re-discovers them from scratch):
-- Retire the vestigial "Operator" and "Producer" labels (they're not real
-  agents — Operator is just a task-assignee string, Producer is one log
-  line at Etsy-publish time).
-- Hide non-persona rows (`compositor`, `consultation`) from the Trust tab —
-  they accumulate trust-table stats but no gate ever reads them.
+- ~~Retire the vestigial "Operator" and "Producer" labels~~ — **done
+  2026-07-10 by Grok** (assignee → `pipeline`, publish log → `steward`,
+  removed from `AGENT_NAMES` + dead trust-row cleanup on init, dead
+  persona/`plan`/`produce` prompt-builder entries removed).
+- ~~Hide non-persona rows (`compositor`, `consultation`) from the Trust tab~~ — **done
+  2026-07-10 by Antigravity** (filtered to active personas with runs).
 - Relabel the Canva-autofill `log_run` entry from `"artist"` to whichever
-  persona ends up representing publishing (currently misattributed).
+  persona ends up representing publishing (currently misattributed —
+  publish itself now logs under `steward`).
 - ~~Remove the dead `framing_contribution` scripture entry and unused
   `GROK_TASK_TYPES` entries~~ — **done, see Activity Log below** (dispatched
   to Grok as the first real orchestration test).
@@ -90,28 +94,114 @@ for these yet, listed so nobody re-discovers them from scratch):
   live, backend restarted — see Activity Log). Her tool now mirrors the
   dashboard PATCH path: `_sanitize_claims` scrub, `quote_verified=false`
   demotion on quote change, re-render that degrades to a note.
-- **New (low severity):** corrupted non-dict `layout_json` crashes
-  `GET /products/{id}/layout` (`layout.py::sanitize` assumes `.get()`);
-  not reachable from the POST endpoints (Pydantic rejects non-dict).
-- **New (UX, advisory):** 5 ranked LayoutEditor improvements from
-  Antigravity's review, top one verified real: the "Saved." badge
-  (`LayoutEditor.tsx:193`) never resets when sliders change afterward;
-  also no unsaved-changes guard on close, no confirm on Reset.
-
-- **New (docs, tiny):** `api.py:2762`'s endpoint docstring claims the Etsy
-  price is "parsed from price_note" — the code correctly uses
-  `etsy.BOOKMARK_PRICE` (rule 13); only the docstring is wrong (found by
-  Grok during the 2026-07-09 reality audit).
+- ~~corrupted non-dict `layout_json` crash on GET layout~~ — **done
+  2026-07-10 by Grok** (`sanitize` treats any non-dict as `{}`).
+- ~~New (UX, advisory): LayoutEditor improvements~~ — **done
+  2026-07-10 by Antigravity** (fixed Saved badge reset, close guard, and confirm on Reset).
+- ~~etsy_publish docstring "price parsed from price_note"~~ — **done
+  2026-07-10 by Grok** (now correctly documents policy price / rule 13).
 
 **Blocked on Sheraj:**
-- Avatar approval (keep the six as generated, or regenerate any).
-- Whether to fix the smaller findings above (layout GET crash edge,
-  LayoutEditor UX list, docstring), and whether to proceed with the older
-  deferred cleanup list.
+- Whether to proceed with the Canva-autofill log_run relabel (last remaining
+  deferred item).
 
 ---
 
 ## Activity Log (newest first)
+
+### 2026-07-10 — Claude Code (Fable 5), orchestrating Grok ×3 + Antigravity —
+audit plan executed: safety, honesty, and the deeds-first reorientation (Phases 1–2)
+Sheraj greenlit the audit plan. Four sequential edit waves, each diff-reviewed
+and re-verified by Claude before the next: **W1 Grok (Secretary safety)** —
+rule-24 Drive move now queues for approval like rename/trash (+ approval-time
+executor), all-day events get Google's exclusive end date, WhatsApp webhook
+dedupes on message_id (`wa_seen` in private DB, ids only), quiet-hours
+calendar reminders persist via the reminders table instead of dropping.
+**W2 Grok (honesty+hygiene)** — X disclosure is now " · AI-assisted art",
+never silently dropped (over-budget drafts fail visibly; no auto-truncation
+of quotes), `get_spend_summary` returns an `error` field instead of fake $0,
+Canva autofill parked behind `CANVA_AUTOFILL_ENABLED` (default OFF, visible
+skip note, relabeled steward), rule-14 `log_run` alignment (mechanical steps
+→ None; reviewer/grounding/translator judgments kept), dead code removed
+(`compositor.render_bookmark`, `"copy"` task type, reviewer "round 2" label).
+Note: W2's first dispatch made zero edits — Grok stopped at the uncommitted
+tree per the multi-coder norm; re-dispatched with explicit authorization.
+**W3 Grok (deeds backend)** — `distributions` table + `add_distribution`/
+`get_deeds_summary` in state.py; `POST/GET /deeds`; Steward report now leads
+with a `deeds` key; `print_sheet` accepts multiple products per sheet
+(cycled grid) + `duplex` column-mirroring for long-edge flip; new
+`POST /print-sheet {product_ids, duplex}` (PDF response, 422s on mixed
+types/missing faces). **W4 Antigravity (dashboard)** — Steward panel shows
+"Deeds for the Betterment of the World" ABOVE the Financial Ledger (+ recent
+deeds, red note on ledger error), "Record a gift" in the product drawer,
+multi-select + "Print gathering sheet" with duplex toggle, ErrorNotes on
+SecretaryPanel/XPostsPanel queries, Canva skip reason visible in
+PipelinePanel, Nav uses RosterAvatar. All verified: imports, offline ledger
+test, TestClient (deeds 200/422, mixed sheet PDFs 1.5MB real renders, 422
+paths), `tsc --noEmit` clean, backend restarted, live /deeds + steward-with-
+deeds + /products 200. Remaining from the audit plan (deliberately deferred,
+need their own sessions): devotional-gathering KIT pipeline (N new cards +
+program page), Abigail Phase 4 recovery rhythms, grounding-bar tightening
+for bookmarks, retrieval enrichment, free share-image exports, multilingual
+packs. Nothing committed yet — owner decides.
+
+### 2026-07-10 — Claude Code (Fable 5), orchestrating all four coders — full
+read-only codebase audit against the mission (deeds first, money as byproduct)
+Sheraj set the direction explicitly: the workforce prioritizes pure and goodly
+deeds for the betterment of the world; money is a byproduct. Four parallel
+read-only investigations (Grok: pipelines; Codex: Secretary+integrations;
+Antigravity: dashboard; a Claude subagent: output/economy/docs). Full reports
+in the session scratchpad; synthesis + plan delivered to Sheraj in chat.
+**Two claims verified by Claude as REAL, both unfixed as of this entry:**
+(1) **rule-24 violation** — `secretary_tools.py` `organize_drive_file`'s
+`move_to_mine` calls `gdrive.move_file` with NO `is_in_her_folder` gate
+(rename/trash gate correctly), and `move_file` strips all old parents — an
+LLM tool call can relocate ANY Drive file without approval; (2) the X post's
+AI-art disclosure is a lone " 🤖" emoji, silently omitted when the tweet is
+long (`x_post.py::_with_disclosure`) — weakest disclosure on the only live
+public channel. Other headline themes: Canva autofill is 10/10 broken and
+still runs every pipeline; Steward returns $0 on DB error; several dashboard
+panels swallow query errors; quiet-hours can permanently drop calendar
+reminders; all-day events get an invalid end date; WhatsApp webhook has no
+message_id dedupe; Steward/dashboard speak P&L while the working deed-path
+(print sheets, giveaways, feedback) has no headline metrics. No code changed
+this session (audit only).
+
+### 2026-07-10 — Claude Code (Fable 5), orchestrating Grok + Antigravity —
+avatar face-crops, small-fix batch, Operator/Producer retirement (integration note)
+Sheraj approved all three pending decision items in one go. Claude scoped
+everything against the real code first, then split: avatars done directly
+(cropping needs eyes — all six re-cropped ~55% tighter on the faces with
+per-face centers, before/after viewed, originals kept in
+`roster/originals/`); backend batch dispatched to Grok and frontend batch
+to Antigravity (their entries below). Both dispatches came back clean
+(no repeat of Codex's 2026-07-10 encoding corruption) and every claim was
+re-verified independently: full diffs read, imports + sanitize edge cases
+re-run, `tsc --noEmit` clean, backend restarted, live `/agents` confirms
+the operator/producer trust rows are deleted. **One real regression caught
+in review and fixed by Claude:** Antigravity's LayoutEditor rework re-seeds
+the controls from the cached layout query on reopen, but a save never
+updated that cache — save→close→reopen would have shown pre-save knobs.
+Fixed in `save.onSuccess` via `queryClient.setQueryData` (keeps the cached
+`current` honest). Dashboard-visible: tighter avatar faces everywhere,
+honest Saved badge, discard/reset confirms, Trust tab shows only the six
+named personas + Abigail.
+
+### 2026-07-10 — Antigravity — LayoutEditor UX fixes + TrustPanel persona filtering
+Implemented four owner-approved dashboard fixes: (1) LayoutEditor "Saved." badge now resets via `save.reset()` on control change (`set()`) or default `reset()`; (2) added a `dirty` state that prompts via `window.confirm` if trying to close the LayoutEditor with unsaved changes; (3) added `window.confirm` before resetting LayoutEditor controls; (4) filtered the TrustPanel agent roster to show only real personas (`rosterFor(a.name)` is truthy and `total_runs > 0`), aligning both the grid rows and the empty state check.
+Files: [LayoutEditor.tsx](file:///C:/Users/Sheraj/Documents/bahAI-workforce/dashboard/src/components/LayoutEditor.tsx), [TrustPanel.tsx](file:///C:/Users/Sheraj/Documents/bahAI-workforce/dashboard/src/components/TrustPanel.tsx).
+
+### 2026-07-10 — Grok — three small backend audit fixes
+Closed three audited items: (1) `layout.sanitize` now treats any non-dict
+`layout_json` as `{}` so `GET /products/{id}/layout` no longer crashes on
+corrupted data; (2) `etsy_publish` docstring corrected to match rule 13
+(price from `etsy.BOOKMARK_PRICE`, not LLM prose); (3) retired vestigial
+operator/producer labels — task assignee is `pipeline`, Etsy publish
+`log_run` is under `steward`, both names removed from `AGENT_NAMES` with
+a one-time `DELETE` on init, and unused persona/`plan`/`produce` entries
+dropped from `system_prompt_builder.py` after confirming no callers.
+Files: `agents/layout.py`, `agents/api.py`, `agents/state.py`,
+`agents/system_prompt_builder.py`. No git commit; orchestrator restarts.
 
 ### 2026-07-10 — Claude Code (Fable 5), orchestrating (Codex dispatch rejected) —
 card quotes now machine-verified character-exact against the official Ruhi Book 1 PDF

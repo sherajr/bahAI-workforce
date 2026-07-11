@@ -197,9 +197,14 @@ def create_event(summary: str, start_iso: str, end_iso: str = None,
             end_iso = (datetime.fromisoformat(start_iso) + timedelta(hours=1)).isoformat()
         body["start"] = _dt_block(start_iso)
         body["end"] = _dt_block(end_iso)
-    else:  # all-day
+    else:  # all-day — Google requires an EXCLUSIVE end date
         body["start"] = {"date": start_iso}
-        body["end"] = {"date": end_iso or start_iso}
+        end_date = end_iso or start_iso
+        # One-day (or missing end) must span start..start+1 exclusive.
+        # Multi-day callers already pass end > start (exclusive); leave those alone.
+        if end_date <= start_iso:
+            end_date = (datetime.fromisoformat(start_iso).date() + timedelta(days=1)).isoformat()
+        body["end"] = {"date": end_date}
     resp = requests.post(
         f"{CAL_API}/calendars/{requests.utils.quote(cal_id, safe='')}/events",
         headers=_headers(), json=body, timeout=30)

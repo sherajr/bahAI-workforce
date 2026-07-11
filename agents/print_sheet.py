@@ -1,25 +1,31 @@
 """
-Print Sheet -- arranges an existing front/back card image pair (bookmark or
+Print Sheet -- arranges existing front/back card image pair(s) (bookmark or
 quote-card faces, or any future product) into a cut-tolerant, multi-up
 Letter-page layout for home printing.
 
 Design notes:
-- Card physical size is derived from the front image's OWN pixel dimensions
-  at DPI (matching the true-300dpi convention already established in
-  compositor.py) -- this module has no opinion on which product made the
+- Card physical size is derived from the first front image's OWN pixel
+  dimensions at DPI (matching the true-300dpi convention already established
+  in compositor.py) -- this module has no opinion on which product made the
   PNGs or their aspect ratio. A 1050x600 quote-card face becomes a 3.5x2in
   card; a 600x1800 bookmark face becomes a 2x6in card; automatically.
 - Grid size (cols x rows) is computed to fill a US Letter page for whatever
   that card size turns out to be.
+- Multiple products: pass a list of (front, back) pairs; the grid is filled
+  by cycling through them in order so one sheet can carry a set of different
+  cards for a gathering. A single pair matches the original one-product
+  layout.
 - The gaps between cards, AND the outer margin, are filled with one
   continuous, non-directional textured pattern instead of white space.
   Because the pattern looks the same everywhere, a cut that wanders a
   little in either direction still leaves every card looking intentionally
   framed -- no precision cutting required. A double keyline sits just
   inside each card's true edge as a second fallback frame.
-- Output is a single 2-page PDF: page 1 = fronts grid, page 2 = backs grid,
-  each card at the same grid position on both pages, so pairing them up
-  after cutting (or gluing front-to-back) is just "match the position."
+- Output is a single 2-page PDF: page 1 = fronts grid, page 2 = backs grid.
+  Default (duplex=False): each card at the same grid position on both pages
+  (cut-then-pair layout). duplex=True: page 2 mirrors COLUMNS within each
+  row so a home double-sided printer using long-edge flip aligns each back
+  with its front (see build_print_sheet docstring).
 """
 
 import math
@@ -120,8 +126,19 @@ def _auto_grid(card_w_in: float, card_h_in: float, seam_in: float = SEAM_IN) -> 
     return max_count(card_w_in, PAGE_W_IN), max_count(card_h_in, PAGE_H_IN)
 
 
-def _sheet_page(card_img: Image.Image, card_w_px: int, card_h_px: int,
-                 cols: int, rows: int, seam_px: int, palette: dict) -> Image.Image:
+def _sheet_page(card_imgs: list, card_w_px: int, card_h_px: int,
+                 cols: int, rows: int, seam_px: int, palette: dict,
+                 mirror_cols: bool = False) -> Image.Image:
+    """
+    Lay card images onto one Letter page. card_imgs is cycled in row-major
+    order across the grid. When mirror_cols is True, the image chosen for
+    each cell comes from the column-mirrored logical slot (for duplex
+    long-edge flip alignment of backs to fronts).
+    """
+    if not card_imgs:
+        raise ValueError("card_imgs must contain at least one image")
+    n = len(card_imgs)
+
     block_w = cols * card_w_px + (cols - 1) * seam_px + 2 * seam_px
     block_h = rows * card_h_px + (rows - 1) * seam_px + 2 * seam_px
     bx = (PAGE_W_PX - block_w) // 2
@@ -133,6 +150,11 @@ def _sheet_page(card_img: Image.Image, card_w_px: int, card_h_px: int,
 
     for r in range(rows):
         for c in range(cols):
+            # Logical column for which card belongs under this physical cell
+            # after a long-edge duplex flip (see build_print_sheet).
+            src_c = (cols - 1 - c) if mirror_cols else c
+            logical_idx = r * cols + src_c
+            card_img = card_imgs[logical_idx % n]
             x = bx + seam_px + c * (card_w_px + seam_px)
             y = by + seam_px + r * (card_h_px + seam_px)
             page.paste(card_img, (x, y))
@@ -161,15 +183,30 @@ def _sheet_page(card_img: Image.Image, card_w_px: int, card_h_px: int,
     return page
 
 
-def build_print_sheet(front_path: str, back_path: str, out_pdf_path: str = None,
-                       palette: dict = None) -> str:
+def build_print_sheet(front_path: str = None, back_path: str = None,
+                       out_pdf_path: str = None, palette: dict = None,
+                       pairs: list = None, duplex: bool = False) -> str:
     """
-    Build a 2-page Letter PDF from an existing front/back image pair:
-    page 1 is a grid of the front face, page 2 the same grid of the back
-    face, both at the card's true printed size (derived from the front
-    image's own pixel dimensions at 300dpi). Gaps and outer margin are
-    filled with a continuous textured pattern plus a keyline on every
-    card, so cuts don't need to be precise. Returns the output path.
+    Build a 2-page Letter PDF from one or more front/back image pairs.
+
+    Call styles (both supported; existing single-product callers unchanged):
+      build_print_sheet(front_path, back_path, out_pdf_path=...)
+      build_print_sheet(pairs=[(front, back), ...], out_pdf_path=..., duplex=...)
+
+    Page 1 is a grid of front faces, page 2 the backs. Card size and grid
+    count are derived from the first front's pixel dimensions at 300dpi.
+    With multiple pairs the grid cycles through them in order (slot i uses
+    pairs[i % len(pairs)]) so a gathering can print a mixed set on one sheet.
+    A single pair uses the first front at native size and fits only the back
+    — same as the original one-product path.
+
+    duplex (default False):
+      False — cut-then-pair layout: same grid position on both pages.
+      True  — page 2 mirrors COLUMNS within each row so a home double-sided
+              printer using long-edge flip aligns each back with its front.
+              Assumption: the printer's duplex mode is long-edge (flip on the
+              11" edge of US Letter / portrait). Short-edge flip is NOT
+              supported and would misalign cards.
 
     out_pdf_path defaults to outputs/print-sheet-<random>.pdf if not given
     -- pass an explicit path (e.g. keyed by product_id) when you want
@@ -177,20 +214,48 @@ def build_print_sheet(front_path: str, back_path: str, out_pdf_path: str = None,
     """
     palette = palette or GOLD_PALETTE
 
-    front_raw = _load_flat(front_path)
-    back_raw = _load_flat(back_path)
+    if pairs is None:
+        if not front_path or not back_path:
+            raise ValueError("front_path and back_path are required when pairs is not given")
+        pairs = [(front_path, back_path)]
+    if not pairs:
+        raise ValueError("pairs must contain at least one (front, back) path tuple")
 
-    card_w_px, card_h_px = front_raw.size
+    prepared_fronts: list[Image.Image] = []
+    prepared_backs: list[Image.Image] = []
+    card_w_px = card_h_px = 0
+    ratio = 1.0
+
+    for i, (fp, bp) in enumerate(pairs):
+        front_raw = _load_flat(fp)
+        back_raw = _load_flat(bp)
+        if i == 0:
+            card_w_px, card_h_px = front_raw.size
+            ratio = card_w_px / card_h_px
+            # First front stays at native size (byte-compatible single-pair path)
+            prepared_fronts.append(front_raw)
+        else:
+            prepared_fronts.append(
+                _fit_crop(front_raw, ratio).resize((card_w_px, card_h_px), _RESAMPLE)
+            )
+        prepared_backs.append(
+            _fit_crop(back_raw, ratio).resize((card_w_px, card_h_px), _RESAMPLE)
+        )
+
     card_w_in, card_h_in = card_w_px / DPI, card_h_px / DPI
-    ratio = card_w_px / card_h_px
-
-    back_card = _fit_crop(back_raw, ratio).resize((card_w_px, card_h_px), _RESAMPLE)
-
     cols, rows = _auto_grid(card_w_in, card_h_in)
     seam_px = round(SEAM_IN * DPI)
 
-    front_page = _sheet_page(front_raw, card_w_px, card_h_px, cols, rows, seam_px, palette)
-    back_page = _sheet_page(back_card, card_w_px, card_h_px, cols, rows, seam_px, palette)
+    # Single-pair path: pass a one-element list so cycling is a no-op and
+    # every cell gets the same image (same as the original single Image paste).
+    front_page = _sheet_page(
+        prepared_fronts, card_w_px, card_h_px, cols, rows, seam_px, palette,
+        mirror_cols=False,
+    )
+    back_page = _sheet_page(
+        prepared_backs, card_w_px, card_h_px, cols, rows, seam_px, palette,
+        mirror_cols=bool(duplex),
+    )
 
     if out_pdf_path is None:
         OUTPUTS_DIR.mkdir(exist_ok=True)

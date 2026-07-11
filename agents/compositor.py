@@ -238,16 +238,3 @@ def render_bookmark_pair(image_path: str, quote: str, layout: dict | None = None
     _composite_back(back_img).convert("RGB").save(back_path, "PNG", dpi=(300, 300))
 
     return {"front_path": front_path, "back_path": back_path}
-
-
-def render_bookmark(image_path: str, quote: str, output_path: str = None,
-                    layout: dict | None = None) -> str:
-    """Single-image fallback: treat the whole image as a 1:3 front face."""
-    img = Image.open(image_path).convert("RGBA")
-    img = _normalise_ratio(img, 1, 3)
-    img = img.resize(FACE_TARGET_PX, _RESAMPLE)
-    result = _composite_front(img, quote, layout).convert("RGB")
-    if not output_path:
-        output_path = str(OUTPUTS_DIR / f"bookmark-final-{uuid.uuid4().hex[:8]}.png")
-    result.save(output_path, "PNG", dpi=(300, 300))
-    return output_path

@@ -51,8 +51,10 @@ export function SecretaryPanel() {
   const [messages, setMessages] = useState<SecretaryMessage[]>([]);
   const [upcoming, setUpcoming] = useState<SecretaryUpcoming | null>(null);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [approvalsError, setApprovalsError] = useState<string | null>(null);
   const [waStatus, setWaStatus] = useState<WhatsAppStatus | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [contactsError, setContactsError] = useState<string | null>(null);
   const [newContactName, setNewContactName] = useState("");
   const [newContactPhone, setNewContactPhone] = useState("");
   const [draft, setDraft] = useState("");
@@ -69,9 +71,24 @@ export function SecretaryPanel() {
   const refreshSide = useCallback(() => {
     api.getSecretaryStatus().then(setStatus).catch(() => setStatus(null));
     api.getSecretaryUpcoming(14).then(setUpcoming).catch(() => setUpcoming(null));
-    api.getSecretaryApprovals().then((r) => setApprovals(r.pending)).catch(() => {});
+    
+    setApprovalsError(null);
+    api.getSecretaryApprovals()
+      .then((r) => setApprovals(r.pending))
+      .catch((err) => {
+        setApprovals([]);
+        setApprovalsError(err instanceof Error ? err.message : String(err));
+      });
+      
     api.getWhatsAppStatus().then(setWaStatus).catch(() => setWaStatus(null));
-    api.getContacts().then((r) => setContacts(r.contacts)).catch(() => {});
+    
+    setContactsError(null);
+    api.getContacts()
+      .then((r) => setContacts(r.contacts))
+      .catch((err) => {
+        setContacts([]);
+        setContactsError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   const refreshChat = useCallback(() => {
@@ -319,8 +336,8 @@ export function SecretaryPanel() {
 
         {/* ── Side column ── */}
         <div className="flex min-h-0 flex-[2] flex-col gap-4 overflow-y-auto pr-1">
-          {/* Approvals — only when something is waiting */}
-          {approvals.length > 0 && (
+          {/* Approvals — only when something is waiting or failed */}
+          {(approvals.length > 0 || approvalsError !== null) && (
             <Card className="border-amber-400/30">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -329,18 +346,24 @@ export function SecretaryPanel() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <p className="text-xs text-slate-500">
-                  These touch calendars Abigail doesn't own, so nothing happens until you say so.
-                </p>
-                {approvals.map((a) => (
-                  <div key={a.id} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
-                    <div className="text-sm text-slate-200">{a.description}</div>
-                    <div className="mt-2 flex gap-2">
-                      <Button onClick={() => resolveApproval(a.id, true)}>Approve</Button>
-                      <Button variant="ghost" onClick={() => resolveApproval(a.id, false)}>Reject</Button>
-                    </div>
-                  </div>
-                ))}
+                {approvalsError !== null ? (
+                  <ErrorNote>{approvalsError}</ErrorNote>
+                ) : (
+                  <>
+                    <p className="text-xs text-slate-500">
+                      These touch calendars Abigail doesn't own, so nothing happens until you say so.
+                    </p>
+                    {approvals.map((a) => (
+                      <div key={a.id} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+                        <div className="text-sm text-slate-200">{a.description}</div>
+                        <div className="mt-2 flex gap-2">
+                          <Button onClick={() => resolveApproval(a.id, true)}>Approve</Button>
+                          <Button variant="ghost" onClick={() => resolveApproval(a.id, false)}>Reject</Button>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                )}
               </CardContent>
             </Card>
           )}
@@ -447,37 +470,41 @@ export function SecretaryPanel() {
                 She can message these people on WhatsApp directly. Anyone else needs
                 your approval first, every time.
               </p>
-              {contacts.length > 0 && (
-                <ul className="space-y-1.5">
-                  {contacts.map((c) => (
-                    <li key={c.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-2.5 py-1.5">
-                      <div className="min-w-0">
-                        <div className="truncate text-slate-200">{c.name}</div>
-                        <div className="truncate text-xs text-slate-500">{c.phone}</div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <button
-                          onClick={() => toggleAllowlist(c)}
-                          className={cn(
-                            "rounded-full border px-2 py-0.5 text-[10px] font-medium",
-                            c.allowlisted
-                              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                              : "border-slate-700 bg-slate-800/60 text-slate-400"
-                          )}
-                        >
-                          {c.allowlisted ? "Trusted" : "Not trusted"}
-                        </button>
-                        <button
-                          onClick={() => deleteContact(c.id)}
-                          className="text-slate-500 hover:text-rose-400"
-                          title="Remove contact"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+              {contactsError !== null ? (
+                <ErrorNote>{contactsError}</ErrorNote>
+              ) : (
+                contacts.length > 0 && (
+                  <ul className="space-y-1.5">
+                    {contacts.map((c) => (
+                      <li key={c.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-2.5 py-1.5">
+                        <div className="min-w-0">
+                          <div className="truncate text-slate-200">{c.name}</div>
+                          <div className="truncate text-xs text-slate-500">{c.phone}</div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <button
+                            onClick={() => toggleAllowlist(c)}
+                            className={cn(
+                              "rounded-full border px-2 py-0.5 text-[10px] font-medium",
+                              c.allowlisted
+                                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                                : "border-slate-700 bg-slate-800/60 text-slate-400"
+                            )}
+                          >
+                            {c.allowlisted ? "Trusted" : "Not trusted"}
+                          </button>
+                          <button
+                            onClick={() => deleteContact(c.id)}
+                            className="text-slate-500 hover:text-rose-400"
+                            title="Remove contact"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )
               )}
               <div className="flex gap-1.5">
                 <input

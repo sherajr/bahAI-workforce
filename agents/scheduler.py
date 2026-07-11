@@ -169,9 +169,17 @@ def _schedule_event_reminders(ev: dict, now: datetime):
         at = start - timedelta(minutes=minutes)
         key = f"{ev['id']}:{minutes}m"
         if at <= now < start and not store.event_reminder_already_fired(key):
-            if not quiet:
-                _deliver(f"In {minutes} min: {ev['summary']}"
-                         + (f" @ {ev['location']}" if ev.get("location") else ""))
+            title = (f"In {minutes} min: {ev['summary']}"
+                     + (f" @ {ev['location']}" if ev.get("location") else ""))
+            if quiet:
+                # Don't drop: hold via the normal reminders table so
+                # _fire_due_reminders delivers after quiet hours (same path
+                # as chat-created reminders). Mark the event key now so the
+                # next calendar scan never enqueues a duplicate.
+                store.add_reminder(title, _fmt(now), wake_me=False)
+                store.mark_event_reminder_fired(key)
+            else:
+                _deliver(title)
                 store.mark_event_reminder_fired(key)
 
 

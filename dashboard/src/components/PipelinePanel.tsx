@@ -293,6 +293,12 @@ export function PipelinePanel() {
               </CardContent>
             </Card>
           )}
+
+          {result.canva?.skipped && (
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+              {result.canva.reason || "Canva autofill is turned off — skipped"}
+            </div>
+          )}
         </>
       )}
     </div>

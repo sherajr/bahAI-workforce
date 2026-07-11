@@ -48,6 +48,7 @@ from agents import layout as layout_opts
 from agents.state import (
     init_db, create_task, update_task_status, log_run, get_all_agent_statuses,
     create_product, update_product, get_all_products,
+    add_distribution, get_deeds_summary, DISTRIBUTION_KINDS,
 )
 
 app = FastAPI(title="bahAI Workforce API", version="1.0")
@@ -472,16 +473,9 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
 
     def _log(agent, step, output):
         if req.task_id:
-            if agent == "reviewer":
-                passed = output.get("passed")
-            elif agent == "scribe":
-                # A scribe output passes when every essential listing field is present
-                passed = all(
-                    str(output.get(k) or "").strip()
-                    for k in ("title", "description", "bookmark_quote")
-                )
-            else:
-                passed = None
+            # Rule 14: only Reviewer verdicts move trust here. Scribe field
+            # presence is mechanical completeness, not a quality judgment.
+            passed = output.get("passed") if agent == "reviewer" else None
             log_run(req.task_id, agent, step, req.theme[:200], json.dumps(output)[:400],
                     passed_review=passed)
 
@@ -504,15 +498,16 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
             )
             if req.task_id:
                 vq = (consultation.get("verified_quote") or "").strip()
+                # passed_review=None — holding a consultation is process, not judged.
                 log_run(req.task_id, "consultation", "consult", req.theme[:200],
-                        f"{len(consultation['transcript'])} turns completed",
-                        passed_review=bool(vq and len(vq) > 10))
+                        f"{len(consultation['transcript'])} turns completed"
+                        + (f"; quote len={len(vq)}" if vq else ""))
         except Exception as e:
             consultation["transcript"] = [{"agent": "System", "role": "error",
                                             "message": f"Consultation skipped: {e}"}]
             if req.task_id:
                 log_run(req.task_id, "consultation", "consult", req.theme[:200],
-                        f"failed: {e}"[:400], passed_review=False)
+                        f"failed: {e}"[:400])
 
     # ── Step 2: Honour the consultation's image decision ─────────────────────
     # If the team agreed the artwork itself must change, regenerate it once with
@@ -546,7 +541,7 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
                  "message": f"Regeneration failed ({e}) — continuing with the original artwork."})
             if req.task_id:
                 log_run(req.task_id, "artist", "regenerate", adjustment[:200],
-                        f"failed: {e}"[:400], passed_review=False)
+                        f"failed: {e}"[:400])
 
     # ── Step 3: Write → Score → Revise loop ──────────────────────────────────
     verified_quote = consultation.get("verified_quote", "")
@@ -730,20 +725,18 @@ def _generate_bookmark(theme: str, task_id: str, target_score: float, max_attemp
         citations = []
         progress(f"Librarian retrieval unavailable ({e}) — continuing; "
                  "the Librarian will verify against known texts in consultation.")
+    # Retrieval count is mechanical — trust moves on grounding/reviewer only.
     log_run(task_id, "librarian", "retrieve", theme[:200],
-            f"{len(citations)} passages retrieved",
-            passed_review=len(citations) > 0)
+            f"{len(citations)} passages retrieved")
 
     progress("Artist is composing the image brief (local Qwen3)...")
     image_prompt = build_image_prompt(theme, citations)
-    log_run(task_id, "artist", "brief", theme[:200], image_prompt[:200],
-            passed_review=bool(image_prompt.strip()))
+    log_run(task_id, "artist", "brief", theme[:200], image_prompt[:200])
 
     progress("Artist is generating the artwork (xAI)...")
     gen = generate_image(image_prompt, aspect_ratio)
     image_path = gen.get("image_url", "")
-    log_run(task_id, "artist", "generate", image_prompt[:200], image_path[:200],
-            passed_review=bool(image_path) and Path(image_path).exists())
+    log_run(task_id, "artist", "generate", image_prompt[:200], image_path[:200])
 
     wa_req = WriteApproveRequest(
         theme=theme, image_prompt=image_prompt, citations=citations,
@@ -785,25 +778,35 @@ def _render_and_publish(product_id: str, task_id: str, image_path: str, listing:
         rendered = render_bookmark_pair(image_path, quote)
         front_path, back_path = rendered["front_path"], rendered["back_path"]
         update_product(product_id, front_image=front_path, back_image=back_path)
-        log_run(task_id, "compositor", "render", image_path[:200], front_path[:200],
-                passed_review=bool(front_path) and Path(front_path).exists())
+        log_run(task_id, "compositor", "render", image_path[:200], front_path[:200])
     except Exception as e:
         compositor_error = str(e)
         log_run(task_id, "compositor", "render", image_path[:200],
-                f"failed: {e}"[:400], passed_review=False)
+                f"failed: {e}"[:400])
 
-    progress("Sending front image to Canva (skips gracefully if not connected)...")
+    # Canva autofill is dead commerce weight (0/10 successful autofills ever) —
+    # parked behind an off-by-default switch so it never blocks a clean run.
+    canva_enabled = os.getenv("CANVA_AUTOFILL_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     canva = {"skipped": True, "reason": "Canva not configured", "design_url": None}
-    try:
-        from agents.canva import autofill_bookmark, CANVA_CLIENT_ID, CANVA_TEMPLATE_ID
-        if CANVA_CLIENT_ID and CANVA_TEMPLATE_ID and front_path:
-            canva = autofill_bookmark(front_path)
-            log_run(task_id, "artist", "canva_autofill",
-                    front_path[:200], (canva.get("design_url") or "")[:200])
-    except Exception as e:
-        canva = {"skipped": True, "reason": str(e), "design_url": None}
-        log_run(task_id, "artist", "canva_autofill",
-                front_path[:200], f"failed: {e}"[:400], passed_review=False)
+    if not canva_enabled:
+        progress("Canva autofill is turned off — skipped")
+        canva = {"skipped": True, "reason": "Canva autofill is turned off — skipped",
+                 "design_url": None}
+    else:
+        progress("Sending front image to Canva (skips gracefully if not connected)...")
+        try:
+            from agents.canva import autofill_bookmark, CANVA_CLIENT_ID, CANVA_TEMPLATE_ID
+            if CANVA_CLIENT_ID and CANVA_TEMPLATE_ID and front_path:
+                canva = autofill_bookmark(front_path)
+                # Steward owns publishing/packaging (same as etsy_publish).
+                log_run(task_id, "steward", "canva_autofill",
+                        front_path[:200], (canva.get("design_url") or "")[:200])
+        except Exception as e:
+            canva = {"skipped": True, "reason": str(e), "design_url": None}
+            log_run(task_id, "steward", "canva_autofill",
+                    front_path[:200], f"failed: {e}"[:400])
 
     return {"front_path": front_path, "back_path": back_path,
             "compositor_error": compositor_error, "canva": canva}
@@ -816,7 +819,7 @@ def _run_full_pipeline(req: PipelineRunRequest, progress, on_turn=None, request_
     → save product → Compositor → Canva autofill.
     """
     progress("Creating task...")
-    task_id = create_task(req.theme, "design", assigned_to="operator")
+    task_id = create_task(req.theme, "design", assigned_to="pipeline")
 
     gen = _generate_bookmark(req.theme, task_id, req.target_score, req.max_attempts,
                              req.aspect_ratio, progress, on_turn=on_turn,
@@ -1080,7 +1083,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
     retrieval_query = f"{req.theme}\n\n{req.guidance}" if req.guidance.strip() else req.theme
 
     progress("Creating task...")
-    task_id = create_task(req.theme, "card_design", assigned_to="operator")
+    task_id = create_task(req.theme, "card_design", assigned_to="pipeline")
 
     # Quote cards may ONLY ever quote Ruhi Institute Book 1, "Reflections on
     # the Life of the Spirit" (owner decision, 2026-07) — retrieve_ruhi_book1
@@ -1093,7 +1096,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
     progress("Librarian is searching Ruhi Book 1 for passages...")
     citations = retrieve_ruhi_book1(retrieval_query, n_results=3) or []
     log_run(task_id, "librarian", "retrieve", retrieval_query[:200],
-            f"{len(citations)} passages retrieved", passed_review=len(citations) > 0)
+            f"{len(citations)} passages retrieved")
     if not citations:
         raise RuntimeError(
             "No passage found in the Ruhi Book 1 index for this theme, or the index "
@@ -1104,14 +1107,12 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
 
     progress("Artist is composing the card image brief (local Qwen3)...")
     image_prompt = build_card_image_prompt(retrieval_query, citations)
-    log_run(task_id, "artist", "card_brief", req.theme[:200], image_prompt[:200],
-            passed_review=bool(image_prompt.strip()))
+    log_run(task_id, "artist", "card_brief", req.theme[:200], image_prompt[:200])
 
     progress("Artist is generating the artwork (xAI)...")
     gen = generate_image(image_prompt, "2:3")
     image_path = gen.get("image_url", "")
-    log_run(task_id, "artist", "generate", image_prompt[:200], image_path[:200],
-            passed_review=bool(image_path) and Path(image_path).exists())
+    log_run(task_id, "artist", "generate", image_prompt[:200], image_path[:200])
 
     # ── Consultation (card framing) ──────────────────────────────────────────
     def _preview_front(quote: str, transcript: list) -> str:
@@ -1137,14 +1138,15 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
             ),
         )
         vq = (consultation.get("verified_quote") or "").strip()
+        # passed_review=None — consultation process, not a quality verdict.
         log_run(task_id, "consultation", "consult", req.theme[:200],
-                f"{len(consultation['transcript'])} turns completed",
-                passed_review=bool(vq and len(vq) > 10))
+                f"{len(consultation['transcript'])} turns completed"
+                + (f"; quote len={len(vq)}" if vq else ""))
     except Exception as e:
         consultation["transcript"] = [{"agent": "System", "role": "error",
                                        "message": f"Consultation skipped: {e}"}]
         log_run(task_id, "consultation", "consult", req.theme[:200],
-                f"failed: {e}"[:400], passed_review=False)
+                f"failed: {e}"[:400])
 
     editing_log = []
 
@@ -1174,7 +1176,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
                 {"agent": "Artist", "role": "image revision (consultation)",
                  "message": f"Regeneration failed ({e}) — continuing with the original artwork."})
             log_run(task_id, "artist", "regenerate", adjustment[:200],
-                    f"failed: {e}"[:400], passed_review=False)
+                    f"failed: {e}"[:400])
 
     # ── The quote (and its honesty flags) ────────────────────────────────────
     # The consultation's own wording is NEVER printed as-is: whatever quote
@@ -1213,6 +1215,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
         except Exception as first_err:
             progress(f"Translation attempt failed ({first_err}) — retrying once...")
             tr = translate_quote(q, req.language)  # second failure raises → job errors honestly
+        # Translator script check is a deterministic judged outcome (rule 14).
         log_run(task_id, "translator", "translate", q[:200],
                 tr["text"][:200], passed_review=True)
         return tr
@@ -1232,8 +1235,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
         progress("Card Compositor is rendering the front and back faces...")
         r = render_quote_card(image_path, q, citation_src, translation=tr)
         log_run(task_id, "compositor", "render_card", image_path[:200],
-                r["front_path"][:200],
-                passed_review=bool(r["front_path"]) and Path(r["front_path"]).exists())
+                r["front_path"][:200])
         return r
 
     def _score(q: str, tr: Optional[dict], rendered: dict, prev=None, note=None) -> dict:
@@ -1328,6 +1330,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
             try:
                 translation = _translate(quote)
             except Exception as e:
+                # Script-check / translate failure is a judged outcome (rule 14).
                 log_run(task_id, "translator", "translate", quote[:200],
                         f"failed: {e}"[:400], passed_review=False)
                 editing_log.append({"agent": "System", "role": "editing stopped",
@@ -1350,7 +1353,7 @@ def _run_card_pipeline(req: CardPipelineRequest, progress, on_turn=None,
                         new_path[:200])
             except Exception as e:
                 log_run(task_id, "artist", f"repaint_{attempt}", guidance[:200],
-                        f"failed: {e}"[:400], passed_review=False)
+                        f"failed: {e}"[:400])
                 editing_log.append({"agent": "System", "role": "editing stopped",
                                     "message": f"Repaint failed ({e}) — keeping the best card."})
                 break
@@ -1603,7 +1606,7 @@ def x_post_edit(post_id: str, req: XPostEditRequest):
     image aren't touched (this edits the tweet's wording only).
     """
     from agents.state import get_x_post, update_x_post
-    from agents.x_post import TWEET_HARD_MAX
+    from agents.x_post import TWEET_DRAFT_MAX, TWEET_HARD_MAX
 
     post = get_x_post(post_id)
     if not post:
@@ -1614,9 +1617,12 @@ def x_post_edit(post_id: str, req: XPostEditRequest):
     text = req.tweet_text.strip()
     if not text:
         raise HTTPException(status_code=422, detail="tweet_text cannot be empty")
-    if len(text) > TWEET_HARD_MAX:
+    # Draft budget leaves room for the code-appended AI-art disclosure at post time
+    if len(text) > TWEET_DRAFT_MAX:
         raise HTTPException(status_code=422,
-                            detail=f"tweet_text is {len(text)} characters — exceeds the {TWEET_HARD_MAX} hard maximum")
+                            detail=(f"tweet_text is {len(text)} characters — exceeds the "
+                                    f"{TWEET_DRAFT_MAX} draft maximum (must leave room for "
+                                    f"the AI-art disclosure; posted hard limit is {TWEET_HARD_MAX})"))
 
     update_x_post(post_id, tweet_text=text)
     return {"id": post_id, "tweet_text": text}
@@ -1951,6 +1957,84 @@ def get_print_sheet(product_id: str):
     )
 
 
+class MixedPrintSheetRequest(BaseModel):
+    product_ids: list[str]
+    duplex: bool = False
+
+
+@app.post("/print-sheet")
+def post_mixed_print_sheet(body: MixedPrintSheetRequest):
+    """
+    Gathering print sheet: tile a SET of products (same product_type, each
+    with both faces) onto one 2-page Letter PDF, cycling through them in
+    order across the grid. duplex=True mirrors columns on page 2 for
+    long-edge home duplex printers (see agents/print_sheet.build_print_sheet).
+    """
+    from agents.print_sheet import build_print_sheet
+
+    product_ids = [str(pid).strip() for pid in (body.product_ids or []) if str(pid).strip()]
+    if not product_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Pick at least one product to put on the print sheet.",
+        )
+
+    products = []
+    for pid in product_ids:
+        try:
+            products.append(_load_product_or_404(pid))
+        except HTTPException as e:
+            if e.status_code == 404:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"No product found with id '{pid}'. Check the id and try again.",
+                )
+            raise
+
+    types = {(p.get("product_type") or "bookmark") for p in products}
+    if len(types) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="All products on one sheet must be the same type "
+                   "(don't mix bookmarks and quote cards).",
+        )
+
+    pairs = []
+    for p in products:
+        front_path = p.get("front_image")
+        back_path = p.get("back_image")
+        if not front_path or not back_path:
+            title = p.get("title") or p["id"]
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{title}' is missing a front or back image — "
+                       "render both faces before building a print sheet.",
+            )
+        if not Path(front_path).exists() or not Path(back_path).exists():
+            title = p.get("title") or p["id"]
+            raise HTTPException(
+                status_code=422,
+                detail=f"The front/back image files for '{title}' are missing on disk.",
+            )
+        pairs.append((front_path, back_path))
+
+    stem = "print-sheet-mixed-" + "-".join(product_ids[:6])
+    if body.duplex:
+        stem += "-duplex"
+    out_path = OUTPUTS_DIR / f"{stem}.pdf"
+    try:
+        build_print_sheet(pairs=pairs, out_pdf_path=str(out_path), duplex=bool(body.duplex))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not build the print sheet: {e}")
+
+    return FileResponse(
+        path=str(out_path),
+        media_type="application/pdf",
+        filename=f"{stem}.pdf",
+        headers={"X-Product-Ids": ",".join(product_ids)},
+    )
+
+
 class RegenerateQuoteRequest(BaseModel):
     guidance: str = ""   # e.g. "make it about detachment instead of unity"
 
@@ -2140,7 +2224,7 @@ def _redo_product(product_id: str, req: RegenerateAllRequest, progress,
     theme = f"{base_theme}\n\nNEW DIRECTION from Sheraj: {req.guidance}" if req.guidance.strip() else base_theme
 
     progress("Redoing the whole piece from scratch...")
-    task_id = create_task(theme, "design", assigned_to="operator")
+    task_id = create_task(theme, "design", assigned_to="pipeline")
 
     gen = _generate_bookmark(theme, task_id, target_score=10.0, max_attempts=1,
                              aspect_ratio="2:3", progress=progress, on_turn=on_turn,
@@ -2728,7 +2812,7 @@ def canva_autofill(body: dict):
 
     task_id = body.get("task_id")
     if task_id:
-        log_run(task_id, "artist", "canva_autofill",
+        log_run(task_id, "steward", "canva_autofill",
                 image_path[:200], result.get("design_url", "")[:200])
     return result
 
@@ -2819,9 +2903,11 @@ def etsy_status():
 @app.post("/etsy/publish")
 def etsy_publish(body: dict):
     """
-    Create a DRAFT Etsy listing from a saved product (title, description, tags,
-    price parsed from price_note) and upload the front bookmark image.
-    Nothing goes live — drafts are reviewed and activated by Sheraj inside Etsy.
+    Create a DRAFT Etsy listing from a saved product (title, description, tags)
+    and upload the front bookmark image. Price is policy-set from
+    etsy.BOOKMARK_PRICE (env ETSY_BOOKMARK_PRICE) — never parsed from LLM
+    prose (rule 13). Nothing goes live — drafts are reviewed and activated by
+    Sheraj inside Etsy.
     """
     from agents.etsy import publish_draft_listing
     from agents.state import get_agent_status
@@ -2873,7 +2959,7 @@ def etsy_publish(body: dict):
 
     listing_id = str(result["listing_id"])
     update_product(product_id, etsy_listing_id=listing_id, status="draft_on_etsy")
-    log_run(product.get("task_id") or product_id, "producer", "etsy_publish",
+    log_run(product.get("task_id") or product_id, "steward", "etsy_publish",
             product.get("title", "")[:200], f"listing_id={listing_id}")
     return {
         "product_id": product_id,
@@ -2905,9 +2991,10 @@ LEGACY_COST_PER_PRODUCT = 0.11
 @app.get("/steward/report")
 def steward_report():
     """
-    Profit-and-loss view across all products. Costs are a labeled hybrid:
-    runs since METERING_EPOCH are METERED — every paid Grok/vision/image call
-    records itself via state.record_spend (see router.record_api_spend), so a
+    Mission-first report: deeds (giving ledger) headline the response; money
+    follows as a byproduct. Costs are a labeled hybrid: runs since
+    METERING_EPOCH are METERED — every paid Grok/vision/image call records
+    itself via state.record_spend (see router.record_api_spend), so a
     repaint-heavy run costs visibly more than a clean one — while products
     from before metering existed carry a flat LEGACY_COST_PER_PRODUCT
     estimate rather than a misleading $0.
@@ -2916,6 +3003,7 @@ def steward_report():
     products = get_all_products()
     total_revenue = sum(float(p.get("revenue") or 0) for p in products)
     spend = get_spend_summary()
+    deeds = get_deeds_summary()
 
     legacy = [p for p in products if (p.get("created_at") or "") < METERING_EPOCH]
     legacy_cost = round(len(legacy) * LEGACY_COST_PER_PRODUCT, 2)
@@ -2930,7 +3018,9 @@ def steward_report():
     if legacy_cost:
         by_kind["legacy_estimate"] = legacy_cost
 
-    return {
+    # deeds first — pure and goodly deeds are the mission; money is secondary.
+    report = {
+        "deeds": deeds,
         "total_products":  len(products),
         "total_revenue":   round(total_revenue, 2),
         "estimated_costs": total_cost,
@@ -2954,6 +3044,53 @@ def steward_report():
             for p in products
         ],
     }
+    # Pass through ledger-read failures untouched so $0 is never silent.
+    if spend.get("error"):
+        report["error"] = spend["error"]
+    return report
+
+
+# --- Giving ledger (deeds) — human record-keeping only, no log_run/LLM ---
+
+class DeedRequest(BaseModel):
+    kind: str
+    count: int = 1
+    product_id: str | None = None
+    note: str = ""
+
+
+@app.post("/deeds")
+def post_deed(body: DeedRequest):
+    """
+    Record a distribution (gift / gathering / digital). Pure bookkeeping —
+    no agent trust movement, no LLM.
+    """
+    kind = (body.kind or "").strip().lower()
+    if kind not in DISTRIBUTION_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"kind must be one of {sorted(DISTRIBUTION_KINDS)} "
+                   f"(gift = handed out, gathering = served a gathering, "
+                   f"digital = shared digitally).",
+        )
+    dist_id = add_distribution(
+        kind=kind,
+        count=body.count,
+        product_id=body.product_id,
+        note=body.note or "",
+    )
+    from agents.state import _connect
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM distributions WHERE id = ?", (dist_id,)
+        ).fetchone()
+    return dict(row) if row else {"id": dist_id, "kind": kind}
+
+
+@app.get("/deeds")
+def get_deeds():
+    """Mission summary: gifted cards, gatherings served, digital shares, feedback, recent."""
+    return get_deeds_summary()
 
 
 @app.post("/products/{product_id}/revenue")
@@ -3293,6 +3430,11 @@ def _handle_whatsapp_message(msg: dict):
     Meta may retry the whole webhook delivery if it doesn't get a fast 200,
     which would otherwise risk a duplicate reply to the same message."""
     from agents import whatsapp, secretary, secretary_store
+    # Dedupe on Meta's message id (ids only in private DB — rule 15).
+    # Retries of the same delivery must not re-run a full Secretary turn.
+    message_id = (msg.get("message_id") or "").strip()
+    if message_id and secretary_store.seen_wa_message(message_id):
+        return
     phone = msg["from"]
     secretary_store.record_inbound_contact(phone)
     if not whatsapp.is_owner(phone):

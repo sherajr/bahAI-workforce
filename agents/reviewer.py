@@ -105,7 +105,7 @@ def score(
             decision_parts.append("Agreed visual elements: " + "; ".join(d["key_elements"]))
         if decision_parts:
             decision_block = (
-                "\n\nTHE TEAM'S SETTLED CONSULTATION DECISION (round 2):\n"
+                "\n\nTHE TEAM'S SETTLED CONSULTATION DECISION (three-round consultation):\n"
                 + "\n".join(f"  {p}" for p in decision_parts) + "\n"
                 "\"...record their vote and abide by the voice of the majority... never to be "
                 "challenged, and always to be whole-heartedly enforced.\" — Shoghi Effendi. Once "
@@ -387,7 +387,7 @@ def score_quote_card(
         ) if p]
         if decision_parts:
             decision_block = (
-                "\n\nTHE TEAM'S SETTLED CONSULTATION DECISION (round 2):\n"
+                "\n\nTHE TEAM'S SETTLED CONSULTATION DECISION (three-round consultation):\n"
                 + "\n".join(f"  {p}" for p in decision_parts) + "\n"
                 "Score and recommend WITHIN this decision — do not silently contradict it. "
                 "If the finished card demonstrably diverges from a factual premise the team "

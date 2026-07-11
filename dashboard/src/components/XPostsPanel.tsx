@@ -508,6 +508,9 @@ export function XPostsPanel() {
           Pending approval {pending.data && pending.data.length > 0 ? `(${pending.data.length})` : ""}
         </h2>
         {pending.isLoading && <p className="text-sm text-slate-500">Loading…</p>}
+        {pending.isError && (
+          <ErrorNote>Could not load pending posts: {pending.error.message}</ErrorNote>
+        )}
         {pending.data && pending.data.length === 0 && (
           <p className="text-sm text-slate-500">Nothing waiting — draft a new post above.</p>
         )}
@@ -521,6 +524,10 @@ export function XPostsPanel() {
         <p className="text-xs text-slate-600">
           Posts you liked but wanted to think over — set aside with "Save as draft" above.
         </p>
+        {drafts.isLoading && <p className="text-sm text-slate-500">Loading…</p>}
+        {drafts.isError && (
+          <ErrorNote>Could not load drafts: {drafts.error.message}</ErrorNote>
+        )}
         {drafts.data && drafts.data.length === 0 && (
           <p className="text-sm text-slate-500">Nothing set aside right now.</p>
         )}
@@ -534,6 +541,10 @@ export function XPostsPanel() {
         <p className="text-xs text-slate-600">
           A permanent record of what actually went out — discarded drafts aren't kept here.
         </p>
+        {posted.isLoading && <p className="text-sm text-slate-500">Loading…</p>}
+        {posted.isError && (
+          <ErrorNote>Could not load posted history: {posted.error.message}</ErrorNote>
+        )}
         {posted.data && posted.data.length === 0 && (
           <p className="text-sm text-slate-500">Nothing posted yet.</p>
         )}

@@ -239,7 +239,26 @@ export interface TrustReport {
   products: TrustReportRow[];
 }
 
+export interface RecentDeed {
+  id: number;
+  product_id: string | null;
+  kind: "gift" | "gathering" | "digital";
+  count: number;
+  note: string;
+  created_at: string;
+  product_title?: string | null;
+}
+
+export interface DeedsReport {
+  cards_gifted: number;
+  gatherings_served: number;
+  digital_shares: number;
+  feedback_count: number;
+  recent: RecentDeed[];
+}
+
 export interface StewardReport {
+  deeds: DeedsReport;
   total_products: number;
   total_revenue: number;
   // Hybrid costs: runs since metering shipped are metered per call
@@ -262,6 +281,7 @@ export interface StewardReport {
     etsy_listing_id: string | null;
     created_at: string | null;
   }[];
+  error?: string;
 }
 
 export interface CanvaStatus {

@@ -20,8 +20,8 @@ TRUST_LEVELS = {
     3: "Bounded autonomy",      # full autonomy within defined domain
 }
 
-AGENT_NAMES = ["operator", "librarian", "artist", "scribe", "reviewer",
-               "producer", "steward", "consultation", "compositor", "translator",
+AGENT_NAMES = ["librarian", "artist", "scribe", "reviewer",
+               "steward", "consultation", "compositor", "translator",
                "secretary"]
 
 
@@ -100,6 +100,15 @@ def init_db():
                 created_at TEXT DEFAULT (datetime('now')),
                 posted_tweet_id TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS distributions (
+                id TEXT PRIMARY KEY,
+                product_id TEXT,
+                kind TEXT NOT NULL,
+                count INTEGER DEFAULT 1,
+                note TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         # Migrations — safe to run on existing databases
         for col in ("image_prompt TEXT", "theme TEXT",
@@ -120,10 +129,34 @@ def init_db():
             except Exception:
                 pass  # column already exists
 
+        # New tables on existing DBs (CREATE TABLE IF NOT EXISTS is a no-op if present)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS distributions (
+                    id TEXT PRIMARY KEY,
+                    product_id TEXT,
+                    kind TEXT NOT NULL,
+                    count INTEGER DEFAULT 1,
+                    note TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.commit()
+        except Exception:
+            pass
+
         for name in AGENT_NAMES:
             conn.execute(
                 "INSERT OR IGNORE INTO agents (name) VALUES (?)", (name,)
             )
+        # One-time cleanup: operator/producer were never real agents (just
+        # assignee/log labels). Remove their dead trust rows from existing DBs.
+        try:
+            conn.execute(
+                "DELETE FROM agents WHERE name IN ('operator', 'producer')"
+            )
+        except Exception:
+            pass
         conn.commit()
 
 
@@ -276,9 +309,100 @@ def get_spend_summary() -> dict:
                 row[0]: round(row[1], 4)
                 for row in conn.execute("SELECT kind, SUM(est_cost) FROM spend GROUP BY kind")
             }
-    except Exception:
-        return {"total": 0.0, "month": 0.0, "by_kind": {}}
+    except Exception as e:
+        # Same shape as success so callers don't break — plus "error" so a
+        # ledger failure is never indistinguishable from genuine $0 spend.
+        return {"total": 0.0, "month": 0.0, "by_kind": {}, "error": str(e)[:200]}
     return {"total": round(total, 2), "month": round(month, 2), "by_kind": by_kind}
+
+
+# --- Giving ledger (deeds) — human record-keeping, never agent-scored ---
+
+DISTRIBUTION_KINDS = frozenset({"gift", "gathering", "digital"})
+
+
+def add_distribution(
+    kind: str,
+    count: int = 1,
+    product_id: str | None = None,
+    note: str = "",
+) -> str:
+    """
+    Record a pure/goodly deed of distribution. kind must be one of
+    gift | gathering | digital; count is clamped to >= 1. product_id is
+    optional (a gift may be recorded without tying it to a product row).
+    Returns the new distribution id. No log_run / trust / LLM.
+    """
+    if kind not in DISTRIBUTION_KINDS:
+        raise ValueError(
+            f"kind must be one of {sorted(DISTRIBUTION_KINDS)}, got {kind!r}"
+        )
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        count = 1
+    if count < 1:
+        count = 1
+    dist_id = str(uuid.uuid4())[:8]
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO distributions (id, product_id, kind, count, note)
+               VALUES (?, ?, ?, ?, ?)""",
+            (dist_id, product_id or None, kind, count, note or ""),
+        )
+        conn.commit()
+    return dist_id
+
+
+def get_deeds_summary() -> dict:
+    """
+    Mission-first summary of distributions and recipient feedback.
+    cards_gifted / digital_shares sum counts; gatherings_served counts rows;
+    feedback_count is products with non-empty recipient_feedback; recent is
+    up to 10 latest distribution rows with product title joined when present.
+    """
+    with _connect() as conn:
+        cards_gifted = conn.execute(
+            "SELECT COALESCE(SUM(count), 0) FROM distributions WHERE kind = 'gift'"
+        ).fetchone()[0]
+        gatherings_served = conn.execute(
+            "SELECT COUNT(*) FROM distributions WHERE kind = 'gathering'"
+        ).fetchone()[0]
+        digital_shares = conn.execute(
+            "SELECT COALESCE(SUM(count), 0) FROM distributions WHERE kind = 'digital'"
+        ).fetchone()[0]
+        feedback_count = conn.execute(
+            """SELECT COUNT(*) FROM products
+               WHERE recipient_feedback IS NOT NULL
+                 AND TRIM(recipient_feedback) != ''"""
+        ).fetchone()[0]
+        recent_rows = conn.execute(
+            """SELECT d.id, d.product_id, d.kind, d.count, d.note, d.created_at,
+                      p.title AS product_title
+               FROM distributions d
+               LEFT JOIN products p ON p.id = d.product_id
+               ORDER BY d.created_at DESC
+               LIMIT 10"""
+        ).fetchall()
+    recent = []
+    for row in recent_rows:
+        d = dict(row)
+        recent.append({
+            "id": d["id"],
+            "product_id": d["product_id"],
+            "kind": d["kind"],
+            "count": d["count"],
+            "note": d["note"] or "",
+            "created_at": d["created_at"],
+            "product_title": d.get("product_title"),
+        })
+    return {
+        "cards_gifted": int(cards_gifted or 0),
+        "gatherings_served": int(gatherings_served or 0),
+        "digital_shares": int(digital_shares or 0),
+        "feedback_count": int(feedback_count or 0),
+        "recent": recent,
+    }
 
 
 def get_all_products() -> list[dict]:
@@ -366,6 +490,6 @@ def delete_x_post(post_id: str):
 
 if __name__ == "__main__":
     init_db()
-    tid = create_task("Design a Bahá'í-inspired bookmark for Etsy", "design", "operator")
+    tid = create_task("Design a Bahá'í-inspired bookmark for Etsy", "design", "pipeline")
     print(f"Created task: {tid}")
     print(get_all_agent_statuses())
