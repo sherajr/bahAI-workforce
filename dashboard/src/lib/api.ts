@@ -11,6 +11,7 @@ import type {
   SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus, SecretaryUpcoming,
   StewardReport, TaskRow, TrustReport, WhatsAppStatus, XPostApproveResult, XPostEditResult,
   XPostRegenerateImageResult, XPostStatusResult, DeedsReport, RecentDeed,
+  RuhiQuoteSuggestResult, QuoteSourceOption,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -164,21 +165,60 @@ export const api = {
     });
     return res;
   },
-  runCardPipeline: async (theme: string, language: string | null, targetScore = 9.0, maxAttempts = 3) => {
+  runCardPipeline: async (theme: string, language: string | null, targetScore = 9.0, maxAttempts = 3, pinnedQuote = "", sources: string[] | null = null, pinnedCitation = "") => {
     const res = await post<{ job_id: string; status: string }>("/pipeline/run-card", {
       theme,
       language,
       target_score: targetScore,
       max_attempts: maxAttempts,
+      pinned_quote: pinnedQuote,
+      sources,
+      pinned_citation: pinnedCitation,
     });
     pushActivity({
       ts: new Date().toLocaleTimeString(),
       method: "RUN", path: "card-pipeline", status: "", ms: 0,
-      detail: `Started quote card "${theme}"${language ? ` with ${language} translation` : " (English only)"} — job ${res.job_id}`,
+      detail: `Started quote card "${theme}"${language ? ` with ${language} translation` : " (English only)"}${pinnedQuote ? ` (pinned quote: "${pinnedQuote.slice(0, 30)}...")` : ""} — job ${res.job_id}`,
+    });
+    return res;
+  },
+  runCardBatch: async (theme: string, language: string | null, quotes: string[], targetScore = 9.0, maxAttempts = 3, sources: string[] | null = null, quoteCitations: string[] | null = null) => {
+    const res = await post<{ job_id: string; status: string; total: number }>("/pipeline/run-card-batch", {
+      theme,
+      language,
+      quotes,
+      target_score: targetScore,
+      max_attempts: maxAttempts,
+      sources,
+      quote_citations: quoteCitations,
+    });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "RUN", path: "card-batch", status: "", ms: 0,
+      detail: `Started a hands-free batch of ${quotes.length} quote cards ("${theme}"${language ? `, with ${language} translation` : ""}) — job ${res.job_id}`,
     });
     return res;
   },
   getCardLanguages: () => get<CardLanguage[]>("/card/languages"),
+  // Selectable quote sources for the card form (Ruhi + ingested library texts).
+  getQuoteSources: () => get<{ sources: QuoteSourceOption[] }>("/quote-sources"),
+  // Librarian quote suggestions for the card form — searches the SELECTED
+  // sources (default Ruhi Book 1). Local-tier results are pre-verified
+  // server-side; web-tier results come back flagged verified=false.
+  suggestRuhiQuotes: async (topic: string, count: number, sources: string[] | null = null) => {
+    const qs =
+      `topic=${encodeURIComponent(topic)}&count=${count}` +
+      (sources && sources.length ? `&sources=${encodeURIComponent(sources.join(","))}` : "");
+    const res = await get<RuhiQuoteSuggestResult>(`/ruhi-quotes?${qs}`);
+    const unverified = res.items.filter((i) => !i.verified).length;
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "GET", path: "ruhi-quotes", status: "OK", ms: 0,
+      detail: `The Librarian found ${res.items.length} passage${res.items.length === 1 ? "" : "s"} for "${topic}"` +
+        (unverified ? ` (${unverified} from the web — wording not verified)` : ""),
+    });
+    return res;
+  },
   // Generic over the job's result payload — bookmark/card/redo jobs default
   // to PipelineResult; x-post jobs pass <XPostJobResult> at the call site.
   getPipelineStatus: async <TResult = PipelineResult>(jobId: string) => {

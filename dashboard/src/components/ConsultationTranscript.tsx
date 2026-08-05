@@ -105,11 +105,28 @@ export function ConsultationTranscript({ turns }: { turns: ConsultationTurn[] })
                 <span className="text-xs text-slate-500">{roleText}</span>
               </div>
               {t.image && (
-                <img
-                  src={imageUrl(t.image)}
-                  alt="Front face preview"
-                  className="mb-2 mt-1 max-h-72 rounded-lg border border-slate-700 object-contain shadow-md"
-                />
+                <div className="mb-2 mt-1 flex flex-wrap gap-3">
+                  <div className="min-w-[220px] flex-1">
+                    {t.image_back && (
+                      <div className="mb-1 text-[10px] uppercase tracking-widest text-slate-500">Front</div>
+                    )}
+                    <img
+                      src={imageUrl(t.image)}
+                      alt="Front face preview"
+                      className="max-h-72 w-full rounded-lg border border-slate-700 object-contain shadow-md"
+                    />
+                  </div>
+                  {t.image_back && (
+                    <div className="min-w-[220px] flex-1">
+                      <div className="mb-1 text-[10px] uppercase tracking-widest text-slate-500">Back</div>
+                      <img
+                        src={imageUrl(t.image_back)}
+                        alt="Back face preview"
+                        className="max-h-72 w-full rounded-lg border border-slate-700 object-contain shadow-md"
+                      />
+                    </div>
+                  )}
+                </div>
               )}
               {parsed ? (
                 <Card className="mt-2 bg-slate-900/50 border-slate-800/80">

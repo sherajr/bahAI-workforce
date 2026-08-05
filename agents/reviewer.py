@@ -347,6 +347,10 @@ def score_quote_card(
     consultation_decision: dict = None,
     previous_review: dict = None,
     revision_note: str = None,
+    quote_pinned: bool = False,
+    back_image_path: str = None,
+    sourcing_note: str = None,
+    quote_web_unverified: bool = False,
 ) -> dict:
     """
     Score a QUOTE CARD — the giveaway outreach product. Deliberately NOT the
@@ -356,6 +360,9 @@ def score_quote_card(
 
     The vision call sends the RENDERED FRONT FACE, not the raw artwork —
     print legibility can only be judged on the actual composited card.
+    When back_image_path is provided and exists, the REFLECTION back face
+    (question + action prompt + writing lines) is attached as a second
+    image so both faces can be judged for legibility and calm design.
 
     Returns {scores, overall, passed, recommendation, action, action_guidance}.
     `action` is the machine-readable revision lever ("ship" | "requote" |
@@ -364,6 +371,7 @@ def score_quote_card(
     depends on interpreting prose.
     """
     system_prompt = build_system_prompt("reviewer", "review")
+    has_back = bool(back_image_path) and Path(back_image_path).exists()
 
     consultation_block = ""
     if consultation_transcript:
@@ -425,26 +433,138 @@ def score_quote_card(
         "heavily under quote_citation and say so in the note."
     )
 
-    # score_quote_card is card-only (bookmarks use score()), so the Book-1
-    # sourcing constraint always applies here — see CARD_QUOTE_SOURCING_NOTE's
-    # own comment for why the Reviewer needs this spelled out explicitly.
+    pinned_block = ""
+    if quote_pinned and quote_web_unverified:
+        # Rule 11 update (2026-08-04): an owner pin from the RISKY web tier is
+        # NOT machine-verified — the block must never claim it is, and the
+        # Reviewer should surface (not police) the unverified wording.
+        pinned_block = (
+            "\n\nIMPORTANT — Sheraj (the owner) deliberately chose and FIXED this exact quote "
+            "from a WEB source. Its wording is NOT machine-verified (the product is flagged so) "
+            "and it is NOT up for revision. Do NOT lower any score for the quote's choice, "
+            "wording, length, or register, and NEVER choose \"requote\". Judge only the "
+            "PRESENTATION: artwork, layout, legibility, and (if present) translation fidelity — "
+            "and note the unverified provenance factually under quote_citation without guessing "
+            "corrections.\n"
+        )
+    elif quote_pinned:
+        pinned_block = (
+            "\n\nIMPORTANT — Sheraj (the owner) deliberately chose and FIXED this exact quote. It "
+            "is machine-verified verbatim and is NOT up for revision. Do NOT lower any score for the "
+            "quote's choice, wording, length, or register, and NEVER choose \"requote\". Judge only "
+            "the PRESENTATION: how well the artwork and layout frame this fixed quote, legibility, "
+            "and (if present) translation fidelity.\n"
+        )
+
+    # score_quote_card is card-only (bookmarks use score()), so a sourcing
+    # constraint always applies here — the Ruhi default, or the caller's
+    # expanded-pool variant (both code-owned strings in consultation.py).
     from agents.consultation import CARD_QUOTE_SOURCING_NOTE
-    sourcing_note = f"\n{CARD_QUOTE_SOURCING_NOTE}\n"
+    sourcing_note = f"\n{(sourcing_note or '').strip() or CARD_QUOTE_SOURCING_NOTE}\n"
 
     translation_score_line = (
         '    "translation":      {"score": 6, "note": "fidelity to the English, register, natural phrasing; if below 7 end with Fix: ..."},\n'
         if translation else ""
     )
 
+    _back_imagery_sentence = (
+        " The SECOND image is the reflection back face (question, action prompt, "
+        "writing lines) — not a full artwork view; the artwork survives only as "
+        "the front's soft background wash."
+        if has_back else ""
+    )
+    if quote_pinned and quote_web_unverified:
+        quote_citation_crit = (
+            "  quote_citation: this quote is the owner's fixed choice from a WEB source — its "
+            "wording is NOT machine-verified, and the product carries that flag. Judge ONLY that "
+            "the attribution and printing are correct as supplied; state the unverified provenance "
+            "in your note factually. Do not cap, requote, or penalize for selection, wording, "
+            "length, or register.\n"
+        )
+    elif quote_pinned:
+        quote_citation_crit = (
+            "  quote_citation: this quote is the owner's fixed, machine-verified verbatim choice "
+            "— judge ONLY that the attribution and printing are correct. Do not cap, requote, or "
+            "penalize for selection, wording, length, or register.\n"
+        )
+        newcomer_crit = (
+            "  newcomer_accessibility: judge whether the ARTWORK and presentation make this "
+            "fixed quote as welcoming as possible to a newcomer; do NOT penalize the quote's "
+            "inherent register or length (the owner's fixed choice)."
+            f"{_back_imagery_sentence}\n"
+        )
+        action_block = (
+            "Decide ONE next action for the pipeline (machine-executed — choose exactly one):\n"
+            "  \"ship\"    — the card is ready (typical when overall ≥ target).\n"
+            "  \"repaint\" — the weakness is the ARTWORK: the pipeline regenerates it; put the "
+            "imperative change in action_guidance.\n"
+            "Never choose requote — the quote is fixed. Never pick an action your guidance "
+            "doesn't support.\n\n"
+        )
+    else:
+        quote_citation_crit = (
+            "  quote_citation: is the quote well-chosen for the theme and correctly attributed? "
+            "Its TEXT is machine-verified character-exact against its verified source text "
+            "(the run's selected pool) before any render — "
+            "judge selection and fit, never suspect a misquote and never propose rewording. "
+            "An ungrounded quote caps this at 4.\n"
+        )
+        newcomer_crit = (
+            "  newcomer_accessibility: the heart of this product — would someone with ZERO "
+            "background find this card welcoming, clear, and beautiful? Anything esoteric, "
+            "jargon-dependent, or insider-coded scores low, however devotionally excellent. "
+            "Judge this against what the pool can actually supply (verbatim 19th-century "
+            "scripture, some archaic register unavoidable) — do not require modern phrasing "
+            "the sourcing rule forbids."
+            f"{_back_imagery_sentence}\n"
+        )
+        action_block = (
+            "Decide ONE next action for the pipeline (machine-executed — choose exactly one):\n"
+            "  \"ship\"    — the card is ready (typical when overall ≥ target).\n"
+            "  \"requote\" — a genuinely different, available passage from the pool would help "
+            "(fit or length — not register, see above): put the search phrase in action_guidance.\n"
+            "  \"repaint\" — the weakness is the ARTWORK: the pipeline regenerates it; put the "
+            "imperative change in action_guidance.\n"
+            "Text layout problems alone (legibility) usually mean \"requote\" toward a SHORTER "
+            "quote. Never pick an action your guidance doesn't support.\n\n"
+        )
+
+    if has_back:
+        artwork_fit_crit = (
+            "  artwork_fit: judge whether the front's background wash and overall design feel "
+            "calm and dignified and KEEP THE TEXT READABLE — decorative imagery must never "
+            "fight the words. The second image is the reflection back (no full artwork there).\n"
+        )
+        legibility_crit = (
+            "  legibility: judge BOTH faces. Front — is every piece of text comfortably "
+            "readable at business-card size (quote, citation, translation if any)? Back — "
+            "is the reflection question and action prompt clear, with generous writing space? "
+            "Crowding, low contrast, or tiny type scores low.\n\n"
+        )
+    else:
+        artwork_fit_crit = (
+            "  artwork_fit: does the front's background wash and overall design feel calm "
+            "and dignified while KEEPING THE TEXT READABLE — decorative imagery must never "
+            "fight the words?\n"
+        )
+        legibility_crit = (
+            "  legibility: judge BOTH faces when visible. Front — is every piece of text "
+            "comfortably readable at business-card size (quote, citation, translation if "
+            "any)? Back — is the reflection face (question, action prompt, writing lines) "
+            "clear with generous writing space? Crowding, low contrast, or tiny type scores low.\n\n"
+        )
+
     user_message = (
-        "Score this QUOTE CARD — a 3.5×2 inch giveaway card (front: artwork under a vignette "
-        "with the quote printed; back: clean artwork). It is NOT sold; it exists to share one "
+        "Score this QUOTE CARD — a 3.5×2 inch giveaway card (front: the quote in dark text "
+        "on a calm light wash of the artwork; back: a reflection face with a short question, "
+        "an action prompt, and writing lines — never the quote). It is NOT sold; it exists to share one "
         "beautiful idea from the Bahá'í writings with someone who may have never encountered "
         "the Faith. That person is the standard of judgment throughout.\n\n"
         f"Theme: {theme}\n\n"
         f"Printed quote:\n{quote}\n\n"
         f"Citation printed on the card: {citation_source or '(none)'}\n"
         f"{grounding_line}"
+        f"{pinned_block}"
         f"{sourcing_note}"
         f"{translation_block}"
         f"{consultation_block}"
@@ -455,33 +575,15 @@ def score_quote_card(
         "For EVERY criterion below 7 the note must END with 'Fix: <one concrete achievable "
         "change>'.\n\n"
         "Criteria:\n"
-        "  quote_citation: is the quote well-chosen for the theme and correctly attributed? "
-        "Its TEXT is machine-verified character-exact against Ruhi Book 1 before any render — "
-        "judge selection and fit, never suspect a misquote and never propose rewording. "
-        "An ungrounded quote caps this at 4.\n"
+        f"{quote_citation_crit}"
         + ("  translation: is the translation faithful and complete, in a natural, reverent "
            "register a native reader would trust? Flag ANY added, dropped, or distorted meaning.\n"
            if translation else "")
-        + "  artwork_fit: does the ACTUAL rendered card artwork genuinely express the theme "
-        "and reward a closer look, front and back?\n"
-        "  newcomer_accessibility: the heart of this product — would someone with ZERO "
-        "background find this card welcoming, clear, and beautiful? Anything esoteric, "
-        "jargon-dependent, or insider-coded scores low, however devotionally excellent. "
-        "Judge this against what the pool can actually supply (verbatim 19th-century "
-        "scripture, some archaic register unavoidable) — do not require modern phrasing "
-        "the sourcing rule forbids.\n"
-        "  legibility: judge the attached image — the real front face. Is every piece of "
-        "text comfortably readable at business-card size (quote, translation if any, "
-        "citation, disclaimer)? Crowding, low contrast, or tiny type scores low.\n\n"
-        "Decide ONE next action for the pipeline (machine-executed — choose exactly one):\n"
-        "  \"ship\"    — the card is ready (typical when overall ≥ target).\n"
-        "  \"requote\" — a genuinely different, available passage from the pool would help "
-        "(fit or length — not register, see above): put the search phrase in action_guidance.\n"
-        "  \"repaint\" — the weakness is the ARTWORK: the pipeline regenerates it; put the "
-        "imperative change in action_guidance.\n"
-        "Text layout problems alone (legibility) usually mean \"requote\" toward a SHORTER "
-        "quote. Never pick an action your guidance doesn't support.\n\n"
-        "Return ONLY this JSON — field order matters, keep it exactly:\n"
+        + artwork_fit_crit
+        + f"{newcomer_crit}"
+        + legibility_crit
+        + f"{action_block}"
+        + "Return ONLY this JSON — field order matters, keep it exactly:\n"
         "{\n"
         '  "scores": {\n'
         '    "quote_citation":   {"score": 6, "note": "one or two sentences; if below 7 end with Fix: ..."},\n'
@@ -501,11 +603,26 @@ def score_quote_card(
     raw = None
     if front_image_path and Path(front_image_path).exists():
         try:
+            if has_back:
+                vision_intro = (
+                    "TWO images are attached. The FIRST is the rendered FRONT face — the quote "
+                    "in dark text on a calm light wash of the artwork; judge LEGIBILITY of the "
+                    "quote face from it. The SECOND is the REFLECTION back face (a short "
+                    "question, an action prompt, and ruled writing lines — never the quote); "
+                    "judge whether it is clean, readable, with generous writing space. The "
+                    "artwork now appears only as the front's soft background wash — do not "
+                    "expect a full picture on the back.\n\n"
+                )
+                vision_images = [front_image_path, back_image_path]
+            else:
+                vision_intro = (
+                    "The attached image is the ACTUAL rendered front face of the quote card — "
+                    "the physical thing a stranger would be handed. Judge what you see.\n\n"
+                )
+                vision_images = front_image_path
             raw = call_grok_vision(
-                front_image_path,
-                "The attached image is the ACTUAL rendered front face of the quote card — "
-                "the physical thing a stranger would be handed. Judge what you see.\n\n"
-                + user_message,
+                vision_images,
+                vision_intro + user_message,
                 system=system_prompt,
                 temperature=0.15,
                 max_tokens=1600,

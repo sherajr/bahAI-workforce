@@ -11,9 +11,17 @@ import {
 } from "lucide-react";
 import { api, API_ORIGIN } from "../lib/api";
 import type {
-  Contact, PendingApproval, SecretaryMessage, SecretaryStatus, SecretaryUpcoming, WhatsAppStatus,
+  Contact, PendingApproval, SecretaryStatus, SecretaryUpcoming, WhatsAppStatus,
 } from "../lib/types";
 import { Card, CardContent, CardHeader, CardTitle, Button, BadgePill, ErrorNote } from "./ui";
+
+interface SecretaryMessage {
+  role: "user" | "assistant";
+  content: string;
+  channel: string;
+  ts: string;
+  sender?: string | null;
+}
 import { cn } from "../lib/utils";
 import { PersonalityModal } from "./PersonalityModal";
 import { NotesModal } from "./NotesModal";
@@ -93,7 +101,7 @@ export function SecretaryPanel() {
 
   const refreshChat = useCallback(() => {
     api.getSecretaryHistory(100)
-      .then((r) => setMessages(r.messages))
+      .then((r) => setMessages(r.messages as unknown as SecretaryMessage[]))
       .catch(() => setError("Could not load the conversation. Is the backend running?"));
   }, []);
 
@@ -287,9 +295,24 @@ export function SecretaryPanel() {
                   <div className={cn(
                     "max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
                     m.role === "user"
-                      ? "rounded-br-sm bg-amber-400/15 text-amber-100"
+                      ? (m.sender
+                          ? "rounded-br-sm bg-slate-900/60 border border-violet-500/30 text-slate-200"
+                          : "rounded-br-sm bg-amber-400/15 text-amber-100")
                       : "rounded-bl-sm bg-slate-800/80 text-slate-200"
                   )}>
+                    {m.role === "user" && m.sender && (
+                      <div className="mb-1.5 flex">
+                        <BadgePill className="border-emerald-500/40 bg-emerald-500/10 text-emerald-300 text-[10px] py-0 px-1.5 flex items-center gap-1 font-semibold">
+                          <Phone className="h-2.5 w-2.5" />
+                          <span>{m.sender} · WhatsApp</span>
+                        </BadgePill>
+                      </div>
+                    )}
+                    {m.role === "assistant" && m.sender && (
+                      <div className="mb-1.5 text-[10px] font-semibold text-slate-400">
+                        Abigail → {m.sender}
+                      </div>
+                    )}
                     {m.content}
                     <div className="mt-1 flex items-center gap-1 text-[10px] text-slate-500">
                       {m.channel === "whatsapp" && (

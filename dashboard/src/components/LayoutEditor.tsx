@@ -166,19 +166,21 @@ export function LayoutEditor({ product }: { product: ProductRow }) {
             </div>
 
             {/* Controls */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className={card ? "grid grid-cols-1" : "grid grid-cols-2 gap-3"}>
               <SelectField
                 label="Font"
                 value={lay.font}
                 onChange={(v) => set("font", v)}
                 options={opts.data.fonts}
               />
-              <SelectField
-                label="Text colour"
-                value={lay.text_color}
-                onChange={(v) => set("text_color", v)}
-                options={opts.data.colors}
-              />
+              {!card && (
+                <SelectField
+                  label="Text colour"
+                  value={lay.text_color}
+                  onChange={(v) => set("text_color", v)}
+                  options={opts.data.colors}
+                />
+              )}
             </div>
 
             <SliderField
@@ -213,13 +215,15 @@ export function LayoutEditor({ product }: { product: ProductRow }) {
             )}
 
             {card && (
-              <SliderField
-                label="Background shading"
-                value={lay.vignette ?? 1}
-                range={ranges.vignette}
-                onChange={(v) => set("vignette", v)}
-                format={(v) => `${Math.round(v * 100)}%`}
-              />
+              <>
+                <SliderField
+                  label="Background shading"
+                  value={lay.vignette ?? 1}
+                  range={ranges.vignette}
+                  onChange={(v) => set("vignette", v)}
+                  format={(v) => `${Math.round(v * 100)}%`}
+                />
+              </>
             )}
 
             <div className="flex items-center gap-2 pt-1">

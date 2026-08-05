@@ -94,7 +94,7 @@ export interface RosterEntry {
 }
 
 export const ROSTER: Record<string, RosterEntry> = {
-  librarian:  { name: "Ruth",    role: "Librarian",   avatar: "/roster/librarian.jpg" },
+  librarian:  { name: "Ruth",    role: "Bahá'í Librarian",   avatar: "/roster/librarian.jpg" },
   artist:     { name: "Theo",    role: "Artist",      avatar: "/roster/artist.jpg" },
   scribe:     { name: "Clara",   role: "Scribe",      avatar: "/roster/scribe.jpg" },
   reviewer:   { name: "Amos",    role: "Reviewer",    avatar: "/roster/reviewer.jpg" },

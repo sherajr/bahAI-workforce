@@ -35,6 +35,9 @@ export interface ConsultationTurn {
   // Optional rendered image attached to the turn — currently the front-face
   // preview on the Reviewer's ask-for-input turn at the post-round-2 pause.
   image?: string | null;
+  // Card runs also attach the back-face preview (2026-07-16 — the back
+  // carries the artwork now, so Sheraj steers from both faces).
+  image_back?: string | null;
 }
 
 // A language the card pipeline can translate into (GET /card/languages).
@@ -68,6 +71,23 @@ export interface CardCopy {
   translation_disclaimer_en: string | null;
   // Fixed, code-written AI-artwork disclosure (absent on cards saved before it existed).
   artwork_disclosure?: string | null;
+  variant_faces?: Record<string, { front: string; back: string }>;
+  reflection_question?: string;
+  reflection_action?: string;
+  reflection_native?: { question?: string; action?: string } | null;
+  // Quote provenance (rule 11 update 2026-08-04; absent on older cards =
+  // Ruhi Book 1). quote_verified is false ONLY for the risky web tier.
+  quote_verified?: boolean;
+  quote_provenance?: string;   // "ruhi_book1" | "lib:<slug>" | "web:<url>"
+  quote_sources?: string[];
+}
+
+// One selectable quote source for the card form (GET /quote-sources).
+export interface QuoteSourceOption {
+  id: string;           // "ruhi_book1" | "lib:<slug>"
+  name: string;
+  kind: "verified";     // the risky web option is a client-side row, not listed
+  default: boolean;
 }
 
 export interface PipelineResult {
@@ -91,13 +111,75 @@ export interface PipelineResult {
   language_name?: string | null;
   quote?: string;
   quote_grounded?: boolean;
+  // Provenance of the printed quote (rule 11 update 2026-08-04).
+  quote_verified?: boolean;
+  quote_provenance?: string;
   citation?: string;
   translation?: CardTranslation | null;
+  // Per-language card pairs (quote-card runs), passed explicitly so the
+  // results panel never depends on a stale products cache.
+  variant_faces?: Record<string, { front: string; back: string }>;
   review: Review;
   attempts: number;
   target_reached: boolean;
   badge: string;
   consultation: ConsultationTurn[];
+}
+
+// One card's outcome inside a CardBatchResult (POST /pipeline/run-card-batch).
+export interface CardBatchItem {
+  index: number;
+  status: "done" | "error";
+  quote: string;
+  error?: string;
+  citation?: string;
+  product_id?: string;
+  task_id?: string;
+  front_image_web?: string;
+  back_image_web?: string;
+  variant_faces?: Record<string, { front: string; back: string }>;
+  overall?: number | null;
+  badge?: string;
+  attempts?: number;
+  target_reached?: boolean;
+}
+
+// One Librarian quote suggestion (GET /ruhi-quotes): text from a SELECTED
+// source, canonicalized server-side so a verified-tier item passes the batch
+// endpoint's verification exactly as returned. `shortened` marks a passage
+// the server trimmed at a sentence boundary (with ". . .") to fit the card.
+// `verified` is false ONLY for risky web-tier items (origin "web:<url>") —
+// their wording is fetched, not machine-verified.
+export interface RuhiQuoteSuggestion {
+  quote: string;
+  source: string;
+  score: number | null;
+  shortened: boolean;
+  origin: string;      // "ruhi_book1" | "lib:<slug>" | "web:<url>"
+  verified: boolean;
+}
+
+export interface RuhiQuoteSuggestResult {
+  topic: string;
+  requested: number;
+  items: RuhiQuoteSuggestion[];
+  skipped_too_long: number;
+  web_note?: string | null;
+}
+
+// Result of a hands-free multi-quote batch job. Batch runs skip the
+// consultation's mid-run pause, so a batch job never enters
+// status "waiting_for_input". Discriminated from PipelineResult by `batch`.
+export interface CardBatchResult {
+  batch: true;
+  product_type: "quote_card_batch";
+  theme: string;
+  language: string | null;
+  language_name?: string | null;
+  total: number;
+  completed: number;
+  failed: number;
+  items: CardBatchItem[];
 }
 
 // ── Visual layout editor ──────────────────────────────────────────────────────

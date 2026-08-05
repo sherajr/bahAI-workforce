@@ -35,6 +35,7 @@ SERIF_STACK = [
 # choice quietly falls back instead of failing. "palatino" resolves to the
 # stack unchanged, so it reproduces the pre-editor default exactly.
 FONTS: dict[str, dict] = {
+    "tahoma":           {"label": "Tahoma",              "paths": ["C:/Windows/Fonts/tahoma.ttf", *SERIF_STACK]},
     "palatino":         {"label": "Palatino (italic)",  "paths": list(SERIF_STACK)},
     "palatino_regular": {"label": "Palatino (regular)",  "paths": ["C:/Windows/Fonts/pala.ttf", *SERIF_STACK]},
     "georgia":          {"label": "Georgia (italic)",    "paths": ["C:/Windows/Fonts/georgiai.ttf", *SERIF_STACK]},
@@ -54,8 +55,7 @@ COLORS: dict[str, tuple] = {
 }
 _DEFAULT_COLOR = "white"
 
-# Defaults chosen so that a face rendered with these values is byte-identical
-# to the pre-editor output — the editor is purely additive.
+# Bookmark defaults reproduce the pre-editor output byte-for-byte.
 BOOKMARK_DEFAULTS = {
     "font": _DEFAULT_FONT,
     "text_scale": 1.0,     # multiplier on the auto-fit starting size
@@ -66,11 +66,18 @@ BOOKMARK_DEFAULTS = {
     "show_rule": True,     # the thin gold rule above the star
 }
 
+# Card defaults (redesign 2026-07-16, owner spec): Tahoma text in dark ink on
+# a light wash — readability first. The old translation_placement knob is
+# gone: the quote is ALWAYS on the front and NEVER on the back (translated
+# runs render separate per-language cards instead). text_color is kept in the
+# dict for saved-layout compatibility but the card renderer ignores it (dark
+# ink on a light background is fixed); "vignette" now means background wash
+# strength (higher = flatter/paler, lower = more of the artwork's colour).
 CARD_DEFAULTS = {
-    "font": _DEFAULT_FONT,   # English quote + citation only; translation font stays script-verified
+    "font": "tahoma",
     "text_scale": 1.0,
     "text_color": _DEFAULT_COLOR,
-    "vignette": 1.0,         # multiplier on the radial scrim strength
+    "vignette": 1.0,
 }
 
 
@@ -105,7 +112,9 @@ def sanitize(product_type: str, raw: dict | None) -> dict:
     d = dict(CARD_DEFAULTS if is_card else BOOKMARK_DEFAULTS)
 
     font = str(raw.get("font") or "").strip()
-    d["font"] = font if font in FONTS else _DEFAULT_FONT
+    # Fall back to the product-type default already seeded in d (cards →
+    # palatino_regular; bookmarks → palatino), not a hard-coded italic.
+    d["font"] = font if font in FONTS else d["font"]
 
     color = str(raw.get("text_color") or "").strip()
     d["text_color"] = color if color in COLORS else _DEFAULT_COLOR

@@ -21,11 +21,16 @@ Design notes:
   little in either direction still leaves every card looking intentionally
   framed -- no precision cutting required. A double keyline sits just
   inside each card's true edge as a second fallback frame.
-- Output is a single 2-page PDF: page 1 = fronts grid, page 2 = backs grid.
-  Default (duplex=False): each card at the same grid position on both pages
-  (cut-then-pair layout). duplex=True: page 2 mirrors COLUMNS within each
-  row so a home double-sided printer using long-edge flip aligns each back
-  with its front (see build_print_sheet docstring).
+- Output is a PDF of front/back page PAIRS. When the selected cards fit in
+  one grid it's the original 2-page PDF (page 1 = fronts, page 2 = backs);
+  when there are more cards than fit on one page, extra sheets are added
+  rather than dropping the overflow -- pages interleave as
+  [fronts_1, backs_1, fronts_2, backs_2, ...] so each physical sheet is
+  self-contained.
+  Default (duplex=False): each card at the same grid position on its front
+  and back page (cut-then-pair layout). duplex=True: the back page mirrors
+  COLUMNS within each row so a home double-sided printer using long-edge
+  flip aligns each back with its front (see build_print_sheet docstring).
 """
 
 import math
@@ -195,8 +200,14 @@ def build_print_sheet(front_path: str = None, back_path: str = None,
 
     Page 1 is a grid of front faces, page 2 the backs. Card size and grid
     count are derived from the first front's pixel dimensions at 300dpi.
-    With multiple pairs the grid cycles through them in order (slot i uses
-    pairs[i % len(pairs)]) so a gathering can print a mixed set on one sheet.
+    With multiple pairs the grid is filled in order; a set larger than one
+    page's grid SPILLS onto additional front/back page pairs rather than
+    being dropped, so every selected card prints (an 8-slot card grid holds
+    8 pairs per sheet, a 9th starts a second sheet). The last (possibly
+    partial) sheet fills any empty slots by cycling its own pairs — no
+    half-blank pages, same page-filling behavior as a single product. Pages
+    are ordered [fronts_1, backs_1, fronts_2, backs_2, ...] so each sheet is
+    self-contained and the duplex back-alignment holds per sheet.
     A single pair uses the first front at native size and fits only the back
     — same as the original one-product path.
 
@@ -245,22 +256,29 @@ def build_print_sheet(front_path: str = None, back_path: str = None,
     card_w_in, card_h_in = card_w_px / DPI, card_h_px / DPI
     cols, rows = _auto_grid(card_w_in, card_h_in)
     seam_px = round(SEAM_IN * DPI)
+    per_page = cols * rows
 
-    # Single-pair path: pass a one-element list so cycling is a no-op and
-    # every cell gets the same image (same as the original single Image paste).
-    front_page = _sheet_page(
-        prepared_fronts, card_w_px, card_h_px, cols, rows, seam_px, palette,
-        mirror_cols=False,
-    )
-    back_page = _sheet_page(
-        prepared_backs, card_w_px, card_h_px, cols, rows, seam_px, palette,
-        mirror_cols=bool(duplex),
-    )
+    # Paginate: pairs beyond one grid spill onto extra sheets instead of being
+    # dropped. Each chunk emits its own front page + back page, interleaved
+    # ([F1, B1, F2, B2, ...]) so every physical sheet is self-contained (the
+    # duplex column-mirror still aligns each back to the front it follows). A
+    # partial last chunk still fills its grid by cycling its own pairs, and a
+    # single chunk reproduces the original [front, back] 2-page output.
+    pages: list[Image.Image] = []
+    for start in range(0, len(prepared_fronts), per_page):
+        pages.append(_sheet_page(
+            prepared_fronts[start:start + per_page], card_w_px, card_h_px,
+            cols, rows, seam_px, palette, mirror_cols=False,
+        ))
+        pages.append(_sheet_page(
+            prepared_backs[start:start + per_page], card_w_px, card_h_px,
+            cols, rows, seam_px, palette, mirror_cols=bool(duplex),
+        ))
 
     if out_pdf_path is None:
         OUTPUTS_DIR.mkdir(exist_ok=True)
         out_pdf_path = str(OUTPUTS_DIR / f"print-sheet-{uuid.uuid4().hex[:8]}.pdf")
 
-    front_page.save(out_pdf_path, "PDF", resolution=float(DPI),
-                     save_all=True, append_images=[back_page])
+    pages[0].save(out_pdf_path, "PDF", resolution=float(DPI),
+                   save_all=True, append_images=pages[1:])
     return out_pdf_path

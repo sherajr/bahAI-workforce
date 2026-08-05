@@ -18,6 +18,14 @@ import { CardRedirectCard, QuoteCardDetail } from "./QuoteCardPreview";
 import { ScoreCard } from "./ScoreCard";
 import { BadgePill, Button, Card, CardContent, ErrorNote } from "./ui";
 
+// Friendly labels for per-language card pairs in the drawer (falls back to
+// the uppercase code for any language not listed here).
+const VARIANT_LANG_NAMES: Record<string, string> = {
+  es: "Spanish",
+  zh: "Chinese",
+  ar: "Arabic",
+};
+
 // ── Card ──────────────────────────────────────────────────────────────────────
 
 /** Small circular download button overlaid on an image. */
@@ -274,6 +282,23 @@ function ProductDrawer({
               downloadName={`${product.id}-artwork.jpg`}
             />
           )}
+          {/* Per-language card pairs (translated quote-card runs) — read
+              straight from this product's own listing_copy, never a cache. */}
+          {quoteCard && cardCopy?.variant_faces &&
+            Object.entries(cardCopy.variant_faces).map(([code, pair]) => (
+              <span key={code} className="contents">
+                <DrawerImage
+                  label={`${VARIANT_LANG_NAMES[code] ?? code.toUpperCase()} front`}
+                  src={imageUrl(pair.front)}
+                  downloadName={`${product.id}-${code}-front.png`}
+                />
+                <DrawerImage
+                  label={`${VARIANT_LANG_NAMES[code] ?? code.toUpperCase()} back`}
+                  src={imageUrl(pair.back)}
+                  downloadName={`${product.id}-${code}-back.png`}
+                />
+              </span>
+            ))}
         </div>
 
         {product.front_image && product.back_image && (
@@ -294,6 +319,7 @@ function ProductDrawer({
               quote={cardCopy.quote}
               citation={cardCopy.citation}
               quoteGrounded={cardCopy.quote_grounded}
+              quoteProvenance={cardCopy.quote_provenance}
               languageName={cardCopy.language_name}
               translationText={cardCopy.translation_text}
               disclaimerNative={cardCopy.translation_disclaimer_native}

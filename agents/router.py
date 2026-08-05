@@ -118,28 +118,38 @@ def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attem
         raise
 
 
-def call_grok_vision(image_path: str, prompt: str, system: str = None,
+def call_grok_vision(image_path: str | list[str], prompt: str, system: str = None,
                      temperature: float = 0.7, max_tokens: int = 800,
                      json_mode: bool = False) -> str:
     """
-    Send a local image + prompt to Grok for visual analysis (xAI multimodal API).
-    Used by the Artist and Reviewer so they can see the actual artwork.
+    Send one or more local images + a prompt to Grok for visual analysis
+    (xAI multimodal API). Used by the Artist and Reviewer so they can see
+    the actual artwork.
+
+    image_path may be a single path (str) or an ordered list of paths. Each
+    image becomes one content block, in order, before the text block.
+    Multi-image callers should reference images by order in the prompt
+    ("the FIRST image", "the SECOND image").
     """
-    suffix = Path(image_path).suffix.lower()
-    media_type = "image/png" if suffix == ".png" else "image/jpeg"
-    with open(image_path, "rb") as f:
-        b64 = base64.standard_b64encode(f.read()).decode()
+    paths = [image_path] if isinstance(image_path, str) else list(image_path)
+    content = []
+    for path in paths:
+        suffix = Path(path).suffix.lower()
+        media_type = "image/png" if suffix == ".png" else "image/jpeg"
+        with open(path, "rb") as f:
+            b64 = base64.standard_b64encode(f.read()).decode()
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{b64}", "detail": "high"},
+        })
+    content.append({"type": "text", "text": prompt})
 
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({
         "role": "user",
-        "content": [
-            {"type": "image_url",
-             "image_url": {"url": f"data:{media_type};base64,{b64}", "detail": "high"}},
-            {"type": "text", "text": prompt},
-        ],
+        "content": content,
     })
     return _call_grok(messages, temperature, max_tokens, model=XAI_VISION_MODEL,
                       json_mode=json_mode, kind="grok_vision")

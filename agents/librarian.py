@@ -55,24 +55,31 @@ def _embed(text: str) -> list[float]:
     return resp.json()["embedding"]
 
 
-def retrieve(query: str, n_results: int = 3, collection_name: str = "bahai_texts") -> list[dict]:
+def retrieve(query: str, n_results: int = 3, collection_name: str = "bahai_texts",
+             slugs: list[str] | None = None) -> list[dict]:
     """
     Find the top-N most relevant passages from the local index.
-    Returns list of dicts with: text, source, section, link, score.
+    Returns list of dicts with: text, source, section, link, slug, score.
     Returns empty list if the index hasn't been built yet.
     collection_name selects which ChromaDB collection to search — the default
     "bahai_texts" is the full 7-text index the bookmark pipeline uses; see
     retrieve_ruhi_book1() for the Quote Card pipeline's restricted index.
+    slugs (bahai_texts only) restricts the search to specific ingested texts
+    by their metadata slug — used by the card pipeline's owner-selected
+    source expansion (2026-08-04); None searches the whole collection,
+    exactly as before.
     """
     collection = _get_collection(collection_name)
     if collection is None:
         return []
 
     embedding = _embed(query)
+    where = {"slug": {"$in": list(slugs)}} if slugs else None
     results = collection.query(
         query_embeddings=[embedding],
         n_results=min(n_results, collection.count()),
         include=["documents", "metadatas", "distances"],
+        where=where,
     )
 
     passages = []
@@ -86,9 +93,59 @@ def retrieve(query: str, n_results: int = 3, collection_name: str = "bahai_texts
             "source": meta.get("source", ""),
             "section": meta.get("section", ""),
             "link": meta.get("link", ""),
+            "slug": meta.get("slug", ""),
             "score": round(1 - dist, 4),  # cosine similarity (approximate)
         })
     return passages
+
+
+# Cached once per process — the ingested text list only changes when
+# scripts/ingest_texts.py is re-run (which restarts nothing, but a stale
+# cache then only hides a NEW text until the API restarts — harmless).
+_LIBRARY_SOURCES_CACHE: list[dict] | None = None
+
+
+def list_library_sources() -> list[dict]:
+    """
+    The distinct texts available in the bahai_texts collection, as
+    [{"slug", "name"}] sorted by name — the option list for the card
+    pipeline's owner-selected source expansion. Prefers the texts/*.json
+    files (fast, carries clean titles); falls back to scanning collection
+    metadata when a JSON is missing. Returns [] when neither exists.
+    """
+    global _LIBRARY_SOURCES_CACHE
+    if _LIBRARY_SOURCES_CACHE is not None:
+        return _LIBRARY_SOURCES_CACHE
+
+    sources: dict[str, str] = {}
+    texts_dir = Path(__file__).parent.parent / "texts"
+    for path in sorted(texts_dir.glob("*.json")):
+        try:
+            import json
+            data = json.loads(path.read_text(encoding="utf-8"))
+            slug = str(data.get("slug") or "").strip()
+            if slug and data.get("passages"):
+                sources[slug] = f"{data.get('author', '')}, {data.get('title', '')}".strip(", ")
+        except Exception:
+            continue
+
+    if not sources:
+        collection = _get_collection("bahai_texts")
+        if collection is not None:
+            try:
+                got = collection.get(include=["metadatas"])
+                for meta in got.get("metadatas") or []:
+                    slug = (meta or {}).get("slug", "")
+                    if slug and slug not in sources:
+                        sources[slug] = (meta or {}).get("source", slug)
+            except Exception:
+                pass
+
+    _LIBRARY_SOURCES_CACHE = sorted(
+        ({"slug": s, "name": n} for s, n in sources.items()),
+        key=lambda d: d["name"],
+    )
+    return _LIBRARY_SOURCES_CACHE
 
 
 def retrieve_ruhi_book1(query: str, n_results: int = 3) -> list[dict]:

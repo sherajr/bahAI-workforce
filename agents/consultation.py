@@ -84,6 +84,33 @@ CONSULTATION_SCRIPTURE = {
 # possible newcomer to the Faith (accessibility is the design test, not
 # marketability), there is no Etsy listing, and the printed quote must be
 # shorter to stay legible on a 3.5×2 inch face.
+# ── Code-owned provenance wording for the card sources expansion ────────────
+# (rule 11 update, owner decision 2026-08-04). These are fixed hand-written
+# strings — same discipline as the frames below and the disclaimers (rule 8):
+# the card pipeline picks WHICH string applies; no LLM ever writes provenance
+# claims. CARD_PIN_LABEL_RUHI is the default and preserves the original
+# wording; the LIBRARY/WEB labels are .format()-ed with the source's display
+# name by the pipeline. The WEB label deliberately says NOT machine-verified.
+CARD_PIN_LABEL_RUHI = "it has been machine-verified verbatim against Ruhi Book 1"
+CARD_PIN_LABEL_LIBRARY = "it has been machine-verified verbatim against {name}"
+CARD_PIN_LABEL_WEB = (
+    "it was chosen by the owner from a web source ({name}) and its wording is "
+    "NOT machine-verified — the finished card is flagged accordingly"
+)
+
+# source_scope replacement for owner-expanded runs — same contract as the quote_card
+# frame's own source_scope (word-for-word, sentence-boundary excerpting only,
+# never substitute from memory), generalized to the selected pool.
+CARD_SOURCE_SCOPE_EXPANDED = (
+    " These citations are drawn from the verified source texts Sheraj selected for "
+    "this run (each one's SOURCE line names its text) — this card's quote must be one "
+    "of them WORD-FOR-WORD, exactly as given (excerpting is allowed only as whole "
+    "sentences from the passage's beginning); never reword, modernise, trim "
+    "mid-sentence, or substitute a different Bahá'í passage from memory, however "
+    "well known or fitting it may seem."
+)
+
+
 _PRODUCT_FRAMES = {
     "bookmark": {
         "artist_context": (
@@ -109,12 +136,14 @@ _PRODUCT_FRAMES = {
         "artist_context": (
             "a quote card design — a small 3.5×2 inch giveaway card whose purpose is to "
             "introduce someone who may know nothing about the Bahá'í Faith to one beautiful "
-            "idea. A wide middle band of the image becomes the card's front face with the "
-            "quote printed over it; a neighbouring band becomes the clean back face."
+            "idea. The artwork becomes a soft, heavily blurred colour wash behind the quote "
+            "on the front (not a visible picture) — palette and mood still matter, fine "
+            "detail does not. The back is a reflection face (question + writing lines), "
+            "never a picture of the artwork."
         ),
         "audience": "recipient — possibly a complete newcomer to the Faith",
-        "front_region": "the wide middle band / front face",
-        "output": "card's visual styling",
+        "front_region": "the quote face — the artwork survives as a soft background wash",
+        "output": "card's calm visual mood and palette (not poster-like detail)",
         "quote_name": "card quote",
         "quote_spec": (
             "1–3 lines, 60–140 characters total — this is a business-card-sized giveaway, "
@@ -240,6 +269,9 @@ def _run_round(
     prior_artist_observation: str = "",
     human_note: str = "",
     product: str = "bookmark",
+    fixed_quote: str = "",
+    fixed_quote_label: str = "",
+    source_scope_override: str = "",
 ) -> dict:
     """
     Run one four-turn consultation round.
@@ -251,9 +283,32 @@ def _run_round(
     on_turn(entry), if given, fires immediately after each agent's turn completes —
     this is what lets the dashboard render the consultation as a live chat instead of
     only showing the transcript once the whole run finishes.
+    When fixed_quote is set (owner-pinned card quote), the team debates only
+    artwork and framing — never the quote itself. Non-pinned paths are unchanged.
+    fixed_quote_label / source_scope_override (rule 11 update, 2026-08-04)
+    swap in the matching CODE-OWNED provenance strings below when the card
+    run's quote pool was owner-expanded — the pinned wording must never
+    overclaim verification (a web-tier pin is NOT machine-verified), and the
+    Librarian's sourcing frame must name the actually-selected pool. Empty =
+    the original Ruhi wording, character for character.
     """
     transcript = []
     frame = _PRODUCT_FRAMES[product]
+    if source_scope_override:
+        frame = {**frame, "source_scope": source_scope_override}
+
+    fixed = (fixed_quote or "").strip()
+    fixed_block = ""
+    if fixed:
+        pin_label = (fixed_quote_label or "").strip() or CARD_PIN_LABEL_RUHI
+        fixed_block = (
+            "\n\nIMPORTANT — THE QUOTE IS ALREADY FIXED. Sheraj (the owner) chose this exact "
+            f"quote — {pin_label}. It prints "
+            "EXACTLY as written and CANNOT be changed, shortened, reworded, or swapped by the "
+            f"team:\n\"{fixed}\"\n"
+            f"Your job in this consultation is ONLY the artwork and how the card frames this "
+            f"fixed quote for the {frame['audience']} — never propose, critique, or re-pick the quote.\n"
+        )
 
     def _progress(msg: str):
         if progress:
@@ -297,6 +352,7 @@ def _run_round(
             "a requested count actually rendered, so naming a specific number risks asserting a "
             "fact you haven't verified. Be concrete. No throat-clearing, no restating the "
             "prompt. Under 60 words total."
+            f"{fixed_block}"
         )
         try:
             artist_msg = call_grok_vision(image_path, artist_prompt,
@@ -321,6 +377,7 @@ def _run_round(
             "single visual element that best expresses the agreed direction, and tell the "
             f"Scribe what to emphasise to connect the {frame['audience']} to it.\n\n"
             "Be concrete. Under 55 words total."
+            f"{fixed_block}"
         )
         artist_msg = call_llm(
             "creative_writing",  # Artist stays on Grok per routing directive
@@ -344,7 +401,15 @@ def _run_round(
         for c in citations[:2]:
             citation_block += f'  — "{c.get("text", "")[:140]}" ({c.get("source", "")})\n'
 
-    if round_number == 1:
+    if fixed:
+        scribe_instruction = (
+            "The quote is already fixed (shown above) — do NOT propose, restate, or invent a "
+            "quote, and do NOT write a \"My proposal:\" line. Reply in 2-3 short, natural "
+            "sentences, first person, no list markers: name the tone and the one or two framing "
+            "choices that will make the ARTWORK carry this fixed quote warmly and clearly for "
+            "someone who may know nothing about the Faith. Under 60 words."
+        )
+    elif round_number == 1:
         scribe_instruction = (
             "Reply in 2-3 short, natural sentences, the way you'd speak to teammates around "
             "a table -- first person, plain language, no list markers. Cover the spiritual "
@@ -375,6 +440,7 @@ def _run_round(
         f"The Artist just reported:\n\n{artist_msg}\n\n"
         f"Theme: {theme}{citation_block}\n\n"
         f"{scribe_instruction}"
+        f"{fixed_block}"
     )
     scribe_msg = call_llm(
         "scribe",
@@ -384,7 +450,10 @@ def _run_round(
     ).strip()
     _emit({
         "agent": "Scribe",
-        "role": f"quote & listing proposal ({round_label})",
+        "role": (
+            f"framing & tone ({round_label})" if fixed
+            else f"quote & listing proposal ({round_label})"
+        ),
         "message": scribe_msg,
     })
 
@@ -394,8 +463,16 @@ def _run_round(
     else:
         _progress(f"Consultation {round_label} — turn 3/4: Reviewer is checking convergence...")
 
+    fixed_reviewer_scope = (
+        "The quote is Sheraj's fixed choice and is OUT OF SCOPE — do not challenge its "
+        "wording, length, register, or suitability; challenge only whether the ARTWORK and "
+        "framing serve it. "
+        if fixed else ""
+    )
+
     if round_number == 1:
         reviewer_instruction = (
+            f"{fixed_reviewer_scope}"
             f"You are the team's constitutional critic. {CONSULTATION_SCRIPTURE['round1_challenge']} "
             "— so your duty in this round is to supply the differing opinion, not to harmonise "
             f"early. {CONSULTATION_SCRIPTURE['round1_tone']} Challenge the IDEA, never the agent.\n\n"
@@ -409,6 +486,7 @@ def _run_round(
         )
     else:
         reviewer_instruction = (
+            f"{fixed_reviewer_scope}"
             f"Check convergence — the team is about to commit. {CONSULTATION_SCRIPTURE['round2_verification']} "
             "Your job this round is to turn assumption into verified fact: re-examine the attached "
             f"image with fresh eyes rather than confirming what round {prev_round_number} assumed — if you cannot be "
@@ -434,6 +512,7 @@ def _run_round(
         "than what actually rendered. Judge only what you see in the attached image, and never "
         "repeat or assert a specific count yourself; describe motifs qualitatively instead.\n\n"
         f"{reviewer_instruction}"
+        f"{fixed_block}"
     )
     # The Reviewer sees the actual artwork (Grok vision) — it judges with its
     # own eyes rather than through the Artist's description. Falls back to
@@ -463,86 +542,106 @@ def _run_round(
     _progress(f"Consultation {round_label} — turn 4/4: Librarian is verifying quote authenticity...")
     verified_quote = ""
 
-    if citations:
-        citations_block = "\n\n".join(
-            f'  [{i+1}] "{c.get("text", "").strip()[:300]}"\n'
-            f'       — {c.get("source", "")} · {c.get("link", "")}'
-            for i, c in enumerate(citations[:3])
+    if fixed:
+        # Owner-pinned quote was resolved before consultation — no LLM
+        # re-verify/re-pick. Honest by construction (same class as code-appended
+        # disclaimers); the label states the actual verification tier and never
+        # overclaims (a web pin says NOT machine-verified). Non-fixed branch
+        # below is unchanged.
+        librarian_msg = (
+            "This card's quote is owner-pinned — "
+            f"{(fixed_quote_label or '').strip() or CARD_PIN_LABEL_RUHI} before this "
+            "consultation. There is nothing for me to re-verify or re-pick — the choice "
+            "is the owner's, and I record its provenance as stated."
         )
-        source_instruction = (
-            f"Verified passages retrieved from our Bahá'í text index:\n{citations_block}\n\n"
-            "Write ONE verified bookmark quote adapted directly from these passages. "
-            "You may condense or lightly rephrase but it must be traceable to a specific passage above. "
-            "Do NOT invent new spiritual language.\n"
-        )
+        verified_quote = ""
+        quote_grounded = False
+        _emit({
+            "agent": "Librarian",
+            "role": f"citation confirmation ({round_label})",
+            "message": librarian_msg,
+        })
     else:
-        source_instruction = (
-            "No specific passages were retrieved. Draw the verified quote from well-known, "
-            "attributable Bahá'í writings (Bahá'u'lláh, 'Abdu'l-Bahá, the Báb, or Shoghi Effendi). "
-            "Choose a short passage you are certain is authentic and name the exact source.\n"
+        if citations:
+            citations_block = "\n\n".join(
+                f'  [{i+1}] "{c.get("text", "").strip()[:300]}"\n'
+                f'       — {c.get("source", "")} · {c.get("link", "")}'
+                for i, c in enumerate(citations[:3])
+            )
+            source_instruction = (
+                f"Verified passages retrieved from our Bahá'í text index:\n{citations_block}\n\n"
+                "Write ONE verified bookmark quote adapted directly from these passages. "
+                "You may condense or lightly rephrase but it must be traceable to a specific passage above. "
+                "Do NOT invent new spiritual language.\n"
+            )
+        else:
+            source_instruction = (
+                "No specific passages were retrieved. Draw the verified quote from well-known, "
+                "attributable Bahá'í writings (Bahá'u'lláh, 'Abdu'l-Bahá, the Báb, or Shoghi Effendi). "
+                "Choose a short passage you are certain is authentic and name the exact source.\n"
+            )
+
+        later_round_note = ""
+        if round_number > 1:
+            later_round_note = (
+                f"This is round {round_number} — the Scribe has committed to a specific direction. "
+                f"{CONSULTATION_SCRIPTURE['round2_verification']} Your citation verdict is that "
+                "certitude for the QUOTE specifically — GROUNDED or ORIGINAL COMPOSITION, never a "
+                "guess. (Note: you verify citations only; you do not see the artwork, so never "
+                "certify any visual or numeric claim about the image — that is outside your scope.) "
+                f"If the round {prev_round_number} quote works well, keep it. If this round's "
+                "direction suggests a better or more fitting quote, use that instead.\n\n"
+            )
+
+        librarian_input = (
+            f"You are the Librarian agent for bahAI Workforce.{prior_block}"
+            f"Your role is to ensure every {frame['quote_name']} is grounded in actual verified Bahá'í writings — "
+            f"not original poetry or language invented by the Scribe.{frame['source_scope']}\n\n"
+            f"{later_round_note}"
+            f"{source_instruction}\n"
+            f"Scribe's proposed quotes:\n{scribe_msg}\n\n"
+            "Your task:\n"
+            "1. State whether the Scribe's quotes are drawn from the sources above "
+            "or are original composition.\n"
+            f"2. Provide ONE verified {frame['quote_name']} ({frame['quote_spec']}). "
+            "Write each line on its own line — do NOT use forward slashes as separators.\n"
+            "3. Name the source author and work.\n\n"
+            "Reply in EXACTLY this format — nothing before VERDICT, nothing after REASONING:\n"
+            "VERDICT: [GROUNDED IN SOURCES / ORIGINAL COMPOSITION]\n"
+            "VERIFIED QUOTE: [first line of the quote]\n"
+            "[second line if needed]\n"
+            "[third line if needed]\n"
+            "SOURCE: [author, work]\n"
+            "REASONING: [one sentence]"
         )
+        librarian_msg = call_llm(
+            "librarian",
+            [{"role": "user", "content": librarian_input}],
+            temperature=0.2,
+            max_tokens=300,
+        ).strip()
 
-    later_round_note = ""
-    if round_number > 1:
-        later_round_note = (
-            f"This is round {round_number} — the Scribe has committed to a specific direction. "
-            f"{CONSULTATION_SCRIPTURE['round2_verification']} Your citation verdict is that "
-            "certitude for the QUOTE specifically — GROUNDED or ORIGINAL COMPOSITION, never a "
-            "guess. (Note: you verify citations only; you do not see the artwork, so never "
-            "certify any visual or numeric claim about the image — that is outside your scope.) "
-            f"If the round {prev_round_number} quote works well, keep it. If this round's "
-            "direction suggests a better or more fitting quote, use that instead.\n\n"
-        )
+        # Extract VERIFIED QUOTE — collect all continuation lines until the next labelled field
+        lines = librarian_msg.splitlines()
+        for i, line in enumerate(lines):
+            if line.upper().startswith("VERIFIED QUOTE:"):
+                candidate = line.split(":", 1)[1].strip().strip('"')
+                j = i + 1
+                while j < len(lines) and not lines[j].upper().startswith(("SOURCE:", "REASONING:", "VERDICT:")):
+                    extra = lines[j].strip().strip('"')
+                    if extra:
+                        candidate += "\n" + extra
+                    j += 1
+                verified_quote = _normalize_quote(candidate)
+                break
 
-    librarian_input = (
-        f"You are the Librarian agent for bahAI Workforce.{prior_block}"
-        f"Your role is to ensure every {frame['quote_name']} is grounded in actual verified Bahá'í writings — "
-        f"not original poetry or language invented by the Scribe.{frame['source_scope']}\n\n"
-        f"{later_round_note}"
-        f"{source_instruction}\n"
-        f"Scribe's proposed quotes:\n{scribe_msg}\n\n"
-        "Your task:\n"
-        "1. State whether the Scribe's quotes are drawn from the sources above "
-        "or are original composition.\n"
-        f"2. Provide ONE verified {frame['quote_name']} ({frame['quote_spec']}). "
-        "Write each line on its own line — do NOT use forward slashes as separators.\n"
-        "3. Name the source author and work.\n\n"
-        "Reply in EXACTLY this format — nothing before VERDICT, nothing after REASONING:\n"
-        "VERDICT: [GROUNDED IN SOURCES / ORIGINAL COMPOSITION]\n"
-        "VERIFIED QUOTE: [first line of the quote]\n"
-        "[second line if needed]\n"
-        "[third line if needed]\n"
-        "SOURCE: [author, work]\n"
-        "REASONING: [one sentence]"
-    )
-    librarian_msg = call_llm(
-        "librarian",
-        [{"role": "user", "content": librarian_input}],
-        temperature=0.2,
-        max_tokens=300,
-    ).strip()
+        quote_grounded = _parse_verdict_grounded(librarian_msg) if verified_quote else False
 
-    # Extract VERIFIED QUOTE — collect all continuation lines until the next labelled field
-    lines = librarian_msg.splitlines()
-    for i, line in enumerate(lines):
-        if line.upper().startswith("VERIFIED QUOTE:"):
-            candidate = line.split(":", 1)[1].strip().strip('"')
-            j = i + 1
-            while j < len(lines) and not lines[j].upper().startswith(("SOURCE:", "REASONING:", "VERDICT:")):
-                extra = lines[j].strip().strip('"')
-                if extra:
-                    candidate += "\n" + extra
-                j += 1
-            verified_quote = _normalize_quote(candidate)
-            break
-
-    quote_grounded = _parse_verdict_grounded(librarian_msg) if verified_quote else False
-
-    _emit({
-        "agent": "Librarian",
-        "role": f"citation verification ({round_label})",
-        "message": librarian_msg,
-    })
+        _emit({
+            "agent": "Librarian",
+            "role": f"citation verification ({round_label})",
+            "message": librarian_msg,
+        })
 
     context = (
         f"TEAM CONSULTATION — ROUND {round_number} — THEME: {theme}\n\n"
@@ -563,7 +662,8 @@ def _run_round(
 
 def _synthesize_brief(round_contexts: list, theme: str,
                       human_note: str = "", progress=None,
-                      product: str = "bookmark") -> dict:
+                      product: str = "bookmark",
+                      fixed_quote: str = "") -> dict:
     """
     Distill the N consultation rounds into a compact, structured decision brief.
 
@@ -590,11 +690,17 @@ def _synthesize_brief(round_contexts: list, theme: str,
     ) if human_note else ""
 
     override_note = ", and Sheraj's guidance overrides all of them" if human_note else ""
+    fixed_synth_note = (
+        "\nThe quote is already FIXED by the owner (machine-verified, not up for debate) — "
+        "produce artwork/tone/visual direction only; never propose or restate a quote.\n"
+        if (fixed_quote or "").strip() else ""
+    )
     rounds_block = "\n\n".join(round_contexts)
     synth_input = (
         f"Below is a {n}-round team consultation about {_PRODUCT_FRAMES[product]['synth_subject']} "
         f"(theme: {theme}). Extract the team's FINAL decisions — each later round overrides "
-        f"earlier rounds wherever they differ{override_note}.\n\n"
+        f"earlier rounds wherever they differ{override_note}.\n"
+        f"{fixed_synth_note}\n"
         f"{rounds_block}\n{human_block}\n"
         "Return ONLY this JSON object:\n"
         "{\n"
@@ -642,10 +748,17 @@ def run_consultation(
     product: str = "bookmark",
     render_preview=None,
     preview_note: str = "",
+    fixed_quote: str = "",
+    fixed_quote_label: str = "",
+    source_scope_override: str = "",
 ) -> dict:
     """
     Run three rounds of consultation about the generated image, with a single
     human pause between rounds 2 and 3.
+
+    fixed_quote_label / source_scope_override (rule 11 update, 2026-08-04):
+    code-owned provenance wording passed straight through to every round —
+    see _run_round's docstring. Empty preserves the original Ruhi wording.
 
     Round 1 is exploratory — the team describes, proposes, guides, and verifies.
     Round 2 is convergent — the team refines, commits, checks, and finalises.
@@ -686,6 +799,8 @@ def run_consultation(
     round1 = _run_round(
         image_path, theme, image_prompt, citations,
         progress=progress, on_turn=on_turn, round_number=1, total_rounds=3, product=product,
+        fixed_quote=fixed_quote, fixed_quote_label=fixed_quote_label,
+        source_scope_override=source_scope_override,
     )
 
     # ── Round 2: Convergence ─────────────────────────────────────────────────
@@ -695,23 +810,40 @@ def run_consultation(
         prior_context=round1["context"],
         prior_artist_observation=round1["artist_observation"],
         product=product,
+        fixed_quote=fixed_quote, fixed_quote_label=fixed_quote_label,
+        source_scope_override=source_scope_override,
     )
 
     # Interim pick from rounds 1-2 only, purely to drive the pre-pause preview
     # below — _pick_final_quote is re-run after round 3 for the real answer.
     preview_quote, _ = _pick_final_quote([round1, round2])
+    # With an owner-pinned quote the Librarian turns emit no verified_quote
+    # (nothing to pick), which left preview_quote empty and silently skipped
+    # the pause preview — the one image Sheraj steers from (regression caught
+    # live, 2026-07-11). The pinned text IS the printed quote, so preview it.
+    if (fixed_quote or "").strip():
+        preview_quote = fixed_quote.strip()
 
     # ── Pause: the Reviewer asks Sheraj for input before round 3 ─────────────
     human_note = ""
     pause_turns = []
     if request_human_input:
         ask_message = _PRODUCT_FRAMES[product]["ask_message"]
+        # render_preview may return a single web path (bookmarks) or a
+        # {"front", "back"} dict (cards, 2026-07-16 — the back carries the
+        # artwork now, so Sheraj sees both faces before steering).
         preview_image = ""
+        preview_back = ""
         if render_preview and preview_quote:
             try:
-                preview_image = render_preview(
+                rendered = render_preview(
                     preview_quote, round1["transcript"] + round2["transcript"]
                 ) or ""
+                if isinstance(rendered, dict):
+                    preview_image = rendered.get("front") or ""
+                    preview_back = rendered.get("back") or ""
+                else:
+                    preview_image = rendered
             except Exception as e:
                 # A broken preview must never block the pause — but it must
                 # not vanish either (Activity Log discipline).
@@ -723,6 +855,8 @@ def run_consultation(
         ask_turn = {"agent": "Reviewer", "role": "asking Sheraj for input", "message": ask_message}
         if preview_image:
             ask_turn["image"] = preview_image
+        if preview_back:
+            ask_turn["image_back"] = preview_back
         pause_turns.append(ask_turn)
         if on_turn:
             on_turn(ask_turn)
@@ -743,6 +877,8 @@ def run_consultation(
         prior_artist_observation=round2["artist_observation"],
         human_note=human_note,
         product=product,
+        fixed_quote=fixed_quote, fixed_quote_label=fixed_quote_label,
+        source_scope_override=source_scope_override,
     )
 
     # Prefer a GROUNDED quote over an ungrounded one, regardless of round — the
@@ -759,7 +895,8 @@ def run_consultation(
     # ── Synthesis: distill all three rounds (+ human note) into a decision brief ──
     brief = _synthesize_brief(
         [round1["context"], round2["context"], round3["context"]], theme,
-        human_note=human_note, progress=progress, product=product)
+        human_note=human_note, progress=progress, product=product,
+        fixed_quote=fixed_quote)
 
     # Scribe-facing context: decisions only, not dialogue. The full transcripts
     # stay in `transcript` for the dashboard and the Reviewer's Principle-4 evidence.
@@ -818,6 +955,18 @@ def run_consultation(
 # mark... give them more thinking ability"). Surfacing this explicitly to
 # every post-render turn keeps their diagnoses honest about what a
 # "requote" can and can't fix.
+# Expanded-run variant (rule 11 update, 2026-08-04): same contract, pool
+# generalized to the owner-selected verified texts. Code-owned fixed string,
+# chosen by the pipeline — never inline-edited per run.
+CARD_QUOTE_SOURCING_NOTE_EXPANDED = (
+    "This card's quote must be a VERBATIM excerpt from the verified source texts the "
+    "owner selected for this run, searched semantically a few passages at a time. A "
+    "\"requote\" can surface a different passage from those same selected texts via a "
+    "new search phrase, but nothing outside them, and never reworded — modern phrasing, "
+    "paraphrase, or quotes from unselected sources are structurally impossible, so "
+    "never ask for them."
+)
+
 CARD_QUOTE_SOURCING_NOTE = (
     "This card's quote must be a VERBATIM excerpt from a small hand-curated pool of Ruhi "
     "Institute Book 1 passages (Reflections on the Life of the Spirit) — about 65 short "
@@ -842,6 +991,9 @@ def run_card_revision_consultation(
     on_turn=None,
     attempt: int = 1,
     history: list = None,
+    quote_pinned: bool = False,
+    back_image_path: str = None,
+    sourcing_note: str = "",
 ) -> dict:
     """
     Quote-card post-render revision — the team weighs in, not just the
@@ -863,6 +1015,17 @@ def run_card_revision_consultation(
     it must start with "REOPENING LIBRARIAN'S READ: <specific new reason>"
     — the same override discipline used elsewhere for consultation decisions
     — rather than silently talking past the team.
+
+    quote_pinned: when True (owner pinned the quote, or gave pause guidance
+    that locks it), the decision prompt offers only "repaint" and "ship", and
+    a returned "requote" is coerced to "ship". JSON contract keys/literals
+    are otherwise unchanged.
+
+    back_image_path: optional path to the clean BACK face of the card. When
+    set and the file exists, the Artist turn receives both faces (front then
+    back) so it judges the artwork from the unobstructed back, not the
+    vignetted/text-covered front. Absent or missing file = front only
+    (byte-identical to pre-multi-image behavior).
 
     The Reviewer's own `review["action"]`/`review["action_guidance"]` are the
     fallback whenever a turn fails or returns something malformed — a broken
@@ -906,6 +1069,7 @@ def run_card_revision_consultation(
 
     # ── Turn 1: Artist reacts to the Reviewer's concerns ─────────────────────
     _progress(f"Consultation (revision {attempt}) — Artist is weighing in on the Reviewer's score...")
+    has_back = bool(back_image_path) and Path(back_image_path).exists()
     artist_prompt = (
         f"You are the Artist agent for bahAI Workforce. The Reviewer just scored this printed "
         f"quote card {review.get('overall', '?')}/10 for theme \"{theme}\". Weak points it flagged:\n"
@@ -916,8 +1080,17 @@ def run_card_revision_consultation(
         "concrete visual change you'd make; if not, say 'not the artwork'.\n\n"
         "Be concrete. Under 60 words total."
     )
+    if has_back:
+        artist_prompt += (
+            " Two images are attached: the FIRST is the printed front face (quote over a "
+            "vignette), the SECOND is the clean back face showing the artwork unobstructed "
+            "— judge the artwork from the SECOND."
+        )
     try:
-        artist_msg = call_grok_vision(front_image_path, artist_prompt,
+        artist_images = (
+            [front_image_path, back_image_path] if has_back else front_image_path
+        )
+        artist_msg = call_grok_vision(artist_images, artist_prompt,
                                       temperature=0.6, max_tokens=200).strip()
     except Exception as e:
         artist_msg = f"(Artist unavailable — {e})"
@@ -929,8 +1102,9 @@ def run_card_revision_consultation(
         f'  [{i+1}] "{c.get("text", "").strip()[:180]}" — {c.get("source", "")}'
         for i, c in enumerate(citations[:3])
     ) or "(none retrieved)"
+    _sourcing = (sourcing_note or "").strip() or CARD_QUOTE_SOURCING_NOTE
     librarian_prompt = (
-        f"You are the Librarian agent for bahAI Workforce. {CARD_QUOTE_SOURCING_NOTE}\n\n"
+        f"You are the Librarian agent for bahAI Workforce. {_sourcing}\n\n"
         f"The printed quote is:\n\"{quote}\"\n— {citation_source}\n\n"
         f"The Reviewer's weak points:\n{weak_notes}\n\n"
         f"Passages from the pool already retrieved for this theme (a differently-worded "
@@ -955,8 +1129,25 @@ def run_card_revision_consultation(
 
     # ── Turn 3: Reviewer makes the final, machine-readable call ──────────────
     _progress(f"Consultation (revision {attempt}) — Reviewer is making the final call...")
+    if quote_pinned:
+        actions_block = (
+            "Decide ONE next action (machine-executed — choose exactly one):\n"
+            "  \"ship\"    — the card is ready as-is, or no achievable fix remains.\n"
+            "  \"repaint\" — the artwork is the weakness: the pipeline regenerates it; put the "
+            "imperative change in action_guidance.\n\n"
+            "The quote was fixed by Sheraj and may not be changed — do not choose \"requote\".\n\n"
+        )
+    else:
+        actions_block = (
+            "Decide ONE next action (machine-executed — choose exactly one):\n"
+            "  \"ship\"    — the card is ready as-is, or no achievable fix remains.\n"
+            "  \"requote\" — a genuinely different, available passage would help: put the search "
+            "phrase in action_guidance.\n"
+            "  \"repaint\" — the artwork is the weakness: the pipeline regenerates it; put the "
+            "imperative change in action_guidance.\n\n"
+        )
     decision_prompt = (
-        f"You are the Reviewer agent for bahAI Workforce. {CARD_QUOTE_SOURCING_NOTE}\n\n"
+        f"You are the Reviewer agent for bahAI Workforce. {_sourcing}\n\n"
         f"You scored this quote card {review.get('overall', '?')}/10 for theme \"{theme}\". "
         f"Your own concerns:\n{weak_notes}\n\n"
         f"The Artist said:\n{artist_msg}\n\nThe Librarian said:\n{librarian_msg}"
@@ -968,12 +1159,7 @@ def run_card_revision_consultation(
         "language' is not a new reason if the entire pool is archaic scripture. If you cannot "
         "name a genuinely new, achievable fix, choose \"ship\" rather than repeat a request "
         "the team has already told you the pool can't satisfy.\n\n"
-        "Decide ONE next action (machine-executed — choose exactly one):\n"
-        "  \"ship\"    — the card is ready as-is, or no achievable fix remains.\n"
-        "  \"requote\" — a genuinely different, available passage would help: put the search "
-        "phrase in action_guidance.\n"
-        "  \"repaint\" — the artwork is the weakness: the pipeline regenerates it; put the "
-        "imperative change in action_guidance.\n\n"
+        f"{actions_block}"
         "Return ONLY this JSON. If you overrule the Librarian's own recommendation, team_note "
         "must start with the literal words REOPENING LIBRARIAN'S READ: followed by the "
         "specific new reason.\n"
@@ -997,6 +1183,11 @@ def run_card_revision_consultation(
         team_note = str(decision.get("team_note") or "").strip()
     except Exception:
         pass  # keep the Reviewer's own scored action/guidance as the fallback
+
+    # Quote fixed by Sheraj: coerce any "requote" (from parse or fallback) to
+    # "ship"; keep team_note. JSON contract keys/literals otherwise unchanged.
+    if quote_pinned and action == "requote":
+        action = "ship"
 
     if action == "ship":
         summary = "My call: we ship it as-is."

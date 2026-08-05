@@ -42,6 +42,7 @@ def init_db():
                 role TEXT NOT NULL,               -- 'user' | 'assistant'
                 content TEXT NOT NULL,
                 channel TEXT DEFAULT 'dashboard', -- 'dashboard' | 'whatsapp'
+                sender TEXT,                      -- NULL = owner thread; guest name for guest threads
                 ts TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
@@ -131,6 +132,14 @@ def init_db():
             conn.execute("ALTER TABLE contacts ADD COLUMN last_inbound_at TEXT")
         except sqlite3.OperationalError:
             pass
+        # Migration: guest WhatsApp threads (owner decision 2026-07-12).
+        # NULL sender = Sheraj's owner thread (all pre-existing rows); a
+        # non-NULL value is the allowlisted contact's name for that guest
+        # thread (both their user turns and Abigail's assistant replies).
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN sender TEXT")
+        except sqlite3.OperationalError:
+            pass
         # Migration: `contacts.phone` shipped with an inline UNIQUE constraint
         # in the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS is a no-op
         # on a table created before that constraint existed — so a DB created
@@ -161,19 +170,40 @@ def init_db():
 
 # --- Conversation ---
 
-def add_message(role: str, content: str, channel: str = "dashboard"):
+def add_message(role: str, content: str, channel: str = "dashboard",
+                sender: str = None):
+    """Persist a turn. sender=None is the owner thread; a contact name is a
+    guest WhatsApp thread (both their user rows and Abigail's replies)."""
     with _connect() as conn:
-        conn.execute("INSERT INTO messages (role, content, channel) VALUES (?, ?, ?)",
-                     (role, content, channel))
+        conn.execute(
+            "INSERT INTO messages (role, content, channel, sender) VALUES (?, ?, ?, ?)",
+            (role, content, channel, sender))
         conn.commit()
 
 
-def get_recent_messages(limit: int = 20) -> list[dict]:
-    """Most recent conversation turns, oldest first (ready for an LLM prompt)."""
+def get_recent_messages(limit: int = 20, thread: str = "all") -> list[dict]:
+    """Most recent conversation turns, oldest first (ready for an LLM prompt).
+
+    thread="all"   — every row (history endpoint; includes sender field).
+    thread="owner" — only owner-thread rows (sender IS NULL).
+    thread=<name>  — only that guest's rows (sender = name).
+    """
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT role, content, channel, ts FROM messages ORDER BY id DESC LIMIT ?",
-            (limit,)).fetchall()
+        if thread == "all":
+            rows = conn.execute(
+                "SELECT role, content, channel, sender, ts FROM messages "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        elif thread == "owner":
+            rows = conn.execute(
+                "SELECT role, content, channel, sender, ts FROM messages "
+                "WHERE sender IS NULL ORDER BY id DESC LIMIT ?",
+                (limit,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT role, content, channel, sender, ts FROM messages "
+                "WHERE sender = ? ORDER BY id DESC LIMIT ?",
+                (thread, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]
 
 

@@ -3,16 +3,52 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { api, imageUrl } from "../lib/api";
 import type {
-  Job, ProductRow, RegenerateCardImageResult, RegenerateCardQuoteResult,
+  Job, ProductRow, RegenerateCardImageResult, RegenerateCardQuoteResult, CardLanguage, CardCopy,
 } from "../lib/types";
 import { Button, Card, CardContent, CardHeader, CardTitle, ErrorNote } from "./ui";
 import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
 
+const LANGUAGE_NAMES: Record<string, string> = {
+  en: "English",
+  es: "Spanish",
+  fa: "Persian",
+  ar: "Arabic",
+  fr: "French",
+  de: "German",
+  pt: "Portuguese",
+  ru: "Russian",
+  zh: "Chinese",
+};
+
+function useLanguageNameLookup() {
+  const { data } = useQuery<CardLanguage[]>({
+    queryKey: ["card-languages"],
+    queryFn: api.getCardLanguages,
+    staleTime: 24 * 60 * 60 * 1000,
+  });
+
+  return (code: string) => {
+    const found = data?.find((l) => l.code === code);
+    if (found) return found.name;
+    return LANGUAGE_NAMES[code] || code.toUpperCase();
+  };
+}
+
 // Landscape (3.5" × 2") card faces — the bookmark preview's portrait layout
 // would letterbox these into stamps, so cards get their own treatment.
 
-function Face({ label, src, downloadName }: { label: string; src: string; downloadName: string }) {
+function Face({
+  label,
+  src,
+  downloadName,
+  onFail,
+}: {
+  label: string;
+  src: string;
+  downloadName: string;
+  onFail?: () => void;
+}) {
   const [failed, setFailed] = useState(false);
   return (
     <div className="flex w-full max-w-md flex-col items-center gap-2">
@@ -22,7 +58,10 @@ function Face({ label, src, downloadName }: { label: string; src: string; downlo
           <img
             src={src}
             alt={`Card ${label}`}
-            onError={() => setFailed(true)}
+            onError={() => {
+              setFailed(true);
+              if (onFail) onFail();
+            }}
             className="w-full rounded-lg border border-slate-800 object-contain shadow-lg"
           />
         </a>
@@ -35,23 +74,101 @@ function Face({ label, src, downloadName }: { label: string; src: string; downlo
   );
 }
 
+function VariantRow({
+  code,
+  frontPath,
+  backPath,
+  langName,
+}: {
+  code: string;
+  frontPath?: string | null;
+  backPath?: string | null;
+  langName: string;
+}) {
+  const [frontFailed, setFrontFailed] = useState(false);
+  const [backFailed, setBackFailed] = useState(false);
+
+  if ((frontFailed || !frontPath) && (backFailed || !backPath)) return null;
+
+  return (
+    <div className="border-t border-slate-800 pt-6">
+      <h3 className="mb-4 text-center text-sm font-semibold text-slate-300">
+        {langName} card ({code.toUpperCase()})
+      </h3>
+      <div className="flex flex-wrap items-start justify-center gap-6">
+        {!frontFailed && frontPath && (
+          <Face
+            label={`${langName} Front`}
+            src={imageUrl(frontPath)}
+            downloadName={`card-front-${code}.png`}
+            onFail={() => setFrontFailed(true)}
+          />
+        )}
+        {!backFailed && backPath && (
+          <Face
+            label={`${langName} Back`}
+            src={imageUrl(backPath)}
+            downloadName={`card-back-${code}.png`}
+            onFail={() => setBackFailed(true)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function QuoteCardPreview({
   frontPath,
   backPath,
+  variantFaces: propVariantFaces,
 }: {
   frontPath?: string | null;
   backPath?: string | null;
+  variantFaces?: Record<string, { front: string; back: string }> | null;
 }) {
+  const queryClient = useQueryClient();
+  const products = queryClient.getQueryData<ProductRow[]>(["products"]);
+  const getLangName = useLanguageNameLookup();
+
+  const getFilename = (p: string | null | undefined) => {
+    if (!p) return "";
+    return p.replace(/\\/g, "/").split("/").pop() ?? "";
+  };
+
+  const matchedProduct = products?.find((p) => {
+    const f1 = getFilename(p.front_image);
+    const f2 = getFilename(frontPath);
+    const b1 = getFilename(p.back_image);
+    const b2 = getFilename(backPath);
+    return (f1 && f1 === f2) || (b1 && b1 === b2);
+  });
+
+  const cardCopy = matchedProduct?.listing_copy ? (JSON.parse(matchedProduct.listing_copy) as CardCopy) : null;
+  const variantFaces = propVariantFaces || cardCopy?.variant_faces;
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Quote card preview — 3.5″ × 2″ (click a face to download)</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-6">
         <div className="flex flex-wrap items-start justify-center gap-6">
           <Face label="Front (quote)" src={imageUrl(frontPath)} downloadName="card-front.png" />
           <Face label="Back (art)" src={imageUrl(backPath)} downloadName="card-back.png" />
         </div>
+
+        {variantFaces && Object.entries(variantFaces).map(([code, pair]) => {
+          const langName = getLangName(code);
+          return (
+            <VariantRow
+              key={code}
+              code={code}
+              frontPath={pair.front}
+              backPath={pair.back}
+              langName={langName}
+            />
+          );
+        })}
       </CardContent>
     </Card>
   );
@@ -62,6 +179,7 @@ export function QuoteCardDetail({
   quote,
   citation,
   quoteGrounded,
+  quoteProvenance,
   languageName,
   translationText,
   disclaimerNative,
@@ -71,12 +189,32 @@ export function QuoteCardDetail({
   quote: string;
   citation?: string | null;
   quoteGrounded?: boolean;
+  // "ruhi_book1" | "lib:<slug>" | "web:<url>" (rule 11 update 2026-08-04;
+  // absent on older cards = Ruhi Book 1).
+  quoteProvenance?: string | null;
   languageName?: string | null;
   translationText?: string | null;
   disclaimerNative?: string | null;
   disclaimerEn?: string | null;
   artworkDisclosure?: string | null;
 }) {
+  const queryClient = useQueryClient();
+  const products = queryClient.getQueryData<ProductRow[]>(["products"]);
+  const getLangName = useLanguageNameLookup();
+
+  const matchedProduct = products?.find((p) => {
+    try {
+      if (p.product_type !== "quote_card" || !p.listing_copy) return false;
+      const copy = JSON.parse(p.listing_copy) as CardCopy;
+      return copy.quote === quote;
+    } catch {
+      return false;
+    }
+  });
+
+  const cardCopy = matchedProduct?.listing_copy ? (JSON.parse(matchedProduct.listing_copy) as CardCopy) : null;
+  const variantFaces = cardCopy?.variant_faces;
+
   return (
     <Card>
       <CardHeader>
@@ -93,9 +231,19 @@ export function QuoteCardDetail({
                   : "border-orange-400/40 bg-orange-400/10 text-orange-300"
               }`}
             >
-              {quoteGrounded ? "Librarian-verified" : "Not source-verified"}
+              {quoteGrounded
+                ? "Librarian-verified"
+                : quoteProvenance?.startsWith("web:")
+                  ? "Web quote — wording not verified"
+                  : "Not source-verified"}
             </span>
           </div>
+          {quoteProvenance?.startsWith("web:") && (
+            <p className="mb-1 text-xs text-amber-300/80">
+              Sheraj chose this quote from a web page ({quoteProvenance.slice(4).replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}) —
+              it prints exactly as fetched and was never checked against a verified text.
+            </p>
+          )}
           <p className="whitespace-pre-line text-sm italic leading-relaxed text-slate-100">{quote}</p>
           {citation && <p className="mt-1 text-xs text-slate-400">{citation}</p>}
         </div>
@@ -124,6 +272,26 @@ export function QuoteCardDetail({
               AI-generated artwork
             </span>
             <p className="text-xs text-slate-500">{artworkDisclosure}</p>
+          </div>
+        )}
+
+        {variantFaces && Object.entries(variantFaces).length > 0 && (
+          <div className="border-t border-slate-800 pt-4 space-y-4">
+            <span className="text-xs uppercase tracking-widest text-slate-500 block font-semibold">
+              Per-language card pairs
+            </span>
+            {Object.entries(variantFaces).map(([code, pair]) => {
+              const langName = getLangName(code);
+              return (
+                <VariantRow
+                  key={code}
+                  code={code}
+                  frontPath={pair.front}
+                  backPath={pair.back}
+                  langName={langName}
+                />
+              );
+            })}
           </div>
         )}
       </CardContent>

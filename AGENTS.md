@@ -270,13 +270,32 @@ Products carry `product_type`; bookmark-only endpoints reject cards via
     machine-executed. The dashboard renders the Librarian's block as a
     friendly verification card (`ConsultationTranscript.tsx`); humanize
     display there, never her output format.
-11. **Quote cards may only quote Ruhi Book 1.** `librarian.retrieve_ruhi_book1()`
-    (backed by `agents/ruhi_book1_source.py` + `scripts/ingest_ruhi_book1.py`'s
-    own ChromaDB collection) is the ONLY retrieval path `_run_card_pipeline`
-    may call — never `retrieve()` (the general 7-text index the bookmark
-    pipeline uses). An empty result must raise, never fall back to the
-    general index or let the consultation's Librarian free-associate a quote
-    from memory.
+11. **Quote cards quote only the sources SELECTED for that run — default:
+    Ruhi Book 1 alone.** (Rewritten 2026-08-04 by owner decision — the
+    original rule was "Ruhi Book 1 only, ever"; Sheraj asked for per-run
+    expansion. The discipline survives as a tiered-trust design in
+    `api._parse_card_sources` / `_card_retrieve` / `_resolve_pinned_quote_multi`:)
+    - **Default unchanged:** no `sources` on the request = Ruhi Book 1 only,
+      via `retrieve_ruhi_book1()` + the SHA-manifest gates, byte-for-byte the
+      old behavior.
+    - **`lib:<slug>` (verified tier):** one of the ingested 7-text
+      `bahai_texts` chunks. The printed text must be a boundary-honest
+      verbatim span of an indexed chunk (`_find_verbatim_span` +
+      `_span_boundary_ok` + `_assert_excerpt_of`): sentence-clean start
+      (overlap chunking can open a chunk mid-sentence — a fragment must
+      never print as if complete), sentence-punctuation end, elision marks
+      for any early stop. Grounded and `quote_verified: true`.
+    - **`web:<url>` (RISKY tier, explicitly opt-in):** the quote prints as
+      supplied/fetched, is NEVER grounded, and carries
+      `quote_verified: false` + `quote_provenance: "web:<url>"` everywhere
+      (dashboard badges it plainly; reviewer/consultation wording never
+      claims verification — see the code-owned per-tier strings in
+      `consultation.py`). Web-only runs require a pinned quote; requote
+      never draws from the web.
+    - **Never widen silently:** an empty result within the SELECTED sources
+      still raises — no fallback to unselected texts, the general index, or
+      the Librarian's memory. The consultation Librarian still never
+      free-associates a quote.
 12. **The bookmark quote's GROUNDED verdict is deterministically re-checked.**
     `api._check_quote_grounding` (word-overlap vs the retrieved citations, or
     `librarian.verify()` when retrieval was empty) gates `quote_grounded`
@@ -402,14 +421,22 @@ via her own number, not just the dashboard. Hard rules already in force:
     endpoint — no app secret configured means the check fails closed
     (rejects everything) rather than skipping verification. Never relax
     this or trust an unsigned payload.
-27. **Only Sheraj's own WhatsApp number gets Secretary access.**
+27. **Only Sheraj's own WhatsApp number can COMMAND the Secretary.**
     `WHATSAPP_OWNER_NUMBER` + `whatsapp.is_owner()` gate the webhook handler
-    (`agents/api.py::_handle_whatsapp_message`): a message from any other
-    number never reaches `secretary.chat()` (which would otherwise hand a
-    stranger who texts the number full tool-calling access to Sheraj's
-    calendar/Gmail/Drive) — it gets a fixed canned reply instead. The
-    allowlist (rule 28) is a SEPARATE, narrower concept: which people SHE
-    may message, not who may message and command her.
+    (`agents/api.py::_handle_whatsapp_message`), now three tiers (guest tier
+    added by owner decision, 2026-07-12): the owner reaches the full
+    `secretary.chat()` (tools + memory); an ALLOWLISTED contact reaches
+    `secretary.guest_chat()` — a structurally TOOL-LESS conversation (plain
+    `call_claude`, never `call_claude_agentic`; no `read_all_memory_notes`,
+    no tasks/calendar/personal context; history limited to that guest's own
+    thread via `messages.sender`) so she can chat and take messages but can
+    never act on Sheraj's systems or leak his data, and Sheraj sees the
+    thread in the Secretary tab (sender-labeled) plus a title-only
+    notification; any other number never reaches ANY chat loop — fixed
+    canned reply. Never route a guest into `chat()` or add tools/memory to
+    `guest_chat()`; the owner thread's context must stay `thread="owner"`
+    (guest rows excluded). The allowlist (rule 28) remains owner-controlled
+    only — it now also decides who may TALK to her (not command her).
 28. **The WhatsApp allowlist is owner-controlled only, never LLM-writable.**
     `agents/secretary_store.py`'s `contacts` table (`add_contact`/
     `set_contact_allowlisted`/`remove_contact`) is only ever touched from
@@ -421,6 +448,23 @@ via her own number, not just the dashboard. Hard rules already in force:
     24-hour free-form window per `whatsapp.within_24h_window()` has
     closed); anyone else queues as a `pending_actions` row of kind
     `whatsapp_send`, same unified queue as rules 20/24/25.
+
+29. **The quote-card format (redesign 2026-07-16, owner spec): the quote is
+    ALWAYS on the front and NEVER on the back.** The front is readability-
+    first — Tahoma dark ink on a light wash of the (heavily blurred) artwork,
+    thin gold border, and `card_compositor.MIN_QUOTE_PX` as a hard floor: a
+    quote that can't fit at the readable minimum FAILS the render, never
+    shrinks below it. The back is a reflection face (question + gentle
+    call-to-action + ruled writing lines + share line) — the share line and
+    per-language reflection DEFAULTS are code-owned fixed strings (same
+    class as rule 8; the quote-inspired question/action may be LLM-written
+    via `api._card_reflection`, but never the share line or disclaimers).
+    Translated runs render SEPARATE per-language card pairs (never
+    English-front/translation-back): the variant card carries the translated
+    quote + its code-appended disclaimer on ITS front, stored in
+    `card_copy.variant_faces`. Tahoma is used only where it safely covers
+    the script — languages with verified `font_paths` in translator.LANGUAGES
+    (zh, ar) keep them (rule 9 still applies to any new language).
 
 ## Gotchas
 

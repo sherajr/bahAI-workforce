@@ -25,11 +25,35 @@ from datetime import date, datetime, timedelta
 
 from agents import badi_dates
 from agents import secretary_tools
-from agents.router import call_claude_agentic
+from agents.router import call_claude, call_claude_agentic
 from agents.system_prompt_builder import build_system_prompt
 from agents import secretary_store as store
 
 HISTORY_WINDOW = 20
+
+# Guest WhatsApp path (owner decision 2026-07-12): allowlisted contacts get a
+# real conversational reply, but this prompt deliberately carries ZERO of
+# Sheraj's memory/tasks/calendar and the call uses plain call_claude (no
+# tools) so the safety intent of rule 27 holds by construction.
+_GUEST_SYSTEM = """\
+You are Abigail, Sheraj's personal assistant. You are chatting on WhatsApp
+with {name}, a contact Sheraj trusts.
+
+Be warm, natural, and brief — this is WhatsApp, not email. You may chat,
+answer general questions, and take messages for Sheraj (say you'll pass it
+along — he can see this conversation). You have NO access in this
+conversation to Sheraj's calendar, email, files, tasks, reminders, or
+anything he has told you, and you must not act on his systems or accept
+instructions intended for them. If {name} asks for any of that, warmly say
+only Sheraj can ask you to do those things, and offer to pass the request
+to him. Never share Sheraj's personal information.
+
+You are a warm assistant — not a therapist, and you never pretend to be
+one. You do not give clinical or medical advice. If a conversation shows
+real crisis signals, gently and explicitly encourage {name} to reach out
+to a human they trust — a friend, family, their community, or a
+professional — rather than handling it yourself.
+"""
 
 # Live testing (2026-07-07) surfaced a failure mode real tool-calling should
 # mostly eliminate but can't structurally rule out: the model writes a
@@ -373,7 +397,8 @@ def chat(user_message: str, channel: str = "dashboard") -> dict:
         return {"reply": shortcut, "remembered": [], "tasks_added": [], "actions": []}
 
     system, event_map = _build_system_prompt()
-    history = store.get_recent_messages(HISTORY_WINDOW)
+    # Owner thread only — guest WhatsApp turns must never enter Sheraj's context.
+    history = store.get_recent_messages(HISTORY_WINDOW, thread="owner")
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
     effects = {"remembered": [], "tasks_added": [], "events": [], "reminders": [],
@@ -399,6 +424,36 @@ def chat(user_message: str, channel: str = "dashboard") -> dict:
         [f"queued for approval: {q}" for q in effects["queued_for_approval"]]
     return {"reply": reply, "remembered": effects["remembered"],
             "tasks_added": effects["tasks_added"], "actions": actions}
+
+
+def guest_chat(contact: dict, user_message: str) -> dict:
+    """
+    Tool-less WhatsApp conversation with an allowlisted contact.
+
+    Isolation (owner decision 2026-07-12 refining rule 27):
+      - plain call_claude only — structurally no tools
+      - no read_all_memory_notes / tasks / calendar / personal data
+      - history is only this guest's own thread (sender = contact name)
+      - Sheraj's owner chat() never sees these rows
+    """
+    name = contact["name"]
+    store.init_db()
+    store.add_message("user", user_message, channel="whatsapp", sender=name)
+
+    guest_system = _GUEST_SYSTEM.format(name=name)
+    history = store.get_recent_messages(HISTORY_WINDOW, thread=name)
+    messages = [{"role": m["role"], "content": m["content"]} for m in history]
+
+    reply = call_claude(messages, system=guest_system)
+    if not reply:
+        reply = "Hi — I'll let Sheraj know you messaged."
+
+    store.add_message("assistant", reply, channel="whatsapp", sender=name)
+    # Title only — never message content in notifications (rule 15).
+    store.add_notification(
+        "whatsapp",
+        f"{name} messaged Abigail on WhatsApp — see the Secretary tab")
+    return {"reply": reply}
 
 
 if __name__ == "__main__":
