@@ -675,3 +675,276 @@ export interface XPostStatusResult {
   id: string;
   status: string;
 }
+
+// ── Video Generation pipeline (agents/api.py, /video/*) ──────────────────────
+// Turns a scene, story, historical account or passage into many simple 3-4
+// second shots. Bookmarks and quote cards are secondary source options.
+
+export interface VideoDirection {
+  target_seconds: number;
+  aspect_ratio: string;
+  visual_style: string;
+  historical_period: string;
+  setting: string;
+  mood: string;
+  color_palette: string;
+  audience: string;
+  narration: string;
+  on_screen_text: string;
+  shot_seconds: number;
+  /** "standard" fills the target length; "cinematic" plans fewer, longer,
+   *  non-overlapping moments and cuts only where the story changes. */
+  pacing?: "standard" | "cinematic";
+  provider: string;
+  low_resource: boolean;
+}
+
+export interface PacingOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface VideoBeat {
+  id: string;
+  title: string;
+  summary: string;
+  emotion?: string;
+  suggested_shots?: number;
+  /** How many genuinely different things a viewer would SEE happen in the
+   *  beat — the ceiling on its shot count under cinematic pacing. */
+  distinct_moments?: number;
+}
+
+export interface SacredFlags {
+  figures: string[];
+  has_reference: boolean;
+  depiction_risk: boolean;
+}
+
+export interface VideoAnalysis {
+  summary: string;
+  central_message: string;
+  characters: { id: string; name: string; description?: string; role?: string }[];
+  locations: { id: string; name: string; description?: string }[];
+  props: { id: string; name: string; description?: string }[];
+  beats: VideoBeat[];
+  emotional_progression: string;
+  narration_notes: string;
+  continuity_risks: string[];
+  do_not_depict_literally: string[];
+  sacred_flags?: SacredFlags;
+}
+
+export interface ContinuityCharacter {
+  id: string; name: string; appearance?: string; age?: string; hair?: string;
+  clothing?: string; colors?: string; accessories?: string; relationships?: string;
+}
+export interface ContinuityLocation {
+  id: string; name: string; architecture?: string; geography?: string;
+  time_of_day?: string; weather?: string;
+}
+export interface ContinuityProp { id: string; name: string; description?: string }
+
+export interface ContinuityBible {
+  characters: ContinuityCharacter[];
+  locations: ContinuityLocation[];
+  props: ContinuityProp[];
+  style: Record<string, string>;
+  locked: string[];
+}
+
+export interface VideoShotData {
+  beat_id?: string;
+  duration?: number;
+  narrative_purpose?: string;
+  subject?: string;
+  primary_action?: string;
+  setting?: string;
+  time_of_day?: string;
+  framing?: string;
+  camera_angle?: string;
+  camera_movement?: string;
+  lighting?: string;
+  mood?: string;
+  character_ids?: string[];
+  location_ids?: string[];
+  prop_ids?: string[];
+  first_frame_prompt?: string;
+  last_frame_prompt?: string;
+  motion_prompt?: string;
+  negative_prompt?: string;
+  narration?: string;
+  dialogue?: string;
+  sound_notes?: string;
+  transition?: string;
+  continuity_notes?: string;
+  continuity_mode?: string;
+  complexity_score?: number;
+  sacred_treatment?: { figures: string[]; treatment: string; rule: string };
+  // Detail fields — raise render quality without adding shot complexity.
+  subject_detail?: string;
+  setting_detail?: string;
+  texture_notes?: string;
+  atmosphere?: string;
+  depth_notes?: string;
+  lens?: string;
+  // Set when the Director failed on this beat and a placeholder was inserted
+  // so the rest of the plan survived.
+  needs_replanning?: boolean;
+}
+
+export interface VideoShot {
+  id: string;
+  project_id: string;
+  shot_number: number;
+  beat_id: string | null;
+  data: VideoShotData;
+  locked_fields: string[];
+  status: string;
+  approved: boolean;
+  continuity_mode: string;
+  first_frame_path: string | null;
+  last_frame_path: string | null;
+  clip_path: string | null;
+  first_frame_url: string;
+  last_frame_url: string;
+  clip_url: string;
+  error: string | null;
+}
+
+export interface VideoProject {
+  id: string;
+  task_id: string | null;
+  title: string;
+  status: string;
+  stage: string;
+  source_kind: string;
+  source_text: string;
+  source_brief: string;
+  source_instructions: string;
+  source_product_id: string | null;
+  direction: VideoDirection | null;
+  analysis: VideoAnalysis | null;
+  continuity: ContinuityBible | null;
+  safety: { source_scan?: SacredFlags; notes?: string[] } | null;
+  export: VideoExportResult | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  shot_count?: number;
+}
+
+export interface VideoResumeState {
+  shots: number;
+  needs_frames: string[];
+  needs_clips: string[];
+  failed: string[];
+  frames_job: Record<string, unknown> | null;
+  clips_job: Record<string, unknown> | null;
+  complete: boolean;
+}
+
+export interface VideoProjectDetail {
+  project: VideoProject;
+  shots: VideoShot[];
+  resume: VideoResumeState;
+}
+
+export interface VideoProviderCaps {
+  id: string;
+  provider?: string;
+  model?: string;
+  label?: string;
+  available: boolean;
+  unavailable_reason?: string;
+  text_to_video?: boolean;
+  image_to_video?: boolean;
+  first_last_frame?: boolean;
+  first_last_frame_note?: string;
+  max_seconds?: number;
+  width?: number;
+  height?: number;
+  fps?: number;
+  typical_seconds_per_clip?: number;
+  is_mock?: boolean;
+}
+
+export interface VideoProvidersResult {
+  providers: VideoProviderCaps[];
+  default: string;
+  strategies: Record<string, string>;
+  ffmpeg: boolean;
+}
+
+export interface VideoDefaults {
+  direction: VideoDirection;
+  min_shot_seconds: number;
+  max_shot_seconds: number;
+  complexity_limit: number;
+  aspect_ratios: string[];
+  visual_styles: string[];
+  narration_options: string[];
+  pacing_options?: PacingOption[];
+}
+
+export interface VideoPlanResult {
+  project_id: string;
+  analysis: VideoAnalysis;
+  continuity: ContinuityBible;
+  shot_count: number;
+  notes: string[];
+  safety: { source_scan?: SacredFlags; notes?: string[] };
+  estimated_seconds: number;
+}
+
+export interface VideoGenerateResult {
+  job_id: string;
+  done: number;
+  total: number;
+  errors: { shot_id: string; shot_number: number; error: string }[];
+  cancelled?: boolean;
+  provider?: VideoProviderCaps;
+  strategies?: string[];
+}
+
+export interface ValidationFinding {
+  shot_number: number;
+  shot_id: string;
+  kind: string;
+  severity: "error" | "warning" | "info";
+  message: string;
+}
+
+export interface VideoValidation {
+  findings: ValidationFinding[];
+  summary: { errors: number; warnings: number; info: number };
+  shot_count: number;
+  vision_used: boolean;
+}
+
+/** Result of the free, deterministic movement-description repair pass. */
+export interface VideoMotionRepair {
+  project_id: string;
+  shots_changed: number;
+  total_shots: number;
+  notes: string[];
+  warnings: string[];
+  /** Present when the cinematic cut policy was applied too. */
+  recut?: boolean;
+  shots_recut?: number;
+  cut_count?: number;
+  seconds_per_cut?: number;
+}
+
+export interface VideoExportResult {
+  project_id: string;
+  metadata_path: string;
+  subtitles_path: string | null;
+  clip_count: number;
+  video_path: string | null;
+  reason: string;
+  video_url?: string;
+  metadata_url?: string;
+  subtitles_url?: string;
+}

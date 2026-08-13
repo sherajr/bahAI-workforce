@@ -1,13 +1,16 @@
-import { Sparkles, Images, Handshake, Settings, MessageCircleHeart, Send } from "lucide-react";
+import {
+  Sparkles, Images, Handshake, Settings, MessageCircleHeart, Send, Clapperboard,
+} from "lucide-react";
 import { cn } from "../lib/utils";
 import { NineStar } from "./NineStar";
 import { RosterAvatar } from "./ui";
 
-export type Tab = "pipeline" | "products" | "x-posts" | "secretary" | "trust" | "settings";
+export type Tab = "pipeline" | "products" | "video" | "x-posts" | "secretary" | "trust" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Sparkles; avatar?: string }[] = [
   { id: "pipeline", label: "Pipeline", icon: Sparkles },
   { id: "products", label: "Products", icon: Images },
+  { id: "video", label: "Video", icon: Clapperboard },
   { id: "x-posts", label: "Post to X", icon: Send },
   { id: "secretary", label: "Abigail", icon: MessageCircleHeart, avatar: "/abigail.jpg" },
   { id: "trust", label: "Trust", icon: Handshake },

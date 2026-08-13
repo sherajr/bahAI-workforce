@@ -7,6 +7,7 @@ import { TrustPanel } from "./components/TrustPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { SecretaryPanel } from "./components/SecretaryPanel";
 import { XPostsPanel } from "./components/XPostsPanel";
+import { VideoPanel } from "./components/VideoPanel";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("pipeline");
@@ -14,6 +15,7 @@ export default function App() {
     <Layout tab={tab} onTabChange={setTab}>
       {tab === "pipeline" && <PipelinePanel />}
       {tab === "products" && <ProductsGallery />}
+      {tab === "video" && <VideoPanel />}
       {tab === "x-posts" && <XPostsPanel />}
       {tab === "secretary" && <SecretaryPanel />}
       {tab === "trust" && <TrustPanel />}

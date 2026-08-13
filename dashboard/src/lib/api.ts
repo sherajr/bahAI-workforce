@@ -12,6 +12,9 @@ import type {
   StewardReport, TaskRow, TrustReport, WhatsAppStatus, XPostApproveResult, XPostEditResult,
   XPostRegenerateImageResult, XPostStatusResult, DeedsReport, RecentDeed,
   RuhiQuoteSuggestResult, QuoteSourceOption,
+  VideoProject, VideoProjectDetail, VideoProvidersResult, VideoDefaults, VideoShot,
+  VideoValidation, VideoExportResult, VideoDirection, ContinuityBible,
+  VideoShotData, VideoMotionRepair,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -102,12 +105,23 @@ const patch = <T>(path: string, body?: unknown) => request<T>("PATCH", path, bod
 const jobStepsSeen = new Map<string, number>();
 const jobsCompletionLogged = new Set<string>();
 
+/**
+ * The backend stamps steps with `datetime.utcnow().isoformat()` — no timezone
+ * suffix — so `new Date(...)` reads them as LOCAL time and the activity log
+ * showed each step hours adrift from the entries around it (observed: 5:59 PM
+ * next to 12:59 AM for the same event). Appending Z parses them as the UTC
+ * they actually are.
+ */
+function asUtc(ts: string): Date {
+  return new Date(/[Zz]|[+-]\d{2}:?\d{2}$/.test(ts) ? ts : `${ts}Z`);
+}
+
 function logJobProgress(job: JobBase) {
   const seen = jobStepsSeen.get(job.job_id) ?? 0;
   const newSteps: JobStep[] = job.steps.slice(seen);
   for (const step of newSteps) {
     pushActivity({
-      ts: new Date(step.ts).toLocaleTimeString(),
+      ts: asUtc(step.ts).toLocaleTimeString(),
       method: "STEP",
       path: job.kind,
       status: "",
@@ -627,6 +641,141 @@ export const api = {
       detail: `Downloaded gathering print sheet for ${productIds.length} products.`,
     });
   },
+
+  // ── Video Generation ───────────────────────────────────────────────────────
+  // A scene/story becomes many simple 3-4s shots. Long stages (plan, frames,
+  // clips) are background jobs — poll getPipelineStatus like the other pipelines.
+  getVideoProviders: () => get<VideoProvidersResult>("/video/providers"),
+  getVideoDefaults: () => get<VideoDefaults>("/video/defaults"),
+  getVideoProjects: () => get<{ projects: VideoProject[] }>("/video/projects"),
+  getVideoProject: (id: string) =>
+    request<VideoProjectDetail>("GET", `/video/projects/${id}`, undefined, { silent: true }),
+  createVideoProject: async (payload: {
+    title?: string;
+    source_kind?: string;
+    source_text?: string;
+    source_brief?: string;
+    source_instructions?: string;
+    source_product_id?: string | null;
+    direction?: Partial<VideoDirection>;
+  }) => {
+    const res = await post<VideoProject>("/video/projects", payload);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: "new", status: "OK", ms: 0,
+      detail: `Created video project "${res.title}" from ${payload.source_kind ?? "scene_story"}.`,
+    });
+    return res;
+  },
+  updateVideoProject: (id: string, payload: {
+    title?: string; source_text?: string; source_brief?: string;
+    source_instructions?: string; direction?: Partial<VideoDirection>;
+    continuity?: ContinuityBible;
+  }) => patch<VideoProject>(`/video/projects/${id}`, payload),
+  deleteVideoProject: (id: string) =>
+    request<{ result: string }>("DELETE", `/video/projects/${id}`),
+  planVideo: async (id: string) => {
+    const res = await post<{ job_id: string; status: string }>(`/video/projects/${id}/plan`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: id, status: "", ms: 0,
+      detail: `Planning shots for video ${id} — job ${res.job_id}`,
+    });
+    return res;
+  },
+  generateVideoFrames: async (id: string, shotIds: string[] | null = null, force = false) => {
+    const res = await post<{ job_id: string; status: string }>(
+      `/video/projects/${id}/frames`, { shot_ids: shotIds, force });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: id, status: "", ms: 0,
+      detail: `Generating ${shotIds ? `${shotIds.length} shot's` : "all"} frames — job ${res.job_id}`,
+    });
+    return res;
+  },
+  generateVideoClips: async (id: string, shotIds: string[] | null = null, force = false,
+                             provider?: string) => {
+    const res = await post<{ job_id: string; status: string }>(
+      `/video/projects/${id}/clips`, { shot_ids: shotIds, force, provider });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: id, status: "", ms: 0,
+      detail: `Generating ${shotIds ? `${shotIds.length} shot's` : "all"} clips — job ${res.job_id}`,
+    });
+    return res;
+  },
+  // Chained generation: each clip is rendered from the PREVIOUS clip's real
+  // final frame, so the finished video reads as one continuous scene instead
+  // of independently-generated shots.
+  chainVideo: async (id: string, adapt = true, force = false, provider?: string) => {
+    const res = await post<{ job_id: string; status: string }>(
+      `/video/projects/${id}/chain`, { adapt, force, provider });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: id, status: "", ms: 0,
+      detail: `Chained generation started (each clip continues from the last)${adapt ? ", matching across cuts" : ""} — job ${res.job_id}`,
+    });
+    return res;
+  },
+  // Deterministic, free and synchronous — no job to poll.
+  repairVideoMotion: async (id: string, recut = false) => {
+    const res = await post<VideoMotionRepair>(
+      `/video/projects/${id}/repair-motion`, { recut });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: id, status: "", ms: 0,
+      detail: `Movement check: ${res.shots_changed} of ${res.total_shots} shot(s) fixed`
+        + (res.shots_recut ? `, ${res.shots_recut} recut (now a cut every ${res.seconds_per_cut}s)` : "")
+        + (res.warnings.length ? `, ${res.warnings.length} repeated-action warning(s)` : ""),
+    });
+    return res;
+  },
+  cancelVideoJob: async (jobId: string) => {
+    const res = await post<{ result: string }>(`/video/jobs/${jobId}/cancel`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: jobId, status: "OK", ms: 0,
+      detail: `Cancelling video job ${jobId} after the current shot.`,
+    });
+    return res;
+  },
+  // Storyboard editing
+  editVideoShot: (shotId: string, payload: {
+    data?: Partial<VideoShotData>; locked_fields?: string[];
+    approved?: boolean; continuity_mode?: string;
+  }) => patch<VideoShot>(`/video/shots/${shotId}`, payload),
+  addVideoShot: (projectId: string, afterNumber: number | null, data?: Partial<VideoShotData>) =>
+    post<VideoShot>(`/video/projects/${projectId}/shots`, { after_number: afterNumber, data }),
+  duplicateVideoShot: (shotId: string) => post<VideoShot>(`/video/shots/${shotId}/duplicate`),
+  deleteVideoShot: (shotId: string) =>
+    request<{ result: string }>("DELETE", `/video/shots/${shotId}`),
+  reorderVideoShots: (projectId: string, shotIds: string[]) =>
+    post<{ shots: VideoShot[] }>(`/video/projects/${projectId}/shots/reorder`, { shot_ids: shotIds }),
+  splitVideoShot: (shotId: string) => post<{ shots: VideoShot[] }>(`/video/shots/${shotId}/split`),
+  simplifyVideoShot: (shotId: string) => post<VideoShot>(`/video/shots/${shotId}/simplify`),
+  mergeVideoShots: (shotId: string, otherShotId: string) =>
+    post<VideoShot>(`/video/shots/${shotId}/merge`, { other_shot_id: otherShotId }),
+  approveVideoShots: (projectId: string, shotIds: string[] | null, approved: boolean) =>
+    post<{ updated: number; approved: boolean }>(
+      `/video/projects/${projectId}/approve`, { shot_ids: shotIds, approved }),
+  // Review + export
+  validateVideo: (projectId: string, vision = false) =>
+    get<VideoValidation>(`/video/projects/${projectId}/validate?vision=${vision}`),
+  assembleVideo: async (projectId: string, onlyApproved = false, crossfade = false) => {
+    const res = await post<VideoExportResult>(
+      `/video/projects/${projectId}/assemble`, { only_approved: onlyApproved, crossfade });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "VIDEO", path: projectId,
+      status: res.video_path ? "OK" : "PARTIAL", ms: 0,
+      detail: res.video_path
+        ? `Assembled draft video from ${res.clip_count} clips.`
+        : `Assembly incomplete: ${res.reason}`,
+    });
+    return res;
+  },
+  exportVideoMetadata: (projectId: string) =>
+    get<Record<string, unknown>>(`/video/projects/${projectId}/export`),
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),

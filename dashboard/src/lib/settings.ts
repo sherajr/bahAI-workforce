@@ -46,6 +46,39 @@ export function setActiveXPostJobId(id: string | null) {
   else localStorage.removeItem(X_POST_JOB_KEY);
 }
 
+// Video tab UI state. The Video pipeline is long-running and multi-stage, so
+// losing your place when you switch tabs (React unmounts the panel) or close
+// the window is genuinely disruptive — this keeps the open project, the
+// sub-tab and any running job across both.
+export interface VideoUiState {
+  projectId: string | null;
+  tab: string | null;
+  jobId: string | null;
+}
+
+const VIDEO_KEY = "bahai.workforce.videoUi";
+const EMPTY_VIDEO_UI: VideoUiState = { projectId: null, tab: null, jobId: null };
+
+export function getVideoUi(): VideoUiState {
+  try {
+    const raw = localStorage.getItem(VIDEO_KEY);
+    if (!raw) return EMPTY_VIDEO_UI;
+    const p = JSON.parse(raw) as Partial<VideoUiState>;
+    return {
+      projectId: typeof p.projectId === "string" ? p.projectId : null,
+      tab: typeof p.tab === "string" ? p.tab : null,
+      jobId: typeof p.jobId === "string" ? p.jobId : null,
+    };
+  } catch {
+    return EMPTY_VIDEO_UI;
+  }
+}
+
+export function patchVideoUi(patch: Partial<VideoUiState>) {
+  const next = { ...getVideoUi(), ...patch };
+  localStorage.setItem(VIDEO_KEY, JSON.stringify(next));
+}
+
 function clamp(n: number, lo: number, hi: number): number {
   return isNaN(n) ? lo : Math.min(hi, Math.max(lo, n));
 }

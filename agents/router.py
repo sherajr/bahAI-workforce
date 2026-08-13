@@ -37,6 +37,15 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 # (they need vision); the Scribe and Librarian run on the local model.
 GROK_TASK_TYPES = {"creative_writing", "reviewer"}
 
+# Opt-in escape hatch for the video Director. Its prompts are long by design
+# and it makes one call per story beat, so on a busy 8GB card a full plan can
+# take 10-15 minutes on local Qwen and is prone to timing out. Setting
+# VIDEO_DIRECTOR_MODEL=grok routes ONLY the video planning stages to the paid
+# API (metered like every other Grok call); the default stays local and free,
+# and no other pipeline is affected either way.
+if os.getenv("VIDEO_DIRECTOR_MODEL", "local").strip().lower() == "grok":
+    GROK_TASK_TYPES = GROK_TASK_TYPES | {"video_direction"}
+
 # Flat per-call cost estimates (USD) for the Steward's metered P&L. Rough but
 # consistent — refine against real xAI invoices; the point is that repaint-heavy
 # runs cost visibly more than clean ones (Moderation, principle 5).
@@ -56,20 +65,27 @@ def record_api_spend(kind: str):
 
 
 def call_llm(task_type: str, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096,
-             json_mode: bool = False) -> str:
+             json_mode: bool = False, timeout: int | None = None) -> str:
     """
     Send messages to the right LLM based on task_type.
     Returns the assistant's reply as a string.
     json_mode=True constrains the model to emit valid JSON (Ollama format=json /
     Grok response_format) — use for any call whose output gets json.loads()'d.
+
+    timeout (seconds) overrides the default for slow, deliberately long
+    generations. The video Director's shot planning needs this: its prompts ask
+    for several hundred words of detail and routinely run past the 120s default
+    on a busy GPU, which surfaced as a read timeout mid-plan.
     """
     if task_type in GROK_TASK_TYPES:
-        return _call_grok(messages, temperature, max_tokens, json_mode=json_mode)
-    return _call_ollama(messages, temperature, max_tokens, json_mode=json_mode)
+        return _call_grok(messages, temperature, max_tokens, json_mode=json_mode,
+                          timeout=timeout)
+    return _call_ollama(messages, temperature, max_tokens, json_mode=json_mode,
+                        timeout=timeout)
 
 
 def _call_ollama(messages: list[dict], temperature: float, max_tokens: int,
-                 json_mode: bool = False) -> str:
+                 json_mode: bool = False, timeout: int | None = None) -> str:
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -85,13 +101,14 @@ def _call_ollama(messages: list[dict], temperature: float, max_tokens: int,
     }
     if json_mode:
         payload["format"] = "json"
-    resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120)
+    resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=timeout or 120)
     resp.raise_for_status()
     return resp.json()["message"]["content"]
 
 
 def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attempt: int = 0,
-               model: str = None, json_mode: bool = False, kind: str = "grok_chat") -> str:
+               model: str = None, json_mode: bool = False, kind: str = "grok_chat",
+               timeout: int | None = None) -> str:
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": model or XAI_MODEL,
@@ -102,7 +119,8 @@ def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attem
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     try:
-        resp = requests.post(f"{XAI_BASE}/chat/completions", headers=headers, json=payload, timeout=210)
+        resp = requests.post(f"{XAI_BASE}/chat/completions", headers=headers, json=payload,
+                             timeout=timeout or 210)
         resp.raise_for_status()
         record_api_spend(kind)
         return resp.json()["choices"][0]["message"]["content"]
@@ -110,11 +128,11 @@ def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attem
         if e.response is not None and e.response.status_code == 400 and json_mode:
             # Model/endpoint doesn't accept response_format — retry unconstrained
             return _call_grok(messages, temperature, max_tokens, _attempt, model=model,
-                              json_mode=False, kind=kind)
+                              json_mode=False, kind=kind, timeout=timeout)
         if _attempt < 2 and e.response is not None and e.response.status_code in (429, 500, 502, 503):
             time.sleep(3 * (_attempt + 1))
             return _call_grok(messages, temperature, max_tokens, _attempt + 1, model=model,
-                              json_mode=json_mode, kind=kind)
+                              json_mode=json_mode, kind=kind, timeout=timeout)
         raise
 
 

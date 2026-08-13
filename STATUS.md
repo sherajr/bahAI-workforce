@@ -102,6 +102,21 @@ for these yet, listed so nobody re-discovers them from scratch):
 - ~~etsy_publish docstring "price parsed from price_note"~~ — **done
   2026-07-10 by Grok** (now correctly documents policy price / rule 13).
 
+**Uncommitted in the working tree (2026-08-12):** the **Video Generation
+pipeline** — the third product pipeline alongside bookmarks and quote cards.
+A scene/story/passage becomes many simple 3–4s shots that assemble into a
+video; bookmarks and quote cards are secondary source options. New backend
+modules `agents/video_{store,director,safety,provider,pipeline,assembly}.py`
+plus an expanded `agents/videographer.py`; ~30 new `/video/*` routes in
+`agents/api.py`; a new dashboard **Video** tab
+(`components/VideoPanel.tsx` + `components/video/*`). New tables in
+`workforce.db` (`video_projects`/`video_shots`/`video_assets`/`video_jobs`,
+created from `state.init_db()`). Verified by
+`scripts/test_video_pipeline.py` (117 checks, offline/free) plus a live run
+against the real API and local model. See the video section of `AGENTS.md`
+for the design and its four hard rules (30–34). Awaiting Sheraj's
+review/commit decision.
+
 **Uncommitted in the working tree (2026-07-11):** quote-card exactness work —
 pinned quotes, quote lock, elision marks, tightened verbatim gate, non-italic
 English card default, dashboard "Exact quote" field — plus a follow-up that
@@ -116,6 +131,216 @@ Activity Log. Awaiting Sheraj's review/commit decision.
 ---
 
 ## Activity Log (newest first)
+
+### 2026-08-13 — Claude Code (Opus 5), direct — movement descriptions + the invisible chain error
+Chaining worked, but Sheraj reported two things: it "didn't automatically work
+by itself the first time — I had to generate the first clip", and the result
+was "still kinda trippy and weird". Both were investigated against his REAL
+finished project ("Grace Drop", 17 shots, `c5999fe9`) rather than guessed at.
+
+**The first-clip problem was not the chain.** `test_cold_start_chain` proves a
+chain starts from nothing — no frames, no clips — and generates its own
+opening frame, including when shot 1 is (wrongly) marked `continuous`. What
+actually failed was VISIBILITY: the endpoint returned 200 and a job id even
+when the run was doomed, and `useVideoJob`'s `onDone` cleared the job on the
+same tick it reported the error, so a failed chain flashed for one poll and
+then looked like a dead button. Fixed both ends — `video_pipeline.chain_preflight`
+now runs synchronously in the endpoint and refuses with a 400 and a plain
+reason (ComfyUI down, no shots, no PyAV), and a finished job's error stays on
+screen. Mutation errors render too (rule 33e).
+
+**The "trippy" look had three measurable causes**, all in the stored plan, all
+now repaired in code (rule 33d). Measured across his three projects: 8 of 17
+shots in Grace Drop had motion prompts that told the model *nothing moves*
+("No physical movement in the raindrop") while the shot's own action was the
+drop descending; 4 shots repeated the previous shot's motion text verbatim;
+and 6 `continuous` shots declared a framing/angle the frame they reuse cannot
+have. `video_director.repair_motion` strips stillness clause-by-clause,
+rebuilds duplicates from the shot's own action (keeping ambient detail), and
+makes continuous shots inherit the previous camera setup — reporting every
+change. `build_motion_prompt` was rewritten to state the movement, tie it to
+the real clip length, name what holds still, and pin the camera; a chained
+clip is now told it is CONTINUING a shot in progress rather than rendering a
+new one. Existing projects don't need re-planning: "Check the movement
+descriptions" in the Storyboard tab runs the same pass in place, free.
+
+Honest on results: an A/B on real shots (2 shots x 2 seeds, ComfyUI/LTX,
+numpy block-matching to separate real motion from morphing) moved the
+real/morph ratio 0.21 -> 0.24 and raised real motion 22% — a modest gain
+inside the noise, not a transformation. The defects were fixed because they
+are objectively wrong, not because the metric proved a big win. Also flagged
+but deliberately NOT auto-fixed: Grace Drop plans the raindrop landing four
+separate times, which no amount of chaining can make coherent —
+`repeated_action_warnings` surfaces that in the Review tab for Sheraj to
+merge or re-plan, since it is a story judgement.
+
+**Then, at Sheraj's go-ahead: cinematic pacing** (rule 33f). The flagged
+next lever was fewer, longer, non-overlapping beats, and the measurement that
+mattered turned out to be CUT count rather than shot count — a run of chained
+`continuous` shots is one unbroken take, so "Adam's New Day" cutting every
+4.7s across 122s was the restlessness, not its 35 shots. `direction.pacing`
+("standard" | "cinematic", default unchanged) drives three deterministic
+passes in `video_director`: `beat_shot_budget` caps each beat at its
+`distinct_moments` (new analysis field) so the video ends when the story does
+rather than padding to the target; `dedupe_shots` removes a moment an earlier
+nearby shot already covers; `enforce_cut_policy` cuts only at beat boundaries
+and real changes of place or time. `MAX_SHOT_SECONDS` was deliberately NOT
+raised — rule 31's ceiling is a hardware fact.
+
+Applied to the existing plans (simulation): Adam's 35 shots/26 cuts ->
+28 shots/10 cuts, a cut every 11.2s instead of 4.7s. Grace Drop's cut count
+went 7 -> 8, which is CORRECT rather than a regression: its shot 1 was marked
+`continuous` with nothing before it, and two other "continuations" crossed a
+beat AND a location/time change — false claims that made chained clips warp.
+So existing projects don't need re-planning either: `POST .../repair-motion`
+now takes `{"recut": true}` ("Check movement and recut" in the Storyboard tab)
+and applies the cut policy in place. That path is deliberately NON-DESTRUCTIVE
+— it never deletes a shot, because a dropped shot may already have a rendered
+clip; duplicates stay as warnings for Sheraj to remove himself.
+
+255/255 checks (was 172), typecheck and build clean, 204 existing project
+assets verified intact after cleaning up 54 test renders. Nothing committed.
+
+### 2026-08-12 — Claude Code (Opus 5), direct — chained generation (fixes the "slideshow" look)
+Sheraj's first finished video came out "kind of like a trippy slide show" and
+he correctly diagnosed why: shots were being generated INDEPENDENTLY, each
+from its own text prompt, so every shot invented its own version of the
+character and place. His proposed fix — render a clip, take its END FRAME as
+the next clip's start image, and adapt descriptions from what the video
+actually produced — is now the recommended path.
+`video_pipeline.generate_chained()` runs shots sequentially: clip → extract
+its REAL final frame (`videographer.extract_last_frame`) → that file becomes
+the next shot's first frame. A `continuous` shot reuses it directly; an
+`editorial_cut` must regenerate (the angle changes on purpose) but is
+anchored by `video_director.observe_frame()`, a vision read of what the
+previous clip really showed, folded in through `build_continuation_prompt` —
+so the next prompt describes reality rather than the plan. New rule 33a in
+`AGENTS.md`. Two things had to be fixed for it to work at all: **PyAV was not
+installed**, so extraction would have silently returned None and every link
+would have degraded back to an independent shot (now installed, in
+requirements, and preflighted so the chain refuses to start rather than
+faking it); and LTX's image adherence was the template's 0.15 ("loosely
+inspired by this image"), wrong when the image IS the previous clip's last
+frame — chained runs now pass `image_strength=1.0` while independent runs
+keep 0.15. Measured on a real 3-shot render: the join between consecutive
+clips differs by 3.8 and 3.3 out of 255, against ~90-100 for independently
+generated frames — roughly 25x better, i.e. visually seamless. 172/172 in the
+suite (new tests assert the byte-identical frame handoff, cut anchoring,
+resume, and the strength plumbing), 16/16 regression, clean typecheck/build.
+Open: chaining fixes continuity BETWEEN shots, not motion quality within a
+clip, and a 7-beat story still cuts every 3-4s — if it still reads as choppy
+the next lever is fewer/longer shots, not more chaining.
+
+### 2026-08-12 — Claude Code (Opus 5), direct — plan timeouts, beat resilience, Video tab state
+Two failures Sheraj hit in real use. (1) **Planning died mid-run**: a 7-beat
+plan timed out on beat 2 against Ollama's hardcoded 120s and threw away six
+completed beats. Directly caused by the detailed-prompt work earlier the same
+day — richer prompts take longer than the old default allowed. Fixed at three
+levels: `call_llm` gained a `timeout` override (default unchanged for every
+other caller) with the Director passing 300-420s; `plan_beat_shots` retries
+once with a deliberately LEANER prompt rather than repeating an oversized
+request that will fail identically; and `build_plan` no longer aborts — a
+failed beat becomes a placeholder shot flagged `needs_replanning` (badged in
+the storyboard) and planning continues, ending `planned_with_gaps` with the
+reason in the notes. Also added `VIDEO_DIRECTOR_MODEL=grok` as an opt-in for
+when 10-15 minutes of local planning is too slow; default stays local/free.
+(2) **The Video tab reset on every tab switch** — React unmounts the panel, so
+the open project, sub-tab and running job were lost. Now persisted via
+`settings.getVideoUi`/`patchVideoUi` (the pattern the Pipeline tab already
+used for its active job), and `useVideoJob` reattaches to a running job,
+treating a 404 as "the API restarted" instead of polling a dead id forever.
+Fixed a related display bug while there: job step timestamps are naive UTC
+from the backend, so the activity log rendered them ~7h adrift from the
+entries beside them (5:59 PM next to 12:59 AM for one event). Verified
+159/159 in the suite (new: timeout config, leaner retry, and a
+failed-beat-survives test), 16/16 regression, clean typecheck and build, plus
+a live multi-beat plan. Worth noting for anyone debugging slowness: the GPU
+was at 7.7/8.2 GB with LM Studio, Ollama and ComfyUI all resident, which is
+most of why planning was crawling — `scripts/watch_gpu.ps1` (added this
+session) shows this in plain language.
+
+### 2026-08-12 — Claude Code (Opus 5), direct — much more detailed video prompts
+Owner ask: make the generator's prompts "extremely detailed but very simple"
+— rich description, uncomplicated cinematography. Implemented as two
+explicitly separate axes (now hard rule 30b in `AGENTS.md`). Prompts grew
+from ~30 words to ~300: `plan_beat_shots` now demands 50–90-word frame
+prompts and gained six detail fields (`subject_detail`, `setting_detail`,
+`texture_notes`, `atmosphere`, `depth_notes`, `lens`); `build_frame_prompt`
+and `build_motion_prompt` emit flowing PROSE instead of comma-joined tags;
+the continuity bible's 30-word cap became a 15–35-word floor with named
+materials. Confirmed from ComfyUI's source that neither encoder truncates
+(`lt.py`/`wan.py` both `max_length=99999999`), so length is free quality
+rather than a risk. Critically, `complexity_score` had to be DECOUPLED from
+verbosity or every rich shot would be auto-split: `_HANDS` now matches
+hand-intensive work rather than any mention of hands, `_CROWD_OK` waives a
+distant/still crowd, and the word cap applies only to `primary_action`.
+Two defects the richer output exposed and fixed: the continuity block was
+emitting tag soup (`; ; ;`, pipes, run-together phrases) for a third of the
+prompt, and shot-level detail CONTRADICTED the bible on the same character
+("salt-and-pepper beard, indigo robe" vs "stubble, black hair, undyed wool
+tunic") — the bible now wins for any referenced id, since contradiction is
+worse than either description and it defeats the continuity the bible
+exists to provide. Verified live twice on the real local model
+(3 shots, 296–308-word frame prompts, complexity 0–2 against a limit of 3)
+plus 141/141 in `scripts/test_video_pipeline.py`, 16/16 regression, clean
+typecheck.
+
+### 2026-08-12 — Claude Code (Opus 5), direct — the Video Generation pipeline
+Built the third product pipeline on top of the morning's video engine work:
+a scene, story or historical account becomes MANY simple 3–4 second shots
+that assemble into a coherent video (bookmarks/quote cards are secondary
+source options — deliberately not the identity of the feature). Staged as
+source → direction → analysis → continuity bible → shot plan → first/last
+frames → clips → review → export, reusing the existing background job store,
+`workforce.db`, `outputs/` asset convention, `call_llm` routing and the
+dashboard's component system rather than introducing anything parallel. New
+modules: `video_store` (4 tables), `video_director` (beat-by-beat planning
+so prompts stay inside local Qwen's context), `video_safety`,
+`video_provider`, `video_pipeline`, `video_assembly`; ~30 `/video/*` routes;
+a new dashboard Video tab. Four new hard rules (30–34 in `AGENTS.md`) came
+out of it. **Three findings worth remembering.** (1) The sacred-figure
+safeguard's first version matched a raw ASCII apostrophe and therefore
+missed `Bahá’u’lláh` — the typographic spelling this repo and every real
+source actually use — while its own leak-check, sharing the broken matcher,
+reported all-clear; it now normalises (strip diacritics, drop
+apostrophe-likes) before matching. (2) `WanFirstLastFrameToVideo` exists in
+ComfyUI, submits cleanly and finishes in 21s against Wan 2.2 TI2V-5B, and
+returns corrupted garbage — node presence and a zero exit code both claimed
+"first-and-last-frame supported"; only inspecting pixels disproved it, so
+capability is hardcoded from that probe and the pipeline shows its actual
+fallback instead of pretending. (3) `init_video_db()` nested inside
+`state.init_db()`'s open write transaction deadlocked SQLite and silently
+skipped the video tables on a FRESH database (every endpoint would then fail
+with "no such table"); moved outside, with a fresh-DB regression test.
+Verified: `scripts/test_video_pipeline.py` 117/117 (offline, stubs the LLM,
+mock provider), a 16-check regression pass over the pre-existing endpoints,
+`npx tsc --noEmit` clean, `npm run build` clean, and a live end-to-end run
+against the real API + local Qwen. Not committed. Open: real clip generation
+is slow on an 8GB card (~3 min/clip on Wan), so a 60s video is a long
+sequential run — worth a look at batching or a smaller draft pass.
+
+### 2026-08-12 — Claude Code (Sonnet 5), direct — local video generation, infrastructure only
+Set up local text/image-to-video generation outside the repo (ComfyUI
+portable at `C:\Users\Sheraj\ComfyUI_windows_portable`, LTX-Video 2B
+distilled-fp8 and Wan 2.2 TI2V-5B models, on the owner's 8GB RTX 4070) and
+verified both work end-to-end. Along the way hit and root-caused a real
+bug: LTX's `LTXVScheduler.terminal` at `0.0` silently renders pure black
+video with no error — confirmed by A/B test (`terminal=0.0` → brightness 0,
+`terminal=0.1` → normal), documented as a load-bearing constant. Asked
+Sheraj how this should connect to the actual app; he chose "just wire in
+the engine, no UI yet." Wrote `agents/videographer.py` — a pipeline-free
+HTTP client (`generate_video(prompt, image_path=None, model="ltx"|"wan22")`)
+against ComfyUI's `/prompt` → `/history` → `/view` API, verified live for
+both models (non-black output, correct resolution/frame count, real
+motion) via a throwaway smoke test, not just imported successfully. No
+`log_run`/`record_spend` calls in the module by design — no task_id/product
+context yet (not pipeline-wired) and no cloud cost to meter; a future
+pipeline step should add both around the call site. Added `COMFYUI_URL` to
+`.env` and a new "Local video generation" section to `AGENTS.md`. Nothing
+committed (per the "only commit when asked" norm) — working tree has
+`agents/videographer.py` (new), `.env`, `AGENTS.md`, `STATUS.md`. Open:
+whether/how this becomes a real pipeline step (e.g. a promo-video pass on
+finished products) is still Sheraj's call, not decided yet.
 
 ### 2026-08-05 — Claude Code (Fable 5), direct — owner-selectable quote-card sources (rule 11 rewrite)
 Owner ask (2026-08-04): let quote cards draw from writings beyond Ruhi Book 1

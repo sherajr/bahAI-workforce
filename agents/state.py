@@ -22,7 +22,11 @@ TRUST_LEVELS = {
 
 AGENT_NAMES = ["librarian", "artist", "scribe", "reviewer",
                "steward", "consultation", "compositor", "translator",
-               "secretary"]
+               "secretary",
+               # Video Generation pipeline: the Director plans shots (judged by
+               # the continuity check), the Videographer renders them
+               # (mechanical — see rule 14, its log_run passes passed_review=None).
+               "director", "videographer"]
 
 
 def _connect() -> sqlite3.Connection:
@@ -158,6 +162,19 @@ def init_db():
         except Exception:
             pass
         conn.commit()
+
+    # Video Generation tables live in this same DB and follow the same
+    # migration pattern. This MUST run outside the `with _connect()` block
+    # above: video_store opens its own connection, and SQLite refuses a second
+    # writer while the outer transaction is still open ("database is locked").
+    # Nested inside, it failed silently on a fresh DB and left every video
+    # endpoint throwing "no such table" — caught by the test suite, 2026-08-12.
+    # Imported lazily so a script that only needs products doesn't pull it in.
+    from agents.video_store import init_video_db, mark_interrupted_jobs
+    init_video_db()
+    # Any job left 'running' by a killed process is really interrupted;
+    # flipping it at startup is what makes "Resume" truthful.
+    mark_interrupted_jobs()
 
 
 # --- Task management ---
