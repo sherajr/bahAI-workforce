@@ -156,7 +156,7 @@ for the Secretary; Canva/Etsy/WhatsApp/Google/X keys all optional.
 | `agents/secretary*.py`, `agents/gcal.py` + `g*.py`, `agents/whatsapp.py`, `agents/scheduler.py`, `agents/badi_dates.py` | The Secretary subsystem (private data stays in `private/`, git-ignored) |
 | `agents/x_post.py` | The human-approved X giveaway pipeline |
 | `agents/etsy.py` / `agents/canva.py` | Publishing integrations — built, currently dormant (see status table) |
-| `dashboard/` | React + TypeScript + Tailwind UI (Pipeline, Products, Post to X, Abigail, Trust, Settings + activity log strip) |
+| `dashboard/` | React + TypeScript + Tailwind UI (Pipeline, Products, Video, Post to X, Abigail, Colony, Settings + activity log strip) |
 | `docs/ARCHITECTURE.md` | Diagrams + deeper conventions |
 | `scripts/` | One-time setup (text download/ingest) and diagnostics |
 
