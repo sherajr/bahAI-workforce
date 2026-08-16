@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import type { ColonySnapshot } from "../../lib/types";
 import { accentFor, agentLabel, cn } from "../../lib/utils";
+import { agentFinish, teamFinish } from "./finish";
 import { edgePath, layoutColony, TILT, VIEW_H, VIEW_W } from "./layout";
+import { Sphere, SphereDefs } from "./Sphere";
 
 interface Props {
   snapshot: ColonySnapshot;
@@ -70,6 +72,7 @@ export function ColonyGraph({
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
+          <SphereDefs />
         </defs>
 
         <rect width={VIEW_W} height={VIEW_H} fill="url(#colony-vignette)" />
@@ -159,6 +162,10 @@ export function ColonyGraph({
           const active = selectedTeam === team.id;
           const dim = selectedTeam && !active;
           const job = team.jobs?.[0];
+          // A core is finished from its members' judged work added up, so the
+          // system as a whole reads at a glance and can never look brighter
+          // than the people in it.
+          const finish = teamFinish(team, snapshot.agents);
           return (
             <g
               key={team.id}
@@ -174,8 +181,14 @@ export function ColonyGraph({
                         className="colony-live-pulse"
                         style={{ ["--spin-origin" as string]: "center" }} />
               )}
-              <circle cx={cx} cy={cy} r={r * 0.155} fill={`url(#sphere-${team.accent})`}
-                      filter="url(#colony-glow)" />
+              {/* A core keeps a floor under its aura: it glowed before the
+                  finish existed, and a young team with nothing judged yet
+                  should read as new, not as neglected. */}
+              <Sphere
+                cx={cx} cy={cy} r={r * 0.155}
+                accent={team.accent} finish={finish} seed={`team-${team.id}`}
+                minAura={0.35}
+              />
               {active && (
                 <circle cx={cx} cy={cy} r={r * 0.22} fill="none"
                         stroke={accent.hex} strokeWidth="1.5" opacity="0.8" />
@@ -275,12 +288,18 @@ export function ColonyGraph({
                 <circle cx={a.x} cy={a.y} r={a.radius + 8} fill="none"
                         stroke={accent.hex} strokeWidth="1.5" opacity="0.9" />
               )}
-              <circle
-                cx={a.x} cy={a.y} r={a.radius}
-                fill={a.isInstrument ? "#334155" : `url(#sphere-${home?.team.accent ?? "amber"})`}
-                stroke={a.isInstrument ? "#475569" : "transparent"}
-                strokeWidth="1"
-              />
+              {/* An instrument stays flat and unfinished on purpose: it renders
+                  and routes, it is never judged, and a shine or a scratch on it
+                  would be a claim about quality nobody ever made (rules 14/35). */}
+              {a.isInstrument ? (
+                <circle cx={a.x} cy={a.y} r={a.radius} fill="#334155"
+                        stroke="#475569" strokeWidth="1" />
+              ) : (
+                <Sphere
+                  cx={a.x} cy={a.y} r={a.radius}
+                  accent={home?.team.accent} finish={agentFinish(a.agent)} seed={a.name}
+                />
+              )}
               {/* A paused agent is struck through — it still holds its place in
                   the team, but it will not run or answer. */}
               {a.agent.paused && (
@@ -320,6 +339,16 @@ function Legend() {
         <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
         Bigger body = more judged runs behind it
       </div>
+      {/* The finish is the one part of the map that isn't self-evident, so it
+          gets the two-sided reading rather than a single dot. */}
+      <div className="flex items-center gap-2">
+        <span className="h-2.5 w-2.5 rounded-full bg-slate-100 shadow-[0_0_6px_2px_rgba(255,255,255,0.35)]" />
+        Shiny = its judged runs come back clean
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="h-2.5 w-2.5 rounded-full bg-[#3b3428]" />
+        Dross and scratches = it needs a polish
+      </div>
       <div className="flex items-center gap-2">
         <span className="h-px w-4 bg-slate-500" />
         A line is a real handoff, recorded in the run log
@@ -337,6 +366,7 @@ function HoverCard({ snapshot, name }: { snapshot: ColonySnapshot; name: string 
   if (!agent) return null;
   const handoffs = snapshot.edges.filter((e) => e.source === name || e.target === name);
   const total = handoffs.reduce((n, e) => n + e.count, 0);
+  const finish = agentFinish(agent);
   return (
     <div className="pointer-events-none absolute right-4 top-4 w-60 rounded-lg border
                     border-slate-700 bg-slate-950/90 p-3 text-xs backdrop-blur">
@@ -349,10 +379,20 @@ function HoverCard({ snapshot, name }: { snapshot: ColonySnapshot; name: string 
           {agent.total_runs > 0
             ? `${agent.clean_runs}/${agent.total_runs} clean judged runs`
             : "No judged run yet"}
+          {agent.consecutive_failures > 0 && (
+            <span className="text-rose-400">
+              {" "}· {agent.consecutive_failures} in a row needed work
+            </span>
+          )}
         </div>
       )}
       <div className="mt-1 text-slate-500">
         {total > 0 ? `${total} handoffs recorded` : "No handoffs recorded yet"}
+      </div>
+      {/* What the body's finish is saying, in words. The texture is small on
+          screen, so it must never be the only place a state is legible. */}
+      <div className="mt-2 border-t border-slate-800 pt-2 text-slate-500">
+        {finish.label}
       </div>
     </div>
   );

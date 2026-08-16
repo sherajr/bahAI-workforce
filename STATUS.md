@@ -39,22 +39,15 @@ redesign and exactness work, print sheets and the giving ledger. (Earlier
 Snapshots claimed video and the card work were still uncommitted long after they
 had landed — check `git status` rather than trusting a line like this.)
 
-**Uncommitted in the working tree** (verified against `git status` 2026-08-16) —
-five features plus docs, none reviewed by Sheraj yet. Proposed commit breakdown
-in the 2026-08-16 log entry:
-- **The Colony** (2026-08-13) — replaced the Trust tab. `colony.py`,
-  `colony_chat.py`, `colony_tools.py`, `models.py` (per-agent model choice),
-  `dashboard/src/components/colony/`, `TrustPanel.tsx` deleted. Rules 35–41a.
-- **The project wallet** (2026-08-14) — `wallet.py`, Nora's money tool, the
-  hot/treasury split. Rules 42–49.
-- **Abigail ↔ the teams** (2026-08-14) — `secretary_colony.py` and her five new
-  tools in `secretary_tools.py`. Rules 50–54.
-- **Run cancellation** (2026-08-14) — `api.py` + `scripts/test_job_cancel.py`.
-  Rules 55–57.
-- **Finished videos on the Products page + product filters** (2026-08-15) —
-  `video_assembly.py`, `api.py`, `ProductsGallery.tsx`, `settings.ts`. Rule 58.
-- Post-commit **video fixes** in `video_director.py` / `test_video_pipeline.py`,
-  and the **doc rewrites** (AGENTS.md reorganised, STATUS.md trimmed).
+Also committed in `cf599aa` (2026-08-16), after this section spent three days
+claiming otherwise: **the Colony** (rules 35–41a), **the project wallet** (42–49),
+**Abigail ↔ the teams** (50–54), **run cancellation** (55–57) and the
+**finished-video shelf** (58). Sheraj has still not reviewed that pile by hand —
+"committed" is not "reviewed".
+
+**Uncommitted in the working tree**: nothing. The Colony map's performance
+finish (rule 41b) went up on 2026-08-16. Re-derive this line with `git status`
+before trusting it — it has been wrong before, in this exact way.
 
 **Deferred / proposed, not started** (nobody should re-discover these from
 scratch):
@@ -87,6 +80,36 @@ scratch):
 Everything older is in `git log` — `git log -p -- STATUS.md` shows every entry
 back to 2026-07-07, and the lessons worth keeping were promoted into
 `AGENTS.md` before the cut.*
+
+### 2026-08-16 — Claude Code (Opus 5), direct — the Colony map shows performance as a sphere's finish
+Owner ask: an agent doing well should be a shiny, glimmering, glorious sphere;
+one doing badly should carry dross and scratches, as if it wants a polish.
+
+New `dashboard/src/components/colony/finish.ts` (what the finish MAY be read
+from) and `Sphere.tsx` (how it is drawn), used by `ColonyGraph.tsx` for both
+agent bodies and team cores; two keyframe pairs in `index.css`. Rule 41b
+records the invariants. Shine layers by viewing distance — aura and overall
+lightness at a glance, gloss and grime up close, scratches and rim glints as
+detail — and the hover card now states the finish in words, because the bodies
+are ~15px on screen and texture must never be the only carrier.
+
+Verified by RENDERING it, not by reading it: the real components were rendered
+through `react-dom/server` against the LIVE `GET /colony` snapshot and
+screenshotted with headless Chrome (harness written under `dashboard/.preview/`,
+deleted afterwards — it lives outside `src` or `tsc` fails on its node imports).
+Two rounds of fixes came directly out of looking at the first render: the rim
+light read as a white crescent drawn on the ball (now a fading gradient stroke
+on the silhouette), and the scratches read as white sticks lying on top (now
+hairlines). `npx tsc --noEmit` and `npm run build` both clean.
+
+**Finding for Sheraj, not acted on:** on the real data Amos (the Reviewer) is
+the one tarnished body on the map — 115/396 clean. That is not a claim about
+Amos's own work: `api.py` logs the Reviewer's `passed_review` as the verdict he
+GAVE on someone else's listing (`review["passed"]`), so a strict reviewer scores
+himself down. The map is faithful to the stored number and to what the Standing
+panel has always shown (29%), so nothing was special-cased here — but the
+attribution itself is arguably wrong, and changing it would move a trust level
+that gates `/etsy/publish`. His call.
 
 ### 2026-08-16 — Claude Code (Opus 5), direct — STATUS.md harvested and trimmed; four lost facts promoted
 The Activity Log had reached 52 entries against this file's own cap of 15–20,

@@ -16,7 +16,7 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 15–28 | The Secretary (Abigail) |
 | 29 | The quote-card format |
 | 30–34, 58 | The Video pipeline |
-| 35–41a | The Colony |
+| 35–41b | The Colony |
 | 42–49 | The project wallet |
 | 50–54 | Abigail and the teams |
 | 55–57 | Cancelling a run |
@@ -108,7 +108,7 @@ polled by the dashboard):
 
 Products carry `product_type`; bookmark-only endpoints reject cards via
 `_require_bookmark`. Around the pipelines sit the **Colony** (the workforce as
-an organisation — rules 35–41a), the **Secretary** (Sheraj's personal
+an organisation — rules 35–41b), the **Secretary** (Sheraj's personal
 assistant, rules 15–28), the **wallet** (rules 42–49), and Abigail's bridge into
 the teams (rules 50–54).
 
@@ -627,7 +627,7 @@ Two invariants outside the numbered rules, both learned from real incidents:
       view persists, the typed SEARCH does not — returning to a nearly-empty
       shelf because of a forgotten query is the failure the bar prevents.
 
-## Rules 35–41a — the Colony
+## Rules 35–41b — the Colony
 
 The dashboard tab that treats the workforce as an organisation: performance,
 handoffs, per-agent chat and settings, team goals, team consultation and the
@@ -723,6 +723,32 @@ teams, per-agent settings, goals, chat history and the queue (its own tables in
       to check it. Vision (`call_grok_vision`) and image generation are separate
       paid paths that a local model choice does NOT make free; the UI says so
       for the Reviewer and Artist.
+41b. **A body's FINISH on the Colony map is judged work only, and "not scored
+    yet" must never look like "scored badly".** (Owner ask 2026-08-16: a
+    well-performing agent's sphere should be shiny and glimmering, a poor one
+    covered in dross and scratches.) `dashboard/src/components/colony/finish.ts`
+    computes it and `Sphere.tsx` draws it, under rules 14/35: only JUDGED runs
+    are evidence, so instruments (`compositor`, `consultation`) get NO finish at
+    all — they stay flat — and an agent with `total_runs === 0` renders PLAIN,
+    never dull. Polishing a body with mechanical success would turn the map into
+    the uptime metric rule 14 exists to prevent.
+    - **`trust_score` is not usable raw here**: it defaults to 50.0 with zero
+      runs, so reading it directly would paint every new agent half-tarnished.
+      The finish is computed from `clean_runs`/`total_runs` with `total_runs`
+      gating it, plus a `consecutive_failures` penalty so a current slump shows
+      before the lifetime average catches up.
+    - **A thin record is pulled toward plain** (`CONFIDENCE_RUNS`), because one
+      reviewed run is an anecdote and a first failure should not read as a
+      verdict. It softens the PICTURE only — the exact counts are on the hover
+      card and in the drawer, and every state is stated in WORDS there too,
+      since the texture is ~15px on screen and cannot be the only carrier.
+    - **Marks are deterministic per body and revealed in order** from a fixed
+      set, so worsening work ADDS dross where dross already is. Grime that
+      reshuffled every render would be the same bug the deterministic layout in
+      `layout.ts` exists to avoid.
+    - A team core is finished from its members' judged work ADDED UP (derived,
+      never stored — rule 35), excluding its instruments, so a core can never
+      read brighter than the people in it.
 
 ## Rules 42–49 — the project wallet (`agents/wallet.py`, Nora's domain)
 

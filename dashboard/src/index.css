@@ -43,6 +43,19 @@ input[type="range"] {
   0%, 100% { opacity: 0.25; transform: scale(1); }
   50%      { opacity: 0.6;  transform: scale(1.08); }
 }
+/* A well-polished body catches the light: a sheen crossing its face, and a
+   glint or two at the rim. The band travels in the sphere's own unit space, so
+   1px here is one sphere radius whatever the body's size. It rests off-screen
+   for most of the cycle — a sheen sweeping continuously reads as a loading
+   spinner, not as a polished surface. */
+@keyframes colony-sheen {
+  0%, 14%   { transform: translateX(-1.8px); }
+  48%, 100% { transform: translateX(1.8px); }
+}
+@keyframes colony-glint {
+  0%, 72%, 100% { opacity: 0; transform: scale(0.35) rotate(0deg); }
+  86%           { opacity: 0.9; transform: scale(1) rotate(45deg); }
+}
 
 /* A handoff edge: dashes travelling from source to target. */
 .colony-edge-flow {
@@ -63,10 +76,27 @@ input[type="range"] {
   transform-box: fill-box;
 }
 
+.colony-sphere-sheen {
+  animation: colony-sheen 5.5s ease-in-out infinite;
+}
+.colony-sphere-glint {
+  animation: colony-glint 3.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .colony-edge-flow,
   .colony-orbit-spin,
-  .colony-live-pulse {
+  .colony-live-pulse,
+  .colony-sphere-sheen {
     animation: none;
+  }
+  /* The glint's resting state is invisible, so stopping it would delete the
+     mark rather than still it. Held at its brightest instead — the same
+     information, without the twinkle. */
+  .colony-sphere-glint {
+    animation: none;
+    opacity: 0.9;
   }
 }
