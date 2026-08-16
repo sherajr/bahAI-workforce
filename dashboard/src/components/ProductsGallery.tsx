@@ -1,11 +1,15 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Download, ExternalLink, Loader2, Printer, X } from "lucide-react";
-import { api, frontImageUrl, imageUrl } from "../lib/api";
+import {
+  CheckCircle2, Clapperboard, Download, ExternalLink, FileText, Loader2, Printer, Search, X,
+} from "lucide-react";
+import { api, BASE, frontImageUrl, imageUrl } from "../lib/api";
+import type { Tab } from "./Nav";
 import type {
-  EditProductPayload, EditProductResult, EtsyPublishResult, ImproveResult, Job, ProductRow,
-  RegenerateImageResult, RegenerateQuoteResult,
+  EditProductPayload, EditProductResult, EtsyPublishResult, FinishedVideo, ImproveResult, Job,
+  ProductRow, RegenerateImageResult, RegenerateQuoteResult,
 } from "../lib/types";
+import { getProductsUi, patchProductsUi, patchVideoUi } from "../lib/settings";
 import {
   badgeClasses, badgeForProduct, formatDate, isQuoteCard, parseCardCopy, parseListing,
   parseReview, usd,
@@ -143,6 +147,183 @@ function ProductCard({
           <span className="font-mono text-xs text-slate-400">{overall.toFixed(1)}/10</span>
         </div>
         <div className="text-xs text-slate-600">{formatDate(product.created_at)}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Finished videos ───────────────────────────────────────────────────────────
+//
+// A finished video sits on this shelf beside the bookmarks and cards, but it is
+// NOT a product row — the backend derives it from the video project every time
+// it's read (GET /video/finished). So it can't drift out of step with the Video
+// tab, and it never lands in the Steward's product/revenue counts, which are
+// about things made to be sold or given away in print.
+
+/** Seconds → "1:04", prefixed "~" when it's the plan's length rather than a
+ * measurement of the finished file. */
+function formatDuration(seconds: number, measured = true): string {
+  const s = Math.max(0, Math.round(seconds));
+  return `${measured ? "" : "~"}${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** The mp4/JSON/SRT live on the API server, not the Vite dev origin. */
+function outputUrl(webPath: string): string {
+  return webPath ? `${BASE}${webPath}` : "";
+}
+
+function VideoCard({ video, onOpen }: { video: FinishedVideo; onOpen: () => void }) {
+  const poster = outputUrl(video.poster_url);
+  const [posterFailed, setPosterFailed] = useState(false);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+      className="group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70 text-left transition-colors hover:border-amber-400/40"
+    >
+      <div className="relative flex h-56 items-center justify-center overflow-hidden bg-slate-950">
+        {poster && !posterFailed ? (
+          <img
+            src={poster}
+            alt="First frame"
+            onError={() => setPosterFailed(true)}
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <Clapperboard className="h-10 w-10 text-slate-700" />
+        )}
+        <div className="absolute inset-0 flex items-center justify-center">
+          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-slate-200/40 bg-slate-950/60 backdrop-blur transition-colors group-hover:border-amber-300/70">
+            {/* CSS triangle: needs a block box with no size of its own. */}
+            <span className="ml-1 block h-0 w-0 border-y-[9px] border-l-[14px] border-y-transparent border-l-slate-100" />
+          </span>
+        </div>
+        <span className="absolute bottom-1.5 right-1.5 rounded bg-slate-950/85 px-1.5 py-0.5 font-mono text-[10px] text-slate-300">
+          {formatDuration(video.duration_seconds, video.duration_measured)}
+        </span>
+      </div>
+      <div className="flex flex-1 flex-col gap-2 p-4">
+        <div className="text-[10px] uppercase tracking-widest text-violet-300">
+          Video · {video.clip_count} shot{video.clip_count === 1 ? "" : "s"}
+        </div>
+        <div className="line-clamp-2 text-sm font-medium text-slate-100">{video.title}</div>
+        <div className="mt-auto flex items-center justify-between">
+          {video.is_mock ? (
+            <BadgePill className="bg-rose-400/10 text-rose-300 border-rose-400/40">
+              MOCK — NOT REAL FOOTAGE
+            </BadgePill>
+          ) : (
+            <BadgePill className="bg-violet-400/10 text-violet-300 border-violet-400/40">
+              FINISHED
+            </BadgePill>
+          )}
+        </div>
+        <div className="text-xs text-slate-600">{formatDate(video.created_at)}</div>
+      </div>
+    </div>
+  );
+}
+
+function VideoDrawer({
+  video, onClose, onNavigate,
+}: { video: FinishedVideo; onClose: () => void; onNavigate?: (tab: Tab) => void }) {
+  const src = outputUrl(video.video_url);
+  const filename = `${video.title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || video.id}.mp4`;
+
+  // Send the Video tab to this project's Review & export step — the same
+  // persisted state the tab restores itself from (rule 33c).
+  const openInVideoTab = () => {
+    patchVideoUi({ projectId: video.id, tab: "review", jobId: null });
+    onNavigate?.("video");
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-slate-950/70" onClick={onClose}>
+      <div
+        className="h-full w-full max-w-2xl overflow-y-auto border-l border-slate-800 bg-slate-950 p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg text-slate-100">{video.title}</h2>
+            <div className="mt-1 font-mono text-xs text-slate-500">
+              video project {video.id} · {formatDate(video.created_at)}
+            </div>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {video.is_mock && (
+          <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-950/20 p-3 text-sm text-rose-200">
+            This draft was built with the <strong>mock</strong> provider — placeholder clips, not
+            real generation. Re-render it with a real provider before showing it to anyone.
+          </div>
+        )}
+
+        <video
+          src={src}
+          poster={outputUrl(video.poster_url) || undefined}
+          controls
+          className="w-full rounded-xl border border-slate-800 bg-black"
+        />
+
+        <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <Stat label="Length" value={formatDuration(video.duration_seconds, video.duration_measured)} />
+          <Stat label="Shots joined" value={String(video.clip_count)} />
+          <Stat label="Shots planned" value={String(video.shot_count)} />
+          <Stat
+            label="Source"
+            value={
+              video.source_kind === "bookmark" ? "Bookmark"
+                : video.source_kind === "quote_card" ? "Quote card"
+                : "Scene or story"
+            }
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <a
+            href={src}
+            download={filename}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition-colors hover:border-amber-400/50 hover:text-amber-200"
+          >
+            <Download className="h-4 w-4" /> Download the video
+          </a>
+          {video.metadata_url && (
+            <a
+              href={outputUrl(video.metadata_url)}
+              download={`${video.id}-production-record.json`}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition-colors hover:border-slate-600"
+            >
+              <FileText className="h-4 w-4" /> Production record
+            </a>
+          )}
+          {video.subtitles_url && (
+            <a
+              href={outputUrl(video.subtitles_url)}
+              download={`${video.id}-narration.srt`}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition-colors hover:border-slate-600"
+            >
+              <FileText className="h-4 w-4" /> Narration subtitles
+            </a>
+          )}
+          {onNavigate && (
+            <Button variant="secondary" onClick={openInVideoTab}>
+              <Clapperboard className="h-4 w-4" /> Open in the Video tab
+            </Button>
+          )}
+        </div>
+
+        <p className="mt-4 text-xs text-slate-600">
+          Editing, re-rendering shots and re-assembling all happen in the Video tab — this shelf
+          shows what's finished. Print sheets, Etsy and the giving ledger are for the printed
+          bookmarks and cards, so they don't apply here.
+        </p>
       </div>
     </div>
   );
@@ -808,16 +989,184 @@ function DrawerImage({ label, src, downloadName }: { label: string; src: string;
   );
 }
 
+// ── Filtering ─────────────────────────────────────────────────────────────────
+
+/** One thing on the shelf: a saved product, or a finished video derived from
+ * its video project. Everything the filter bar needs is flattened onto it once,
+ * so filtering and sorting never re-parse the stored JSON per keystroke. */
+type GalleryItem =
+  | {
+      kind: "product"; id: string; type: "bookmark" | "quote_card"; title: string;
+      createdAt: string; score: number; badge: string; search: string; product: ProductRow;
+    }
+  | {
+      kind: "video"; id: string; type: "video"; title: string;
+      createdAt: string; score: null; badge: null; search: string; video: FinishedVideo;
+    };
+
+const KIND_FILTERS: { id: string; label: string }[] = [
+  { id: "all", label: "Everything" },
+  { id: "bookmark", label: "Bookmarks" },
+  { id: "quote_card", label: "Quote cards" },
+  { id: "video", label: "Videos" },
+];
+
+const BADGE_FILTERS = ["EXCEPTIONAL", "APPROVED", "BORDERLINE", "REJECTED", "BEST EFFORT"];
+
+const SORTS: { id: string; label: string }[] = [
+  { id: "newest", label: "Newest first" },
+  { id: "oldest", label: "Oldest first" },
+  { id: "score", label: "Highest score" },
+  { id: "score_low", label: "Lowest score" },
+  { id: "title", label: "Title A–Z" },
+];
+
+function productItem(product: ProductRow): GalleryItem {
+  const review = parseReview(product);
+  const overall = review?.overall ?? 0;
+  const card = parseCardCopy(product);
+  const listing = isQuoteCard(product) ? null : parseListing(product);
+  return {
+    kind: "product",
+    id: product.id,
+    type: isQuoteCard(product) ? "quote_card" : "bookmark",
+    title: product.title ?? product.theme ?? product.id,
+    createdAt: product.created_at ?? "",
+    score: overall,
+    badge: String(badgeForProduct(product, overall)),
+    // Searched as one lower-cased blob: title, theme, id, the printed quote and
+    // its citation, and the listing's tags — the words Sheraj would actually
+    // type to find a piece again.
+    search: [
+      product.title, product.theme, product.id,
+      card?.quote, card?.citation, card?.language_name,
+      listing?.bookmark_quote, listing?.description, (listing?.tags ?? []).join(" "),
+      product.etsy_listing_id ? `etsy ${product.etsy_listing_id}` : "",
+    ].filter(Boolean).join(" ").toLowerCase(),
+    product,
+  };
+}
+
+function videoItem(video: FinishedVideo): GalleryItem {
+  return {
+    kind: "video",
+    id: video.id,
+    type: "video",
+    title: video.title,
+    createdAt: video.created_at ?? "",
+    score: null,
+    badge: null,
+    search: [video.title, video.id, "video", video.source_kind]
+      .filter(Boolean).join(" ").toLowerCase(),
+    video,
+  };
+}
+
+function GalleryToolbar({
+  search, onSearch, kind, onKind, badge, onBadge, sort, onSort,
+  counts, showing, total, onClear,
+}: {
+  search: string; onSearch: (v: string) => void;
+  kind: string; onKind: (v: string) => void;
+  badge: string; onBadge: (v: string) => void;
+  sort: string; onSort: (v: string) => void;
+  counts: Record<string, number>; showing: number; total: number; onClear: () => void;
+}) {
+  const filtered = search.trim() !== "" || kind !== "all" || badge !== "all";
+  const select =
+    "rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200";
+
+  return (
+    <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+          <input
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+            placeholder="Search titles, themes, quotes, tags..."
+            className="w-full rounded-lg border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-slate-100 placeholder-slate-600"
+          />
+        </div>
+        <select value={badge} onChange={(e) => onBadge(e.target.value)} className={select}>
+          <option value="all">Any review result</option>
+          {BADGE_FILTERS.map((b) => (
+            <option key={b} value={b}>{b.charAt(0) + b.slice(1).toLowerCase()}</option>
+          ))}
+        </select>
+        <select value={sort} onChange={(e) => onSort(e.target.value)} className={select}>
+          {SORTS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        {KIND_FILTERS.map(({ id, label }) => (
+          <button
+            key={id}
+            onClick={() => onKind(id)}
+            className={
+              "rounded-lg border px-3 py-1.5 text-xs transition-colors " +
+              (kind === id
+                ? "border-amber-400/40 bg-amber-400/10 text-amber-200"
+                : "border-slate-700 bg-slate-800/40 text-slate-400 hover:text-slate-200")
+            }
+          >
+            {label} <span className="font-mono text-[10px] text-slate-500">{counts[id] ?? 0}</span>
+          </button>
+        ))}
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs text-slate-500">
+            Showing {showing} of {total}
+          </span>
+          {filtered && (
+            <button onClick={onClear} className="text-xs text-amber-300 hover:underline">
+              Clear filters
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* A video has no review score, so a score filter can never honestly
+          include one — say so rather than letting them quietly disappear. */}
+      {badge !== "all" && kind !== "video" && counts.video > 0 && (
+        <p className="text-xs text-slate-500">
+          Videos are hidden while you filter by review result — they're reviewed shot by shot in
+          the Video tab, not scored out of 10.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ── Gallery ───────────────────────────────────────────────────────────────────
 
-export function ProductsGallery() {
-  const [openId, setOpenId] = useState<string | null>(null);
+export function ProductsGallery({ onNavigate }: { onNavigate?: (tab: Tab) => void } = {}) {
+  const [open, setOpen] = useState<{ kind: "product" | "video"; id: string } | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [duplex, setDuplex] = useState(true);
+
+  // The chosen view persists across tab switches; the typed search does not
+  // (see settings.ts — coming back to an empty-looking shelf is the failure).
+  const [search, setSearch] = useState("");
+  const [kindFilter, setKindFilter] = useState(() => getProductsUi().kind);
+  const [badgeFilter, setBadgeFilter] = useState(() => getProductsUi().badge);
+  const [sort, setSort] = useState(() => getProductsUi().sort);
+
+  const setKind = (v: string) => { setKindFilter(v); patchProductsUi({ kind: v }); };
+  const setBadge = (v: string) => { setBadgeFilter(v); patchProductsUi({ badge: v }); };
+  const setSortBy = (v: string) => { setSort(v); patchProductsUi({ sort: v }); };
+  const clearFilters = () => { setSearch(""); setKind("all"); setBadge("all"); };
 
   const products = useQuery({
     queryKey: ["products"],
     queryFn: api.getProducts,
+    refetchInterval: 30_000,
+  });
+
+  // Finished videos come from the video project store, not the products table.
+  const videos = useQuery({
+    queryKey: ["finished-videos"],
+    queryFn: api.getFinishedVideos,
     refetchInterval: 30_000,
   });
 
@@ -837,7 +1186,46 @@ export function ProductsGallery() {
     );
   };
 
-  const open = products.data?.find((p) => p.id === openId) ?? null;
+  const items = useMemo<GalleryItem[]>(() => [
+    ...(products.data ?? []).map(productItem),
+    ...(videos.data?.videos ?? []).map(videoItem),
+  ], [products.data, videos.data]);
+
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: items.length, bookmark: 0, quote_card: 0, video: 0 };
+    for (const item of items) c[item.type] += 1;
+    return c;
+  }, [items]);
+
+  const visible = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    const filtered = items.filter((item) => {
+      if (kindFilter !== "all" && item.type !== kindFilter) return false;
+      // A video carries no review score, so it can never match a score filter.
+      if (badgeFilter !== "all" && item.badge !== badgeFilter) return false;
+      if (needle && !item.search.includes(needle)) return false;
+      return true;
+    });
+    const byDate = (a: GalleryItem, b: GalleryItem) => a.createdAt.localeCompare(b.createdAt);
+    const sorted = [...filtered];
+    if (sort === "oldest") sorted.sort(byDate);
+    else if (sort === "title") sorted.sort((a, b) => a.title.localeCompare(b.title));
+    else if (sort === "score" || sort === "score_low") {
+      // Unscored videos sort to the end either way — they aren't "a zero".
+      sorted.sort((a, b) => {
+        if (a.score === null && b.score === null) return -byDate(a, b);
+        if (a.score === null) return 1;
+        if (b.score === null) return -1;
+        return sort === "score" ? b.score - a.score : a.score - b.score;
+      });
+    } else sorted.sort((a, b) => -byDate(a, b));
+    return sorted;
+  }, [items, search, kindFilter, badgeFilter, sort]);
+
+  const openProduct = open?.kind === "product"
+    ? products.data?.find((p) => p.id === open.id) ?? null : null;
+  const openVideo = open?.kind === "video"
+    ? videos.data?.videos.find((v) => v.id === open.id) ?? null : null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -975,33 +1363,73 @@ export function ProductsGallery() {
           8765?
         </ErrorNote>
       )}
-      {products.data?.length === 0 && (
+      {/* The videos live behind their own endpoint — if it fails, say so instead
+          of quietly showing a shelf that's missing them. */}
+      {videos.isError && (
+        <ErrorNote>
+          Could not load finished videos: {(videos.error as Error).message}
+        </ErrorNote>
+      )}
+
+      {items.length > 0 && (
+        <GalleryToolbar
+          search={search} onSearch={setSearch}
+          kind={kindFilter} onKind={setKind}
+          badge={badgeFilter} onBadge={setBadge}
+          sort={sort} onSort={setSortBy}
+          counts={counts} showing={visible.length} total={items.length}
+          onClear={clearFilters}
+        />
+      )}
+
+      {!products.isLoading && items.length === 0 && (
         <Card>
           <CardContent className="pt-5 text-sm text-slate-400">
             No products yet. Head to the Pipeline tab and give the team its first theme.
           </CardContent>
         </Card>
       )}
+      {items.length > 0 && visible.length === 0 && (
+        <Card>
+          <CardContent className="flex flex-wrap items-center gap-3 pt-5 text-sm text-slate-400">
+            Nothing matches these filters.
+            <button onClick={clearFilters} className="text-amber-300 hover:underline">
+              Clear them
+            </button>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
-        {products.data?.map((p) => (
-          <ProductCard
-            key={p.id}
-            product={p}
-            onOpen={() => setOpenId(p.id)}
-            selected={selectedIds.includes(p.id)}
-            onToggleSelect={() => handleToggleSelect(p.id)}
-          />
-        ))}
+        {visible.map((item) =>
+          item.kind === "product" ? (
+            <ProductCard
+              key={item.id}
+              product={item.product}
+              onOpen={() => setOpen({ kind: "product", id: item.id })}
+              selected={selectedIds.includes(item.id)}
+              onToggleSelect={() => handleToggleSelect(item.id)}
+            />
+          ) : (
+            <VideoCard
+              key={`v-${item.id}`}
+              video={item.video}
+              onOpen={() => setOpen({ kind: "video", id: item.id })}
+            />
+          )
+        )}
       </div>
 
-      {open && (
+      {openProduct && (
         <ProductDrawer
-          product={open}
-          onClose={() => setOpenId(null)}
+          product={openProduct}
+          onClose={() => setOpen(null)}
           selectedIds={selectedIds}
-          onToggleSelect={() => handleToggleSelect(open.id)}
+          onToggleSelect={() => handleToggleSelect(openProduct.id)}
         />
+      )}
+      {openVideo && (
+        <VideoDrawer video={openVideo} onClose={() => setOpen(null)} onNavigate={onNavigate} />
       )}
     </div>
   );

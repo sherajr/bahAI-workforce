@@ -9,6 +9,7 @@ Usage:
 """
 
 import base64
+import json
 import os
 import time
 import requests
@@ -64,8 +65,33 @@ def record_api_spend(kind: str):
     record_spend(kind, EST_COST_USD.get(kind, 0.0))
 
 
+def _resolve_route(task_type: str, agent: str | None) -> tuple[str, str]:
+    """
+    (provider, model) for this call — the per-agent override if one is set,
+    otherwise exactly what task_type alone would have chosen.
+
+    Imported lazily and failing open: agents.models imports FROM this module,
+    and a model registry that can't be read must never take a pipeline down
+    with it. No override configured is the overwhelmingly common path and
+    returns today's routing unchanged.
+    """
+    if not agent:
+        return ("grok" if task_type in GROK_TASK_TYPES else "ollama",
+                XAI_MODEL if task_type in GROK_TASK_TYPES else OLLAMA_MODEL)
+    try:
+        from agents.models import resolve
+        provider, model, note = resolve(task_type, agent)
+        if note:
+            print(f"[router] {note}")
+        return ("grok" if provider == "xai" else "ollama"), model
+    except Exception:
+        return ("grok" if task_type in GROK_TASK_TYPES else "ollama",
+                XAI_MODEL if task_type in GROK_TASK_TYPES else OLLAMA_MODEL)
+
+
 def call_llm(task_type: str, messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096,
-             json_mode: bool = False, timeout: int | None = None) -> str:
+             json_mode: bool = False, timeout: int | None = None,
+             agent: str | None = None) -> str:
     """
     Send messages to the right LLM based on task_type.
     Returns the assistant's reply as a string.
@@ -76,18 +102,27 @@ def call_llm(task_type: str, messages: list[dict], temperature: float = 0.7, max
     generations. The video Director's shot planning needs this: its prompts ask
     for several hundred words of detail and routinely run past the 120s default
     on a busy GPU, which surfaced as a read timeout mid-plan.
+
+    agent (optional) is the agent making the call — "scribe", "reviewer", and
+    so on. When that agent has a model saved in the Colony tab, it wins over
+    the task_type default; otherwise routing is unchanged. Task types are
+    shared between agents ("creative_writing" is both the Artist and the
+    Translator), which is exactly why the agent has to be passed explicitly
+    rather than reverse-derived from the task type.
     """
-    if task_type in GROK_TASK_TYPES:
+    provider, model = _resolve_route(task_type, agent)
+    if provider == "grok":
         return _call_grok(messages, temperature, max_tokens, json_mode=json_mode,
-                          timeout=timeout)
+                          timeout=timeout, model=model)
     return _call_ollama(messages, temperature, max_tokens, json_mode=json_mode,
-                        timeout=timeout)
+                        timeout=timeout, model=model)
 
 
 def _call_ollama(messages: list[dict], temperature: float, max_tokens: int,
-                 json_mode: bool = False, timeout: int | None = None) -> str:
+                 json_mode: bool = False, timeout: int | None = None,
+                 model: str | None = None) -> str:
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model or OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
         # Qwen3 is a hybrid-thinking model: by default it spends part of its
@@ -174,7 +209,7 @@ def call_grok_vision(image_path: str | list[str], prompt: str, system: str = Non
 
 
 def call_claude(messages: list[dict], system: str = None, max_tokens: int = 2048,
-                _attempt: int = 0) -> str:
+                _attempt: int = 0, model: str | None = None) -> str:
     """
     Claude Sonnet via the official Anthropic SDK — the Secretary's brain.
     Every call is metered as "claude_chat" (hard rule: her spend shows in the
@@ -190,7 +225,7 @@ def call_claude(messages: list[dict], system: str = None, max_tokens: int = 2048
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     try:
         response = client.messages.create(
-            model=ANTHROPIC_MODEL,
+            model=model or ANTHROPIC_MODEL,
             max_tokens=max_tokens,
             system=system or anthropic.NOT_GIVEN,
             thinking={"type": "disabled"},
@@ -200,13 +235,13 @@ def call_claude(messages: list[dict], system: str = None, max_tokens: int = 2048
         if _attempt < 2:
             time.sleep(3 * (_attempt + 1))
             return call_claude(messages, system=system, max_tokens=max_tokens,
-                               _attempt=_attempt + 1)
+                               _attempt=_attempt + 1, model=model)
         raise
     except anthropic.APIStatusError as e:
         if e.status_code >= 500 and _attempt < 2:
             time.sleep(3 * (_attempt + 1))
             return call_claude(messages, system=system, max_tokens=max_tokens,
-                               _attempt=_attempt + 1)
+                               _attempt=_attempt + 1, model=model)
         raise
     record_api_spend("claude_chat")
     if response.stop_reason == "refusal":
@@ -215,7 +250,7 @@ def call_claude(messages: list[dict], system: str = None, max_tokens: int = 2048
 
 
 def _claude_round(messages: list[dict], system: str, max_tokens: int, tools=None,
-                  tool_choice=None, _attempt: int = 0):
+                  tool_choice=None, _attempt: int = 0, model: str | None = None):
     """
     One metered Claude API call, shared by call_claude_agentic's rounds.
     Same retry-with-backoff shape as call_claude (router.py:142-176) — kept
@@ -228,7 +263,7 @@ def _claude_round(messages: list[dict], system: str, max_tokens: int, tools=None
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     kwargs = {
-        "model": ANTHROPIC_MODEL,
+        "model": model or ANTHROPIC_MODEL,
         "max_tokens": max_tokens,
         "system": system or anthropic.NOT_GIVEN,
         "thinking": {"type": "disabled"},
@@ -244,20 +279,23 @@ def _claude_round(messages: list[dict], system: str, max_tokens: int, tools=None
         if _attempt < 2:
             time.sleep(3 * (_attempt + 1))
             return _claude_round(messages, system, max_tokens, tools=tools,
-                                 tool_choice=tool_choice, _attempt=_attempt + 1)
+                                 tool_choice=tool_choice, _attempt=_attempt + 1,
+                                 model=model)
         raise
     except anthropic.APIStatusError as e:
         if e.status_code >= 500 and _attempt < 2:
             time.sleep(3 * (_attempt + 1))
             return _claude_round(messages, system, max_tokens, tools=tools,
-                                 tool_choice=tool_choice, _attempt=_attempt + 1)
+                                 tool_choice=tool_choice, _attempt=_attempt + 1,
+                                 model=model)
         raise
     record_api_spend("claude_chat")
     return response
 
 
 def call_claude_agentic(messages: list[dict], system: str, tools: list[dict],
-                        executor, max_tokens: int = 1500, max_rounds: int = 6) -> str:
+                        executor, max_tokens: int = 1500, max_rounds: int = 6,
+                        model: str | None = None) -> str:
     """
     Multi-round tool-calling loop for the Secretary. Every action she takes —
     read OR write — is a real Claude tool call executed here (CLAUDE.md rule 22;
@@ -293,6 +331,7 @@ def call_claude_agentic(messages: list[dict], system: str, tools: list[dict],
         response = _claude_round(
             working, system, max_tokens, tools=tools,
             tool_choice={"type": "none"} if forcing_final else None,
+            model=model,
         )
         if response.stop_reason == "refusal":
             return "I wasn't able to answer that one. Could you rephrase it for me?"
@@ -326,6 +365,161 @@ def call_claude_agentic(messages: list[dict], system: str, tools: list[dict],
     # happen given forcing_final above, but never leave the turn silent).
     return "\n\n".join(collected) or \
         "I'm having trouble finishing that thought — could you try asking again?"
+
+
+def _grok_tool_round(messages: list[dict], tools: list[dict], temperature: float,
+                     max_tokens: int, force_text: bool = False, _attempt: int = 0,
+                     model: str | None = None) -> dict:
+    """
+    One metered xAI call that may return tool calls. Returns the raw assistant
+    message dict (OpenAI-compatible shape: {role, content, tool_calls}).
+    """
+    headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": model or XAI_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "tools": tools,
+        "tool_choice": "none" if force_text else "auto",
+    }
+    try:
+        resp = requests.post(f"{XAI_BASE}/chat/completions", headers=headers, json=payload,
+                             timeout=210)
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        if _attempt < 2 and e.response is not None and \
+                e.response.status_code in (429, 500, 502, 503):
+            time.sleep(3 * (_attempt + 1))
+            return _grok_tool_round(messages, tools, temperature, max_tokens,
+                                    force_text=force_text, _attempt=_attempt + 1,
+                                    model=model)
+        raise
+    record_api_spend("grok_chat")
+    return resp.json()["choices"][0]["message"]
+
+
+def _ollama_tool_round(messages: list[dict], tools: list[dict], temperature: float,
+                       max_tokens: int, force_text: bool = False,
+                       timeout: int | None = None, model: str | None = None) -> dict:
+    """
+    One local Ollama call that may return tool calls. Returns the raw assistant
+    message dict (Ollama shape: {role, content, tool_calls}).
+
+    force_text drops the tools from the request entirely — Ollama has no
+    tool_choice parameter, and a model with no tools available cannot call one,
+    which is exactly what the final forced round needs.
+    """
+    payload = {
+        "model": model or OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": False,  # same reason as _call_ollama — see its comment
+        "options": {"temperature": temperature, "num_predict": max(max_tokens, 2000)},
+    }
+    if tools and not force_text:
+        payload["tools"] = tools
+    resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=timeout or 180)
+    resp.raise_for_status()
+    return resp.json()["message"]
+
+
+def _normalize_tool_calls(message: dict) -> list[dict]:
+    """
+    Flatten either provider's tool-call shape into [{id, name, arguments}].
+
+    Grok returns arguments as a JSON STRING; Ollama returns them as an already
+    decoded dict. Normalising here means the executor contract is identical for
+    both, so a tool works the same whether the agent runs local or paid.
+    """
+    calls = []
+    for i, call in enumerate(message.get("tool_calls") or []):
+        fn = call.get("function", {})
+        raw_args = fn.get("arguments", {})
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args) if raw_args.strip() else {}
+            except json.JSONDecodeError:
+                args = {"_raw": raw_args}
+        else:
+            args = raw_args or {}
+        calls.append({
+            "id": call.get("id") or f"call_{i}",
+            "name": fn.get("name", ""),
+            "arguments": args if isinstance(args, dict) else {"_raw": args},
+        })
+    return calls
+
+
+def call_llm_agentic(task_type: str, messages: list[dict], system: str, tools: list[dict],
+                     executor, temperature: float = 0.7, max_tokens: int = 1200,
+                     max_rounds: int = 4, timeout: int | None = None,
+                     agent: str | None = None) -> str:
+    """
+    Multi-round tool-calling loop for the WORKFORCE agents (the Colony tab's
+    per-agent chat), routed by task_type exactly like call_llm — Grok for
+    GROK_TASK_TYPES, local Ollama for everything else.
+
+    This exists because hard rule 16 reserves Claude for the Secretary alone:
+    Ruth, Theo, Clara, Amos, Nora and Sofia cannot borrow call_claude_agentic,
+    so they need their own loop on their own models. It deliberately mirrors
+    that function's contract — same executor signature, same hard round cap,
+    same forced-final-round termination, same every-round-metered rule (a
+    3-round tool conversation must show 3 spend entries, not one) — and the
+    same reason for real tool calls over parsed text tags (rule 22).
+
+    Differences forced by the providers, not by preference:
+      - `tools` are OpenAI-style function schemas (both xAI and Ollama take
+        this shape), not Anthropic's.
+      - max_rounds defaults LOWER than the Secretary's 6. Local Qwen holds a
+        much tighter context than Sonnet (rule 1) and every round appends
+        another tool result to it; 4 keeps a chat turn inside its budget.
+
+    `executor(name, arguments) -> str` must never raise — return an error
+    string instead, which comes back as an ordinary tool result the model can
+    respond to in its own words.
+    """
+    # Same per-agent override as call_llm — an agent chatting in the Colony
+    # must run on the model it was assigned, not on the task-type default.
+    provider, model = _resolve_route(task_type, agent)
+    use_grok = provider == "grok"
+    working = [{"role": "system", "content": system}] + list(messages)
+    collected: list[str] = []
+
+    for round_num in range(max_rounds):
+        forcing_final = round_num == max_rounds - 1
+        if use_grok:
+            reply = _grok_tool_round(working, tools, temperature, max_tokens,
+                                     force_text=forcing_final, model=model)
+        else:
+            reply = _ollama_tool_round(working, tools, temperature, max_tokens,
+                                       force_text=forcing_final, timeout=timeout,
+                                       model=model)
+
+        text = (reply.get("content") or "").strip()
+        if text:
+            collected.append(text)
+        calls = _normalize_tool_calls(reply)
+        if not calls or forcing_final:
+            return "\n\n".join(collected) or (
+                "I'm having trouble finishing that thought — could you ask me again?")
+
+        # Echo the assistant turn back verbatim so the model sees its own calls.
+        working.append(reply)
+        for call in calls:
+            try:
+                result_text = executor(call["name"], call["arguments"])
+            except Exception as e:  # an executor that raises must not kill the turn
+                result_text = f"Tool error ({type(e).__name__}): {e}"
+            result_msg = {"role": "tool", "content": str(result_text)}
+            if use_grok:
+                # xAI matches results to calls by id; Ollama matches by order.
+                result_msg["tool_call_id"] = call["id"]
+            result_msg["name"] = call["name"]
+            working.append(result_msg)
+
+    return "\n\n".join(collected) or \
+        "I'm having trouble finishing that thought — could you ask me again?"
 
 
 def get_embedding(text: str) -> list[float]:

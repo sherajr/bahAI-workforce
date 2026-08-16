@@ -215,7 +215,7 @@ def analyze_story(source_text: str, direction: dict | None = None,
     raw = call_llm(_TASK, [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
-    ], temperature=0.6, max_tokens=2200, json_mode=True, timeout=ANALYSIS_TIMEOUT_S)
+    ], temperature=0.6, max_tokens=2200, json_mode=True, timeout=ANALYSIS_TIMEOUT_S, agent="director")
     data = _extract_json(raw)
     if not isinstance(data, dict):
         raise ValueError("Story analysis did not return a JSON object.")
@@ -287,7 +287,7 @@ def build_continuity_bible(analysis: dict, direction: dict | None = None) -> dic
     raw = call_llm(_TASK, [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
-    ], temperature=0.5, max_tokens=3200, json_mode=True, timeout=BIBLE_TIMEOUT_S)
+    ], temperature=0.5, max_tokens=3200, json_mode=True, timeout=BIBLE_TIMEOUT_S, agent="director")
     data = _extract_json(raw)
     if not isinstance(data, dict):
         raise ValueError("Continuity bible did not return a JSON object.")
@@ -545,7 +545,7 @@ def plan_beat_shots(beat: dict, analysis: dict, continuity: dict,
         raw = call_llm(_TASK, [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
-        ], temperature=0.7, max_tokens=max_tokens, json_mode=True, timeout=SHOT_TIMEOUT_S)
+        ], temperature=0.7, max_tokens=max_tokens, json_mode=True, timeout=SHOT_TIMEOUT_S, agent="director")
         data = _extract_json(raw)
         raw_shots = data.get("shots") if isinstance(data, dict) else data
         if not isinstance(raw_shots, list) or not raw_shots:

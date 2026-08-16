@@ -102,6 +102,7 @@ def translate_quote(quote_en: str, lang_code: str) -> dict:
     raw = call_llm(
         "creative_writing",
         [{"role": "user", "content": prompt}],
+        agent="translator",
         temperature=0.3,
         max_tokens=500,
         json_mode=True,

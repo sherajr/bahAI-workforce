@@ -485,6 +485,145 @@ def test_export():
     video_store.delete_project(pid)
 
 
+# ── 7b. Finished videos on the Products shelf ────────────────────────────────
+
+def test_finished_shelf():
+    section("Finished videos on the Products shelf")
+    outputs = video_assembly.OUTPUTS_DIR
+    made: list[Path] = []
+
+    def temp_file(name: str, content: bytes = b"x") -> Path:
+        path = outputs / name
+        path.write_bytes(content)
+        made.append(path)
+        return path
+
+    # 1. Planned but never assembled — nothing to put on a shelf.
+    unfinished = video_store.create_project(title="TEST unfinished", source_text="x")
+    video_store.replace_shots(unfinished, [{"subject": "one", "duration": 3.5}])
+
+    # 2. Really finished: an mp4 on disk, two clips, one real first frame.
+    done = video_store.create_project(title="TEST finished", source_text="x")
+    shot_ids = video_store.replace_shots(done, [
+        {"subject": "one", "duration": 3.5},
+        {"subject": "two", "duration": 4.0},
+        {"subject": "three (never rendered)", "duration": 3.5},
+    ])
+    frame = temp_file(f"test-shelf-{done}-frame.png")
+    for shot_id in shot_ids[:2]:
+        clip = temp_file(f"test-shelf-{shot_id}.mp4")
+        video_store.update_shot(shot_id, clip_path=str(clip), status="clip_ready")
+        video_store.add_asset(done, "clip", str(clip), shot_id=shot_id,
+                              meta={"is_mock": False})
+    video_store.update_shot(shot_ids[0], first_frame_path=str(frame))
+    video_path = temp_file(f"test-shelf-{done}.mp4")
+    meta_path = temp_file(f"test-shelf-{done}.json", b"{}")
+    video_store.update_project(done, status="complete", stage="export", export={
+        "project_id": done, "video_path": str(video_path),
+        "metadata_path": str(meta_path), "subtitles_path": None,
+        "clip_count": 2, "reason": "Joined 2 clips.",
+    })
+
+    # 3. Assembled once, but the file has since been deleted from outputs/.
+    gone = video_store.create_project(title="TEST deleted file", source_text="x")
+    video_store.update_project(gone, status="complete", export={
+        "project_id": gone, "video_path": str(outputs / "test-shelf-does-not-exist.mp4"),
+        "metadata_path": "", "subtitles_path": None, "clip_count": 1, "reason": "ok",
+    })
+
+    # 4. Built from mock clips — must be labelled all the way to the shelf.
+    mock = video_store.create_project(title="TEST mock", source_text="x")
+    mock_shots = video_store.replace_shots(mock, [{"subject": "one", "duration": 3.5}])
+    mock_clip = temp_file(f"test-shelf-{mock}-clip.mp4")
+    video_store.update_shot(mock_shots[0], clip_path=str(mock_clip))
+    video_store.add_asset(mock, "clip", str(mock_clip), shot_id=mock_shots[0],
+                          meta={"is_mock": True})
+    mock_video = temp_file(f"test-shelf-{mock}.mp4")
+    video_store.update_project(mock, status="complete", export={
+        "project_id": mock, "video_path": str(mock_video), "metadata_path": "",
+        "subtitles_path": None, "clip_count": 1, "reason": "Joined 1 clip.",
+    })
+
+    try:
+        listed = {v["id"]: v for v in video_assembly.list_finished()}
+        check("an assembled project appears on the shelf", done in listed)
+        check("a project that was never assembled does not", unfinished not in listed)
+        check("a project whose file was deleted does not",
+              gone not in listed, "a shelf entry must point at a file that exists")
+
+        item = listed.get(done, {})
+        check("the shelf counts the shots that really have clips",
+              item.get("clip_count") == 2 and item.get("shot_count") == 3)
+        # The stub .mp4 files here are one byte, so ffprobe (if installed) can't
+        # measure them: the shelf must fall back to the PLANNED length and say
+        # so, rather than reporting a measurement it doesn't have.
+        check("length falls back to the plan when the file can't be measured",
+              item.get("duration_seconds") == 7.5, str(item.get("duration_seconds")))
+        check("an unmeasured length is flagged as not measured",
+              item.get("duration_measured") is False)
+
+        # A length already measured for THIS file is reused, never re-probed.
+        video_store.update_project(done, export={
+            **(video_store.get_project(done)["export"] or {}),
+            "duration_seconds": 9.25, "duration_measured_for": str(video_path)})
+        remeasured = {v["id"]: v for v in video_assembly.list_finished()}[done]
+        check("a stored measurement for the same file is reused",
+              remeasured["duration_seconds"] == 9.2 and remeasured["duration_measured"] is True,
+              str(remeasured["duration_seconds"]))
+        video_store.update_project(done, export={
+            **(video_store.get_project(done)["export"] or {}),
+            "duration_measured_for": str(outputs / "some-older-render.mp4")})
+        stale = {v["id"]: v for v in video_assembly.list_finished()}[done]
+        check("a measurement taken from a DIFFERENT file is not reused",
+              stale["duration_seconds"] == 7.5, str(stale["duration_seconds"]))
+        check("the poster is a frame that exists on disk",
+              item.get("poster_path") == str(frame))
+        check("a real-provider video is not labelled mock", item.get("is_mock") is False)
+        check("the shelf carries the title and source kind",
+              item.get("title") == "TEST finished" and item.get("source_kind") == "scene_story")
+
+        check("a mock-built video is labelled mock end to end",
+              listed.get(mock, {}).get("is_mock") is True)
+
+        # The missing file is reportable, just never presented as playable.
+        with_missing = {v["id"]: v for v in video_assembly.list_finished(include_missing=True)}
+        check("include_missing reports the gap rather than hiding it",
+              with_missing.get(gone, {}).get("file_missing") is True)
+        check("an existing file is never flagged missing",
+              with_missing.get(done, {}).get("file_missing") is False)
+
+        # HTTP: the dashboard needs servable URLs, not Windows paths.
+        from fastapi.testclient import TestClient
+        from agents import api as api_module
+        client = TestClient(api_module.app)
+        r = client.get("/video/finished")
+        check("GET /video/finished responds", r.status_code == 200, r.text[:200])
+        api_items = {v["id"]: v for v in r.json()["videos"]}
+        check("the endpoint lists the finished video", done in api_items)
+        check("the endpoint hides the deleted-file video", gone not in api_items)
+        web = api_items.get(done, {})
+        check("video_url is a servable /outputs path",
+              str(web.get("video_url", "")).startswith("/outputs/")
+              and web["video_url"].endswith(".mp4"))
+        check("poster_url is a servable /outputs path",
+              str(web.get("poster_url", "")).startswith("/outputs/"))
+        check("metadata_url is a servable /outputs path",
+              str(web.get("metadata_url", "")).startswith("/outputs/"))
+        check("a subtitle track that was never written stays empty",
+              web.get("subtitles_url") == "")
+
+        # A video is NOT a product row — that would double-count it in the
+        # Steward's ledger and hand the print/Etsy actions a type they can't use.
+        product_ids = {p["id"] for p in client.get("/products").json()}
+        check("finished videos are not written into the products table",
+              done not in product_ids and mock not in product_ids)
+    finally:
+        for pid_ in (unfinished, done, gone, mock):
+            video_store.delete_project(pid_)
+        for path in made:
+            path.unlink(missing_ok=True)
+
+
 # ── 8. Validation findings ───────────────────────────────────────────────────
 
 def test_validation():
@@ -1483,6 +1622,7 @@ def main():
     test_provider_fallbacks()
     test_store()
     test_export()
+    test_finished_shelf()
     test_validation()
     test_decomposition_with_stub()
     test_llm_timeouts()

@@ -345,7 +345,8 @@ def _call_and_parse(system_prompt: str, user_message: str, fallback_title: str) 
     ]
     best = None
     for _ in range(3):
-        raw = call_llm("scribe", messages, temperature=0.7, max_tokens=1900, json_mode=True).strip()
+        raw = call_llm("scribe", messages, temperature=0.7, max_tokens=1900, json_mode=True,
+                    agent="scribe").strip()
         result = _parse_json(raw, fallback_title=fallback_title)
         if not _is_unusable(result, fallback_title):
             return _sanitize_claims(result)

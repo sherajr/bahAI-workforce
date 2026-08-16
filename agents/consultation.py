@@ -382,6 +382,7 @@ def _run_round(
         artist_msg = call_llm(
             "creative_writing",  # Artist stays on Grok per routing directive
             [{"role": "user", "content": artist_input}],
+            agent="artist",
             temperature=0.75,
             max_tokens=180,
         ).strip()
@@ -445,6 +446,7 @@ def _run_round(
     scribe_msg = call_llm(
         "scribe",
         [{"role": "user", "content": scribe_input}],
+        agent="scribe",
         temperature=0.85 if round_number == 1 else 0.6,
         max_tokens=300,
     ).strip()
@@ -529,6 +531,7 @@ def _run_round(
         reviewer_msg = call_llm(
             "reviewer",
             [{"role": "user", "content": reviewer_input}],
+            agent="reviewer",
             temperature=0.65,
             max_tokens=180,
         ).strip()
@@ -617,6 +620,7 @@ def _run_round(
         librarian_msg = call_llm(
             "librarian",
             [{"role": "user", "content": librarian_input}],
+            agent="librarian",
             temperature=0.2,
             max_tokens=300,
         ).strip()
@@ -1120,7 +1124,7 @@ def run_card_revision_consultation(
     )
     try:
         librarian_msg = call_llm(
-            "librarian", [{"role": "user", "content": librarian_prompt}],
+            "librarian", [{"role": "user", "content": librarian_prompt}], agent="librarian",
             temperature=0.3, max_tokens=220,
         ).strip()
     except Exception as e:
@@ -1172,7 +1176,7 @@ def run_card_revision_consultation(
     action, action_guidance, team_note = fallback_action, fallback_guidance, ""
     try:
         raw = call_llm(
-            "reviewer", [{"role": "user", "content": decision_prompt}],
+            "reviewer", [{"role": "user", "content": decision_prompt}], agent="reviewer",
             temperature=0.2, max_tokens=320, json_mode=True,
         ).strip()
         decision = json.loads(raw)
@@ -1374,7 +1378,7 @@ def run_x_post_revision_consultation(
     )
     try:
         librarian_msg = call_llm(
-            "librarian", [{"role": "user", "content": librarian_prompt}],
+            "librarian", [{"role": "user", "content": librarian_prompt}], agent="librarian",
             temperature=0.3, max_tokens=220,
         ).strip()
     except Exception as e:
@@ -1414,7 +1418,7 @@ def run_x_post_revision_consultation(
     action, action_guidance, team_note = fallback_action, "", ""
     try:
         raw = call_llm(
-            "reviewer", [{"role": "user", "content": decision_prompt}],
+            "reviewer", [{"role": "user", "content": decision_prompt}], agent="reviewer",
             temperature=0.2, max_tokens=320, json_mode=True,
         ).strip()
         decision = json.loads(raw)

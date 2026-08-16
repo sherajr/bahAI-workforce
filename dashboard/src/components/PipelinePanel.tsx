@@ -20,9 +20,42 @@ type PanelResult = PipelineResult | CardBatchResult;
 // UI mirror of the backend's _CARD_BATCH_MAX spend guard.
 const BATCH_MAX = 19;
 
+// Job kinds this panel knows how to display. A run of one of these is adopted
+// even when this tab didn't start it — Abigail launches one when Sheraj
+// approves her request, and a team goal launches one from the Colony. Before
+// this, such a run was genuinely invisible here (the panel only ever polled
+// the id it had just created itself), which read as "nothing happened" and led
+// to the same card being made twice. Kinds with a different result shape
+// (improve, x-post, write-approve) are deliberately not adopted.
+const ADOPTABLE_KINDS = new Set(["full-pipeline", "card-pipeline", "card-batch"]);
+
+const STARTED_BY_NOTE: Record<string, string> = {
+  abigail: "Abigail started this run for you, after you approved it.",
+  colony: "This run was started from a team goal in the Colony tab.",
+};
+
+// What a job actually is, so the mode on screen is read from the run rather
+// than from whatever this tab happened to have selected. A card batch running
+// under a control reading "Bookmark" is a small lie about what the team is
+// doing, and this panel is the one place Sheraj goes to find that out.
+const JOB_MODE: Record<string, PipelineKind> = {
+  "full-pipeline": "bookmark",
+  "card-pipeline": "quote_card",
+  "card-batch": "quote_card",
+};
+
+const JOB_MODE_LABEL: Record<string, string> = {
+  "full-pipeline": "Bookmark",
+  "card-pipeline": "Quote card",
+  "card-batch": "Quote cards (batch)",
+};
+
 export function PipelinePanel() {
   const [theme, setTheme] = useState("");
-  const [kind, setKind] = useState<PipelineKind>("bookmark");
+  // Quote cards are the default (owner ask, 2026-08-14): the giveaway line is
+  // the work that actually runs day to day, so the tab opens on it rather than
+  // on the Etsy listing pipeline.
+  const [kind, setKind] = useState<PipelineKind>("quote_card");
   const [language, setLanguage] = useState(""); // "" = English only
   // One entry per pinned quote. A single (or empty) entry is the classic run
   // with the mid-run check-in; 2+ non-empty entries queue a hands-free batch.
@@ -162,9 +195,47 @@ export function PipelinePanel() {
       ["running", "waiting_for_input"].includes(query.state.data?.status ?? "") ? 2500 : false,
   });
 
+  // Cancelling is a request, not an act: the worker stops at its next step
+  // boundary. The panel stays locked until the job itself reports "cancelled",
+  // so a new run can never be started on top of one still in the air.
+  const cancel = useMutation({
+    mutationFn: () => api.cancelJob(jobId as string),
+    onSuccess: () => jobQuery.refetch(),
+  });
+
   const job = jobQuery.data;
   const running = start.isPending || job?.status === "running" || job?.status === "waiting_for_input";
   const result = job?.status === "done" ? job.result : null;
+
+  // Adopt a run this tab didn't start. Polled cheaply (an in-memory list) and
+  // only ever takes over when nothing live is already on screen, so watching
+  // your own run is never interrupted by another one appearing.
+  const jobList = useQuery({
+    queryKey: ["pipeline-jobs"],
+    queryFn: api.getJobs,
+    refetchInterval: running ? false : 6000,
+    enabled: !running,
+  });
+
+  const watching = running ? job?.job_id : undefined;
+  useEffect(() => {
+    if (watching) return;
+    const live = (jobList.data ?? []).find(
+      (j) => ADOPTABLE_KINDS.has(j.kind) &&
+        (j.status === "running" || j.status === "waiting_for_input"));
+    if (!live || live.job_id === jobId) return;
+    setJobId(live.job_id);
+    setActiveJobId(live.job_id);
+  }, [jobList.data, jobId, watching]);
+
+  const startedNote = job && job.started_by ? STARTED_BY_NOTE[job.started_by] : undefined;
+
+  // While a run is in flight the mode follows the RUN, not the last thing
+  // clicked here — including a run this tab didn't start.
+  const jobMode = job ? JOB_MODE[job.kind] : undefined;
+  useEffect(() => {
+    if (running && jobMode) setKind(jobMode);
+  }, [running, jobMode]);
 
   // Once a run finishes, the products list is stale.
   const jobStatus = job?.status;
@@ -187,7 +258,21 @@ export function PipelinePanel() {
     <div className="mx-auto max-w-4xl space-y-5">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>{kind === "quote_card" ? "Create a quote card" : "Create a bookmark"}</CardTitle>
+          <CardTitle>
+            {running
+              ? `Making ${kind === "quote_card" ? "quote cards" : "a bookmark"}`
+              : kind === "quote_card" ? "Create a quote card" : "Create a bookmark"}
+          </CardTitle>
+          {/* While something is running this stops being a choice and becomes a
+              readout of what is actually being made — a disabled toggle still
+              showing "Bookmark" during a card batch said the wrong thing. */}
+          {running && job ? (
+            <span className="flex items-center gap-2 rounded-lg border border-amber-400/40
+                             bg-amber-400/10 px-3 py-1.5 text-xs font-medium text-amber-300">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {JOB_MODE_LABEL[job.kind] ?? job.kind} · running
+            </span>
+          ) : (
           <div className="flex overflow-hidden rounded-lg border border-slate-700 text-xs">
             {(
               [
@@ -198,6 +283,8 @@ export function PipelinePanel() {
               <button
                 key={k}
                 onClick={() => !running && setKind(k)}
+                // Covers the moment between pressing Start and the job arriving,
+                // when there is no job to read a mode off yet.
                 disabled={running}
                 className={
                   kind === k
@@ -209,6 +296,7 @@ export function PipelinePanel() {
               </button>
             ))}
           </div>
+          )}
         </CardHeader>
         <CardContent>
           <p className="mb-3 text-sm text-slate-400">
@@ -500,13 +588,62 @@ export function PipelinePanel() {
         </CardContent>
       </Card>
 
-      {job && (job.status === "running" || job.status === "waiting_for_input") && (
+      {job && job.status === "cancelled" && (
         <Card>
           <CardHeader className="flex flex-row items-center gap-2">
-            <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
-            <CardTitle>The team is at work</CardTitle>
+            <CardTitle>Run cancelled</CardTitle>
           </CardHeader>
           <CardContent>
+            <p className="text-sm text-slate-300">
+              Job {job.job_id} stopped. Anything it had already finished is kept — a
+              card completed before you cancelled is in Products, and artwork already
+              generated stays in <span className="font-mono text-xs">outputs/</span>.
+              Nothing half-made was saved.
+            </p>
+            <div className="mt-3">
+              <Button variant="secondary" onClick={() => { setJobId(null); setActiveJobId(null); }}>
+                Clear and start over
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {job && (job.status === "running" || job.status === "waiting_for_input") && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
+              <CardTitle>
+                {job.cancel_requested ? "Stopping the run" : "The team is at work"}
+              </CardTitle>
+            </div>
+            <Button
+              variant="ghost"
+              onClick={() => cancel.mutate()}
+              disabled={cancel.isPending || job.cancel_requested}
+              className="px-3 py-1.5 text-xs text-slate-400 hover:text-rose-300"
+            >
+              {job.cancel_requested ? "Stopping…" : "Cancel run"}
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {/* Whose run this is. A job you didn't start yourself has to say so
+                — otherwise the only honest reading of a busy panel is "I must
+                have started this", which is how one card got made twice. */}
+            {startedNote && (
+              <p className="mb-3 rounded-lg border border-violet-400/25 bg-violet-400/5 px-3 py-2
+                            text-xs text-violet-200">
+                {startedNote} You don't need to start it again.
+              </p>
+            )}
+            {job.cancel_requested && (
+              <p className="mb-3 rounded-lg border border-rose-400/25 bg-rose-400/5 px-3 py-2
+                            text-xs text-rose-200">
+                Stopping — the step already running has to finish first (a call in flight
+                can't be pulled back). Nothing new will start.
+              </p>
+            )}
             <p className="mb-3 text-sm font-medium text-amber-200">{job.progress}</p>
             <ol className="space-y-1.5">
               {job.steps.map((s, i) => {

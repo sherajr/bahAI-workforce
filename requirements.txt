@@ -14,6 +14,12 @@ chromadb>=0.5           # vector_store/ — agents/librarian.py, scripts/ingest_
 chonkie>=0.2             # text chunking — scripts/ingest_texts.py
 beautifulsoup4>=4.12     # HTML scraping — scripts/download_texts.py
 pypdf>=6.0               # PDF text extraction — scripts/verify_ruhi_book1.py
+eth-account>=0.13        # wallet signing — agents/wallet.py. HARD dependency of SENDING
+                         # only: balances, history, the receive address and the whole
+                         # safety layer work without it, and wallet.sending_available()
+                         # reports its absence up front rather than failing mid-transfer.
+                         # Deliberately eth-account alone, not full web3.py — reads are
+                         # raw JSON-RPC, so this is the minimum surface that touches keys.
 av>=12.0                 # video frame extraction — agents/videographer.extract_last_frame.
                          # HARD dependency of chained generation: without it every
                          # link degrades to an independently-generated shot, i.e. the

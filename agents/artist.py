@@ -61,7 +61,7 @@ def build_image_prompt(theme: str, citations: list[dict] | None = None) -> str:
     return call_llm("design", [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_message},
-    ], temperature=0.8, max_tokens=300).strip()
+    ], temperature=0.8, max_tokens=300, agent="artist").strip()
 
 
 def build_card_image_prompt(theme: str, citations: list[dict] | None = None) -> str:
@@ -100,7 +100,7 @@ def build_card_image_prompt(theme: str, citations: list[dict] | None = None) -> 
     return call_llm("design", [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_message},
-    ], temperature=0.8, max_tokens=300).strip()
+    ], temperature=0.8, max_tokens=300, agent="artist").strip()
 
 
 def build_x_post_image_prompt(topic: str, mood: str) -> str:
@@ -126,7 +126,7 @@ def build_x_post_image_prompt(topic: str, mood: str) -> str:
     return call_llm("design", [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_message},
-    ], temperature=0.8, max_tokens=250).strip()
+    ], temperature=0.8, max_tokens=250, agent="artist").strip()
 
 
 def _save_image_locally(image_bytes: bytes, prefix: str = "bookmark") -> Path:

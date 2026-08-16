@@ -79,6 +79,80 @@ export function patchVideoUi(patch: Partial<VideoUiState>) {
   localStorage.setItem(VIDEO_KEY, JSON.stringify(next));
 }
 
+// Products tab filters. The shelf holds bookmarks, quote cards AND finished
+// videos now, so "which kind am I looking at" and "how is it sorted" are
+// standing preferences worth keeping across tab switches.
+//
+// The SEARCH TEXT is deliberately NOT persisted: a typed query is momentary,
+// and coming back to a nearly-empty shelf because of a search you forgot you
+// typed is the one failure this whole bar exists to avoid.
+export interface ProductsUiState {
+  kind: string;   // "all" | "bookmark" | "quote_card" | "video"
+  badge: string;  // "all" | EXCEPTIONAL | APPROVED | BORDERLINE | REJECTED | BEST EFFORT
+  sort: string;   // "newest" | "oldest" | "score" | "score_low" | "title"
+}
+
+const PRODUCTS_KEY = "bahai.workforce.productsUi";
+export const DEFAULT_PRODUCTS_UI: ProductsUiState = {
+  kind: "all", badge: "all", sort: "newest",
+};
+
+export function getProductsUi(): ProductsUiState {
+  try {
+    const raw = localStorage.getItem(PRODUCTS_KEY);
+    if (!raw) return DEFAULT_PRODUCTS_UI;
+    const p = JSON.parse(raw) as Partial<ProductsUiState>;
+    return {
+      kind: typeof p.kind === "string" ? p.kind : "all",
+      badge: typeof p.badge === "string" ? p.badge : "all",
+      sort: typeof p.sort === "string" ? p.sort : "newest",
+    };
+  } catch {
+    return DEFAULT_PRODUCTS_UI;
+  }
+}
+
+export function patchProductsUi(patch: Partial<ProductsUiState>) {
+  const next = { ...getProductsUi(), ...patch };
+  localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
+}
+
+// Colony tab UI state — same reasoning as the Video tab above: switching tabs
+// unmounts the panel, and losing the selected agent, the open view and a
+// running team consultation every time you look elsewhere makes it unusable.
+export interface ColonyUiState {
+  view: string | null;      // "map" | "performance" | "handoffs" | "goals"
+  agent: string | null;     // selected agent id
+  team: string | null;      // selected team id
+  consultJobId: string | null;
+}
+
+const COLONY_KEY = "bahai.workforce.colonyUi";
+const EMPTY_COLONY_UI: ColonyUiState = {
+  view: null, agent: null, team: null, consultJobId: null,
+};
+
+export function getColonyUi(): ColonyUiState {
+  try {
+    const raw = localStorage.getItem(COLONY_KEY);
+    if (!raw) return EMPTY_COLONY_UI;
+    const p = JSON.parse(raw) as Partial<ColonyUiState>;
+    return {
+      view: typeof p.view === "string" ? p.view : null,
+      agent: typeof p.agent === "string" ? p.agent : null,
+      team: typeof p.team === "string" ? p.team : null,
+      consultJobId: typeof p.consultJobId === "string" ? p.consultJobId : null,
+    };
+  } catch {
+    return EMPTY_COLONY_UI;
+  }
+}
+
+export function patchColonyUi(patch: Partial<ColonyUiState>) {
+  const next = { ...getColonyUi(), ...patch };
+  localStorage.setItem(COLONY_KEY, JSON.stringify(next));
+}
+
 function clamp(n: number, lo: number, hi: number): number {
   return isNaN(n) ? lo : Math.min(hi, Math.max(lo, n));
 }

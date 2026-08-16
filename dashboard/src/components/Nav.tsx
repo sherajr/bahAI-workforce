@@ -1,11 +1,15 @@
 import {
-  Sparkles, Images, Handshake, Settings, MessageCircleHeart, Send, Clapperboard,
+  Sparkles, Images, Orbit, Settings, MessageCircleHeart, Send, Clapperboard,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { NineStar } from "./NineStar";
 import { RosterAvatar } from "./ui";
 
-export type Tab = "pipeline" | "products" | "video" | "x-posts" | "secretary" | "trust" | "settings";
+// "trust" became "colony" (2026-08-13): the tab grew from a trust scoreboard
+// into the whole workforce — performance, handoffs, per-agent chat and
+// settings, team goals and team consultation. The trust scores and the product
+// quality history still live inside it, under Performance.
+export type Tab = "pipeline" | "products" | "video" | "x-posts" | "secretary" | "colony" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Sparkles; avatar?: string }[] = [
   { id: "pipeline", label: "Pipeline", icon: Sparkles },
@@ -13,7 +17,7 @@ const TABS: { id: Tab; label: string; icon: typeof Sparkles; avatar?: string }[]
   { id: "video", label: "Video", icon: Clapperboard },
   { id: "x-posts", label: "Post to X", icon: Send },
   { id: "secretary", label: "Abigail", icon: MessageCircleHeart, avatar: "/abigail.jpg" },
-  { id: "trust", label: "Trust", icon: Handshake },
+  { id: "colony", label: "Colony", icon: Orbit },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 

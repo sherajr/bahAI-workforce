@@ -5,7 +5,10 @@ import { API_ORIGIN, api } from "../lib/api";
 import { getSettings, saveSettings } from "../lib/settings";
 import { Button, Card, CardContent, CardHeader, CardTitle } from "./ui";
 
-const GROK_TASKS = ["copy", "copywriting", "review", "creative_writing", "complex_analysis", "scribe", "reviewer", "librarian"];
+// Must match router.GROK_TASK_TYPES. The previous list here named six task
+// types ("copy", "scribe", "librarian", …) that have always run LOCALLY, so
+// this card told Sheraj he was paying for work that was in fact free.
+const GROK_TASKS = ["creative_writing", "reviewer"];
 
 export function SettingsPanel() {
   const [settings, setSettings] = useState(getSettings());
@@ -127,13 +130,19 @@ export function SettingsPanel() {
           <CardTitle>Model routing</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          {/* This card used to claim routing was "fixed in router.py" and listed
+              task types that were not actually routed to Grok, and credited
+              vision to Claude Haiku when it goes to Grok. Both were wrong even
+              before per-agent model choice existed. Kept accurate here, with
+              the per-agent picker named as the place to change it. */}
           <p className="text-slate-400">
-            Fixed in <span className="font-mono text-xs">agents/router.py</span> — shown here for
-            reference.
+            These are the defaults. Any agent can be moved to a different model
+            individually — open the <span className="text-slate-200">Colony</span> tab, pick them,
+            and use the Model setting.
           </p>
           <div>
             <div className="text-xs uppercase tracking-widest text-slate-500">
-              xAI Grok (creative, review, verification)
+              Paid — xAI Grok
             </div>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {GROK_TASKS.map((t) => (
@@ -142,12 +151,19 @@ export function SettingsPanel() {
                 </span>
               ))}
             </div>
+            <p className="mt-1.5 text-xs text-slate-500">
+              Theo's and Amos's writing, plus every translation.
+            </p>
           </div>
           <p className="text-slate-400">
-            Everything else runs locally on{" "}
-            <span className="font-mono text-xs text-slate-300">Ollama / qwen3-16k</span> — free,
-            private, on your RTX GPU. Image vision uses Claude Haiku; image generation uses
-            xAI Grok-imagine.
+            Everyone else runs locally on{" "}
+            <span className="font-mono text-xs text-slate-300">Ollama / qwen3-16k</span> — free and
+            private, on your own GPU.
+          </p>
+          <p className="text-xs text-slate-500">
+            Reading images (Amos scoring a printed face) and generating artwork both go to xAI
+            on their own paid paths, whichever model an agent is set to. Abigail runs on Claude
+            and only ever on Claude.
           </p>
         </CardContent>
       </Card>

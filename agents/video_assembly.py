@@ -406,10 +406,129 @@ def assemble_draft(project_id: str, only_approved: bool = False,
 
     result["video_path"] = str(out_path)
     result["reason"] = f"Joined {len(usable)} clips" + (" with crossfades." if crossfade else ".")
+    # Measure the finished file here, while we already know it just changed —
+    # the Products shelf then reports a real length without probing on read.
+    probed = _probe_seconds(str(out_path))
+    if probed is not None:
+        result["duration_seconds"] = round(probed, 1)
+        result["duration_measured_for"] = str(out_path)
     video_store.add_asset(project_id, "draft_video", str(out_path),
                           meta={"clips": len(usable), "crossfade": crossfade})
     video_store.update_project(project_id, export=result, stage="export", status="complete")
     return result
+
+
+def list_finished(include_missing: bool = False) -> list[dict]:
+    """
+    Every video project that has a REAL assembled file on disk, described for
+    the Products shelf.
+
+    Derived on read from video_projects/video_shots/video_assets — a finished
+    video is never copied into a second store (the same discipline as the
+    handoff graph, rule 35). Re-assembling a project therefore updates what the
+    shelf shows, and deleting the project removes it, with nothing to keep in
+    step by hand.
+
+    A project whose mp4 has been deleted from `outputs/` is left OUT rather
+    than listed with a player that cannot play: the shelf is a claim that the
+    thing exists. `include_missing=True` returns those too, flagged
+    `file_missing`, for callers that want to report the gap.
+    """
+    out: list[dict] = []
+    for project in video_store.list_projects():
+        export = project.get("export") or {}
+        video_path = str(export.get("video_path") or "")
+        if not video_path:
+            continue
+        exists = os.path.exists(video_path)
+        if not exists and not include_missing:
+            continue
+
+        project_id = project["id"]
+        shots = video_store.list_shots(project_id)
+        with_clips = [s for s in shots if s.get("clip_path")]
+        planned = round(
+            sum(float((s.get("data") or {}).get("duration") or 0) for s in with_clips), 1)
+        # Prefer the length of the file itself: the planned durations are what
+        # was ASKED for, and they really do differ (a 122.5s plan measured
+        # 110.4s on a real project). Measured once per file and remembered on
+        # the project, because ffprobe costs seconds and this list is polled.
+        seconds, measured = _measured_duration(project_id, export, video_path, planned) \
+            if exists else (planned, False)
+
+        # The mock provider labels every asset it makes (rule 32) — a draft
+        # built from mock clips must never sit on the shelf looking real.
+        is_mock = any(
+            bool((a.get("meta") or {}).get("is_mock"))
+            for a in video_store.list_assets(project_id, kind="clip")
+        )
+
+        out.append({
+            "id": project_id,
+            "title": project.get("title") or "Untitled video",
+            "status": project.get("status"),
+            "created_at": project.get("created_at"),
+            "updated_at": project.get("updated_at"),
+            "source_kind": project.get("source_kind"),
+            "source_product_id": project.get("source_product_id"),
+            "video_path": video_path,
+            "file_missing": not exists,
+            "poster_path": _poster_path(shots),
+            "metadata_path": export.get("metadata_path") or "",
+            "subtitles_path": export.get("subtitles_path") or "",
+            "clip_count": int(export.get("clip_count") or len(with_clips)),
+            "shot_count": len(shots),
+            "duration_seconds": seconds,
+            # False when the file could not be measured (no ffprobe), so the
+            # number is the plan's length rather than the video's. The UI marks
+            # it, because "about a minute" and "a minute" are different claims.
+            "duration_measured": measured,
+            "is_mock": is_mock,
+        })
+    return out
+
+
+def _measured_duration(project_id: str, export: dict, video_path: str,
+                       planned: float) -> tuple[float, bool]:
+    """
+    The real length of an assembled file, measured with ffprobe ONCE and then
+    remembered on the project's export record.
+
+    Measuring is a multi-second subprocess and this list is polled by the
+    dashboard, so the measurement is stored against the exact file it was taken
+    from — a re-assembly writes a new file under a new name, so a stored value
+    can never describe a different video than the one on the shelf.
+    """
+    if export.get("duration_measured_for") == video_path:
+        stored = export.get("duration_seconds")
+        if isinstance(stored, (int, float)):
+            return round(float(stored), 1), True
+
+    probed = _probe_seconds(video_path)
+    if probed is None:
+        # No ffprobe, or it could not read the file: fall back to the plan's
+        # length and SAY it wasn't measured, rather than storing a guess as a
+        # measurement and never re-trying.
+        return planned, False
+
+    seconds = round(probed, 1)
+    try:
+        video_store.update_project(project_id, export={
+            **export, "duration_seconds": seconds, "duration_measured_for": video_path})
+    except Exception:
+        pass    # remembering it is an optimisation; the number itself is fine
+    return seconds, True
+
+
+def _poster_path(shots: list[dict]) -> str:
+    """A still to show before the video plays: the first frame that really
+    exists, in shot order. Empty when nothing on disk qualifies."""
+    for shot in shots:
+        for key in ("first_frame_path", "last_frame_path"):
+            path = shot.get(key)
+            if path and os.path.exists(path):
+                return str(path)
+    return ""
 
 
 def _xfade_command(ffmpeg: str, clips: list[str], out_path: Path,
@@ -440,15 +559,22 @@ def _xfade_command(ffmpeg: str, clips: list[str], out_path: Path,
 
 
 def _probe_duration(path: str, default: float = 3.5) -> float:
+    seconds = _probe_seconds(path)
+    return default if seconds is None else seconds
+
+
+def _probe_seconds(path: str) -> float | None:
+    """The file's real length, or None if it could not be measured. Callers that
+    report a length to the user need to tell those two apart."""
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
-        return default
+        return None
     try:
         proc = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", path],
             capture_output=True, text=True, timeout=30,
         )
-        return float((proc.stdout or "").strip() or default)
+        return float((proc.stdout or "").strip())
     except Exception:
-        return default
+        return None

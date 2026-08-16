@@ -50,6 +50,7 @@ from agents.state import (
     create_product, update_product, get_all_products,
     add_distribution, get_deeds_summary, DISTRIBUTION_KINDS,
 )
+from agents.state import _connect as _state_connect
 
 app = FastAPI(title="bahAI Workforce API", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -102,6 +103,52 @@ _PENDING_LOCK = threading.Lock()
 _HUMAN_INPUT_TIMEOUT = 1800  # 30 min — long enough not to nag, short enough a job can't hang forever
 
 
+class JobCancelled(BaseException):
+    """
+    Raised inside a worker thread when Sheraj cancels its job.
+
+    Cancellation is COOPERATIVE and has to be: a Python thread cannot be killed
+    from outside without leaving half-written files, open connections and locks
+    behind, which is exactly the mess "cancel and start over" is supposed to
+    avoid. Every pipeline in this file already narrates itself through
+    `progress(...)` between stages, so that callback is the checkpoint — the
+    run stops at the next step boundary rather than mid-call. A paid API call
+    already in flight is allowed to finish; nothing else begins.
+
+    It derives from BaseException, not Exception, and that is load-bearing.
+    This codebase is full of deliberate `except Exception` blocks that turn a
+    failed stage into a recorded, survivable error — a batch logs the card as
+    failed and moves to the next one (rule 33b's spirit, applied everywhere).
+    Every one of those would swallow a cancellation and carry on to the next
+    paid stage. Making it a control-flow signal rather than an error is the
+    same reason asyncio.CancelledError is a BaseException; `finally` blocks
+    still run, so nothing leaks.
+    """
+
+
+# Tasks created by the job running on THIS thread. A pipeline calls
+# create_task() deep inside itself and never sees a job id, so the mapping is
+# recorded here instead of being threaded through every signature — one
+# thread-local per worker, set by _start_job's runner below. It exists so a
+# cancelled run can leave its task row honestly marked rather than sitting in
+# the database as "in progress" forever.
+_CURRENT_JOB = threading.local()
+
+_state_create_task = create_task
+
+
+def create_task(directive: str, task_type: str, assigned_to: str = None) -> str:  # noqa: F811
+    """state.create_task, plus a note of which job the task belongs to."""
+    task_id = _state_create_task(directive, task_type, assigned_to=assigned_to)
+    job_id = getattr(_CURRENT_JOB, "job_id", None)
+    if job_id:
+        with _JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is not None:
+                job.setdefault("task_ids", []).append(task_id)
+    return task_id
+
+
 def _job_update(job_id: str, **fields):
     with _JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -118,31 +165,45 @@ def _job_update(job_id: str, **fields):
             job.setdefault("consultation_live", []).append(turn)
 
 
-def _start_job(kind: str, runner) -> str:
+def _start_job(kind: str, runner, started_by: str = "sheraj") -> str:
     """
     Register a job and run `runner(progress, on_turn, request_human_input)` in
     a worker thread. The three callbacks let a long pipeline (a) narrate short
     status text, (b) stream consultation turns live for the dashboard chat
     view, and (c) block the worker thread until Sheraj responds mid-run.
+
+    `started_by` is who set it going — "sheraj" from a dashboard button,
+    "abigail" from an approved request of hers, "colony" from a team goal. It
+    exists because a job the dashboard didn't start was invisible: the Pipeline
+    tab only ever polled the job id it had just created itself, so a run
+    Abigail launched on approval genuinely ran while the screen showed nothing,
+    and the same card got made twice (2026-08-14, real). The panel now adopts
+    any running job and uses this to say honestly whose it is.
     """
     job_id = str(uuid.uuid4())[:8]
     now = datetime.utcnow().isoformat()
     with _JOBS_LOCK:
         # Evict oldest finished jobs beyond the cap
-        finished = [k for k, v in JOBS.items() if v["status"] in ("done", "error")]
+        # "cancelled" belongs here with the other terminal states, or cancelled
+        # jobs would never be evicted and the store would grow without bound.
+        finished = [k for k, v in JOBS.items()
+                    if v["status"] in ("done", "error", "cancelled")]
         for k in sorted(finished, key=lambda k: JOBS[k]["created_at"])[: max(0, len(JOBS) - _MAX_JOBS)]:
             JOBS.pop(k, None)
         JOBS[job_id] = {
             "job_id": job_id, "kind": kind, "status": "running",
             "progress": "Starting...", "steps": [], "result": None, "error": None,
             "consultation_live": [], "pending_prompt": None,
+            "started_by": started_by, "cancel_requested": False, "task_ids": [],
             "created_at": now, "updated_at": now,
         }
 
     def _progress(message: str):
+        _raise_if_cancelled(job_id)
         _job_update(job_id, progress=message)
 
     def _on_turn(turn: dict):
+        _raise_if_cancelled(job_id)
         _job_update(job_id, consultation_turn=turn)
 
     def _request_human_input(prompt: str) -> str:
@@ -154,19 +215,67 @@ def _start_job(kind: str, runner) -> str:
         with _PENDING_LOCK:
             entry = _PENDING_INPUT.pop(job_id, {"response": ""})
         _job_update(job_id, status="running", pending_prompt=None)
+        # cancel_job wakes this same event, so a run paused for input stops
+        # here instead of carrying on into another paid stage.
+        _raise_if_cancelled(job_id)
         return entry.get("response", "")
 
     def _run():
+        _CURRENT_JOB.job_id = job_id
         try:
             result = runner(_progress, _on_turn, _request_human_input)
             _job_update(job_id, status="done", progress="Complete", result=result)
+        except JobCancelled:
+            # Not an error: a run Sheraj stopped on purpose. It must never be
+            # reported as a failure, and it must never move any agent's trust.
+            _finish_cancelled(job_id)
         except Exception as e:
             _job_update(job_id, status="error", progress=f"Failed: {e}", error=str(e))
+        finally:
+            _CURRENT_JOB.job_id = None
             with _PENDING_LOCK:
                 _PENDING_INPUT.pop(job_id, None)
 
     _executor.submit(_run)
     return job_id
+
+
+def _raise_if_cancelled(job_id: str):
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        cancelled = bool(job and job.get("cancel_requested"))
+    if cancelled:
+        raise JobCancelled()
+
+
+def _finish_cancelled(job_id: str):
+    """
+    Settle a cancelled run: mark it cancelled and close out what it left open.
+
+    What is NOT touched, deliberately: `task_runs` rows (they are the record of
+    work that really happened, and the Colony's handoff graph is derived from
+    them — deleting them would falsify history), products already saved (a card
+    that finished before the cancel is finished, paid for and good), and files
+    already written to outputs/ (artwork that cost money, and a thread may
+    still be closing the handle). Cancelling stops the work; it does not
+    rewrite what the work already did.
+    """
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        task_ids = list(job.get("task_ids") or []) if job else []
+    for task_id in task_ids:
+        try:
+            with _state_connect() as conn:
+                row = conn.execute("SELECT status FROM tasks WHERE id = ?",
+                                   (task_id,)).fetchone()
+            # A task the run had already finished stays completed — only the
+            # one it was in the middle of becomes cancelled.
+            if row and row["status"] != "completed":
+                update_task_status(task_id, "cancelled")
+        except Exception:
+            pass  # an unmarkable task must never turn a clean cancel into an error
+    _job_update(job_id, status="cancelled", progress="Cancelled — nothing further will run",
+                pending_prompt=None)
 
 
 @app.get("/pipeline/status/{job_id}")
@@ -199,6 +308,44 @@ def pipeline_respond(job_id: str, req: JobRespondRequest):
     return {"status": "received"}
 
 
+@app.post("/pipeline/status/{job_id}/cancel")
+def pipeline_cancel(job_id: str):
+    """
+    Stop a running job so Sheraj can start over.
+
+    Cooperative by necessity (see JobCancelled): this flags the job and wakes it
+    if it is paused for input; the worker stops at its next step boundary,
+    normally within seconds, and at worst when the API call already in flight
+    returns. The response says which of those is happening rather than claiming
+    the run is already dead — the panel keeps polling until the status really
+    is 'cancelled', so the form never unlocks while work is still in the air.
+    """
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job["status"] in ("done", "error", "cancelled"):
+            return {"status": job["status"], "already_finished": True,
+                    "message": f"That run already {job['status']} — nothing to cancel."}
+        job["cancel_requested"] = True
+        job["progress"] = "Stopping after the current step..."
+        job["updated_at"] = datetime.utcnow().isoformat()
+        job.setdefault("steps", []).append(
+            {"ts": job["updated_at"], "message": "Cancel requested by Sheraj."})
+
+    # A run paused at the consultation check-in is asleep on this event and
+    # would otherwise sit there until the 30-minute timeout.
+    with _PENDING_LOCK:
+        entry = _PENDING_INPUT.get(job_id)
+        if entry:
+            entry["response"] = ""
+            entry["event"].set()
+
+    return {"status": "cancelling", "job_id": job_id,
+            "message": "Stopping. The step already running finishes first — anything "
+                       "finished before now is kept, nothing new starts."}
+
+
 @app.get("/pipeline/jobs")
 def pipeline_jobs():
     """Recent background jobs, newest first (lets the dashboard reattach after a refresh)."""
@@ -210,7 +357,7 @@ def pipeline_jobs():
         ]
 
 
-# --- Agent status (dashboard Trust tab) ---
+# --- Agent status (raw trust rows; the dashboard's Colony tab uses /colony) ---
 
 @app.get("/agents")
 def list_agents():
@@ -1633,6 +1780,7 @@ def _card_reflection(quote: str, task_id: str, language: str | None) -> dict:
         raw = call_llm(
             "scribe",
             [{"role": "user", "content": prompt}],
+            agent="scribe",
             json_mode=True,
             max_tokens=200,
             temperature=0.6,
@@ -2445,7 +2593,7 @@ def _run_card_batch(req: CardBatchRequest, progress, on_turn=None) -> dict:
 
 
 @app.post("/pipeline/run-card-batch")
-def pipeline_run_card_batch(req: CardBatchRequest):
+def pipeline_run_card_batch(req: CardBatchRequest, started_by: str = "sheraj"):
     """
     Queue several quote cards in one hands-free job (the consultation's
     mid-run pause is skipped for every card — batch runs never wait on
@@ -2496,6 +2644,7 @@ def pipeline_run_card_batch(req: CardBatchRequest):
     job_id = _start_job(
         "card-batch",
         lambda progress, on_turn, ask: _run_card_batch(req, progress, on_turn),
+        started_by=started_by,
     )
     return {"job_id": job_id, "status": "running", "total": len(resolved)}
 
@@ -4281,7 +4430,7 @@ METERING_EPOCH = "2026-07-06"
 LEGACY_COST_PER_PRODUCT = 0.11
 
 @app.get("/steward/report")
-def steward_report():
+def steward_report(include_wallet: bool = False):
     """
     Mission-first report: deeds (giving ledger) headline the response; money
     follows as a byproduct. Costs are a labeled hybrid: runs since
@@ -4339,6 +4488,18 @@ def steward_report():
     # Pass through ledger-read failures untouched so $0 is never silent.
     if spend.get("error"):
         report["error"] = spend["error"]
+
+    # Wallet holdings are OPT-IN: reading them means a live RPC call per chain,
+    # and this report is polled. The Treasury view asks for them; the routine
+    # P&L poll doesn't pay for them.
+    if include_wallet:
+        from agents import wallet
+        try:
+            report["wallet"] = wallet.balances()
+        except Exception as e:
+            # Never let an unreachable chain take down the whole report — but
+            # never report it as $0 either.
+            report["wallet"] = {"error": str(e)[:200]}
     return report
 
 
@@ -4477,6 +4638,545 @@ def trust_report():
         "average_score":   average,
         "products":        rows,
     }
+
+
+# --- The Colony (dashboard tab: the workforce as an organisation) ------------
+#
+# Everything the Colony graph needs: the snapshot it draws, per-agent detail,
+# chat, settings, team goals and team consultation. Storage and the derived
+# handoff graph live in agents/colony.py; chat and consultation in
+# agents/colony_chat.py; the tool gate in agents/colony_tools.py.
+
+class AgentChatRequest(BaseModel):
+    message: str
+
+
+class AgentSettingsRequest(BaseModel):
+    custom_instructions: Optional[str] = None
+    paused: Optional[bool] = None
+    # "" clears the override back to the router's task-type default; None
+    # (absent) leaves whatever is already saved alone.
+    model: Optional[str] = None
+
+
+class GoalRequest(BaseModel):
+    team: str
+    goal: str
+    detail: str = ""
+    target_count: Optional[int] = None
+
+
+class GoalEditRequest(BaseModel):
+    goal: Optional[str] = None
+    detail: Optional[str] = None
+    target_count: Optional[int] = None
+    status: Optional[str] = None
+
+
+class GoalLaunchRequest(BaseModel):
+    # Which of the team's goal_kinds to run. Defaults to the team's first.
+    kind: Optional[str] = None
+    # Overrides the goal text as the run's theme/story when given.
+    theme: Optional[str] = None
+    language: Optional[str] = None
+
+
+class TeamConsultRequest(BaseModel):
+    question: str
+
+
+def _colony_agent_or_404(agent: str) -> str:
+    from agents import colony
+    if agent not in colony.AGENT_TEAM:
+        raise HTTPException(status_code=404, detail=f"No agent called '{agent}'")
+    return agent
+
+
+@app.get("/colony")
+def colony_overview():
+    """The whole graph in one call: agents, teams, goals and derived handoffs."""
+    from agents import colony
+    return colony.colony_snapshot()
+
+
+@app.get("/colony/agents/{agent}")
+def colony_agent(agent: str):
+    from agents import colony
+    _colony_agent_or_404(agent)
+    detail = colony.agent_detail(agent)
+    detail["messages"] = colony.get_agent_messages(agent) if detail["chattable"] else []
+    return detail
+
+
+@app.post("/colony/agents/{agent}/chat")
+def colony_agent_chat(agent: str, req: AgentChatRequest):
+    """
+    One chat turn with one agent, on ITS OWN model (rule 16 — never Claude).
+    Paid or product-changing tools queue for approval instead of running.
+    """
+    from agents import colony_chat
+    _colony_agent_or_404(agent)
+    try:
+        return colony_chat.chat(agent, req.message)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Surface the real reason (a dead Ollama, a missing key) — a silent
+        # failure in a chat box is exactly the class of bug that hid the Canva
+        # breakage for weeks.
+        raise HTTPException(status_code=502,
+                            detail=f"{agent} could not answer: {type(e).__name__}: {e}")
+
+
+@app.delete("/colony/agents/{agent}/chat")
+def colony_clear_chat(agent: str):
+    from agents import colony
+    _colony_agent_or_404(agent)
+    colony.clear_agent_messages(agent)
+    return {"result": "ok"}
+
+
+@app.get("/colony/agents/{agent}/settings")
+def colony_get_agent_settings(agent: str):
+    from agents import colony
+    _colony_agent_or_404(agent)
+    colony.init_colony_db()
+    return colony.get_agent_settings(agent)
+
+
+@app.post("/colony/agents/{agent}/settings")
+def colony_set_agent_settings(agent: str, req: AgentSettingsRequest):
+    from agents import colony
+    _colony_agent_or_404(agent)
+    colony.init_colony_db()
+    if agent in colony.INSTRUMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{agent}' is a tool in the pipeline, not an agent with instructions.")
+    if agent == "secretary" and (req.custom_instructions is not None or req.paused is not None):
+        # Her personality lives in her own private store (rule 15), edited from
+        # her own tab. Writing it here would land in a table nothing reads and
+        # look like it had been saved — refuse instead of failing silently.
+        raise HTTPException(
+            status_code=400,
+            detail="Abigail's instructions are edited in her own tab; only her model "
+                   "can be set from the Colony.")
+    if req.model:
+        # The provider boundary is enforced HERE, before storage — a workforce
+        # agent can never be saved onto Claude, nor Abigail off it (rule 16).
+        # The dropdown is a convenience; this is the guarantee.
+        from agents import models as model_registry
+        try:
+            model_registry.validate_choice(agent, req.model)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+    return colony.set_agent_settings(agent, custom_instructions=req.custom_instructions,
+                                    paused=req.paused, model=req.model)
+
+
+@app.get("/colony/models")
+def colony_models(agent: Optional[str] = None):
+    """
+    The models on offer — discovered live from each provider, never a hardcoded
+    list that can go stale and offer something that no longer exists.
+
+    Pass ?agent= to get only the ones that agent is allowed to use, plus what
+    it would run on today. `reachable` reports whether each provider actually
+    answered: an empty local list because Ollama is DOWN is a different fact
+    from one because nothing is installed, and the UI must not confuse them.
+    """
+    from agents import colony
+    from agents import models as model_registry
+
+    result = model_registry.list_models(agent)
+    if agent:
+        from agents.colony_chat import CHAT_TASK_TYPE
+        colony.init_colony_db()
+        chosen = colony.get_agent_settings(agent).get("model") or ""
+        task_type = CHAT_TASK_TYPE.get(agent, "copy")
+        default_provider, default_model = model_registry.default_for_agent(agent, task_type)
+        result |= {
+            "agent": agent,
+            "chosen": chosen,
+            "default_model": default_model,
+            "default_provider": default_provider,
+            # Paid is "not running on this computer" — testing for xAI alone
+            # labelled Abigail's Claude default as free, which is a lie about
+            # money in the one place the user looks to check.
+            "default_paid": default_provider != model_registry.OLLAMA,
+            # The Reviewer and Artist read images through call_grok_vision,
+            # which is a separate path from call_llm — moving them to a local
+            # model does NOT make their image work free, and saying otherwise
+            # would be a quiet lie about cost.
+            "uses_vision": agent in ("reviewer", "artist"),
+        }
+    return result
+
+
+@app.get("/colony/handoffs")
+def colony_handoffs(days: int = 30):
+    from agents import colony
+    return {"days": days, "edges": colony.handoff_edges(days=days),
+            "recent_runs": colony.recent_runs(limit=40)}
+
+
+# --- Colony: the confirm-before-acting queue --------------------------------
+
+@app.get("/colony/actions")
+def colony_list_actions(status: str = "pending"):
+    from agents import colony
+    colony.init_colony_db()
+    return {"actions": colony.list_actions(status)}
+
+
+@app.post("/colony/actions/{action_id}")
+def colony_resolve_action(action_id: int, approve: bool = True):
+    """
+    Approve or decline a queued action. Approval is the ONLY path that runs
+    anything paid or product-changing from a chat — the same shape as the
+    Secretary's approval endpoint (rules 20/24/25).
+    """
+    from agents import colony, colony_tools
+    colony.init_colony_db()
+    action = colony.get_action(action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail=f"No action #{action_id}")
+    if action["status"] != "pending":
+        raise HTTPException(status_code=400,
+                            detail=f"Action #{action_id} is already {action['status']}")
+    if not approve:
+        colony.resolve_action(action_id, "declined", "Declined by Sheraj")
+        return {"result": "declined", "action": colony.get_action(action_id)}
+    try:
+        outcome = colony_tools.run_approved_action(action)
+    except Exception as e:
+        # A failed action stays visible as failed rather than silently
+        # disappearing from the queue.
+        colony.resolve_action(action_id, "failed", f"{type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail=f"That action failed: {e}")
+    colony.resolve_action(action_id, "done", outcome)
+    return {"result": "done", "outcome": outcome, "action": colony.get_action(action_id)}
+
+
+# --- Colony: team goals ------------------------------------------------------
+
+@app.get("/colony/goals")
+def colony_list_goals(team: Optional[str] = None, status: Optional[str] = None):
+    from agents import colony
+    colony.init_colony_db()
+    goals = colony.list_goals(team=team, status=status)
+    return {"goals": [g | {"progress": colony.goal_progress(g)} for g in goals]}
+
+
+@app.post("/colony/goals")
+def colony_create_goal(req: GoalRequest):
+    from agents import colony
+    colony.init_colony_db()
+    try:
+        # Baseline the team's product count NOW, so progress counts what was
+        # made because of the goal rather than everything ever made.
+        goal = colony.create_goal(
+            req.team, req.goal, detail=req.detail, target_count=req.target_count,
+            baseline_products=colony.current_product_count(req.team))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return goal | {"progress": colony.goal_progress(goal)}
+
+
+@app.patch("/colony/goals/{goal_id}")
+def colony_update_goal(goal_id: int, req: GoalEditRequest):
+    from agents import colony
+    colony.init_colony_db()
+    if not colony.get_goal(goal_id):
+        raise HTTPException(status_code=404, detail=f"No goal #{goal_id}")
+    goal = colony.update_goal(goal_id, **req.model_dump(exclude_none=True))
+    return goal | {"progress": colony.goal_progress(goal)}
+
+
+@app.delete("/colony/goals/{goal_id}")
+def colony_delete_goal(goal_id: int):
+    from agents import colony
+    colony.init_colony_db()
+    colony.delete_goal(goal_id)
+    return {"result": "ok"}
+
+
+def launch_team_pipeline(kind: str, theme: str, detail: str = "",
+                         language: Optional[str] = None,
+                         quotes: Optional[list[str]] = None,
+                         started_by: str = "colony") -> dict:
+    """
+    Start the real pipeline for one of the teams' `goal_kinds`.
+
+    The SINGLE implementation of "a team is asked to make something", shared by
+    the Colony's goal-launch endpoint and by Abigail's approved job request
+    (agents/secretary_colony.py). It reuses the same pipeline entry points the
+    Pipeline and Video tabs use, so a run started this way is indistinguishable
+    from a hand-started one and every gate — verification, metering, review —
+    applies unchanged (rule 40).
+
+    Several `quotes` for a card run means the real BATCH job, through the same
+    endpoint function the dashboard's own multi-quote form posts to — so every
+    quote is verified against the selected sources BEFORE anything paid starts,
+    and a batch is hands-free (no mid-run pause) exactly as it is there.
+
+    Video is deliberately different: it CREATES the project and stops. Video
+    planning is a multi-stage, GPU-bound process the owner reviews before any
+    clip is rendered (rules 31/33), and a one-line request must not skip the
+    look he is supposed to take.
+    """
+    theme = (theme or "").strip()
+    if not theme:
+        raise ValueError("A pipeline run needs a theme")
+    quotes = [q.strip() for q in (quotes or []) if (q or "").strip()]
+
+    if kind == "bookmark":
+        run_req = PipelineRunRequest(theme=theme)
+        job_id = _start_job(
+            "full-pipeline",
+            lambda progress, on_turn, ask: _run_full_pipeline(run_req, progress, on_turn, ask),
+            started_by=started_by)
+        return {"result": "running", "job_id": job_id, "kind": kind, "theme": theme}
+
+    if kind == "quote_card":
+        if len(quotes) > 1:
+            batch = pipeline_run_card_batch(
+                CardBatchRequest(theme=theme, language=language, quotes=quotes),
+                started_by=started_by)
+            return {"result": "running", "job_id": batch["job_id"], "kind": kind,
+                    "theme": theme, "count": batch["total"]}
+        run_req = CardPipelineRequest(theme=theme, language=language,
+                                      pinned_quote=quotes[0] if quotes else "")
+        job_id = _start_job(
+            "card-pipeline",
+            lambda progress, on_turn, ask: _run_card_pipeline(run_req, progress, on_turn, ask),
+            started_by=started_by)
+        return {"result": "running", "job_id": job_id, "kind": kind, "theme": theme,
+                "count": 1}
+
+    if kind == "video":
+        from agents import video_store
+        title = theme[:60] + ("..." if len(theme) > 60 else "")
+        task_id = create_task(title[:200], "video", assigned_to=started_by or "pipeline")
+        project_id = video_store.create_project(
+            title=title, source_kind="scene_story",
+            source_text=(detail or "").strip(), source_brief=theme,
+            source_instructions="", source_product_id=None, task_id=task_id,
+            direction=dict(DEFAULT_DIRECTION))
+        return {"result": "project_created", "video_project_id": project_id, "kind": kind,
+                "theme": theme,
+                "message": "Video project created — open the Video tab to plan its shots."}
+
+    raise ValueError(f"Cannot launch '{kind}'")
+
+
+@app.post("/colony/goals/{goal_id}/launch")
+def colony_launch_goal(goal_id: int, req: GoalLaunchRequest):
+    """
+    Start the real pipeline that serves this goal.
+
+    Reuses the SAME pipeline entry points the Pipeline and Video tabs use —
+    there is exactly one implementation of each pipeline, so a goal-launched
+    run is indistinguishable from a hand-started one and every gate
+    (verification, metering, review) applies unchanged.
+
+    The Film Crew is deliberately different: it CREATES the video project and
+    hands it back rather than rendering. Video is a multi-stage, GPU-bound
+    pipeline whose planning the owner reviews before any clips are made
+    (rules 31/33) — kicking off a render from a one-line goal would skip the
+    look he is supposed to take.
+    """
+    from agents import colony
+    colony.init_colony_db()
+    goal = colony.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail=f"No goal #{goal_id}")
+
+    team = colony.TEAMS[goal["team"]]
+    kinds = team["goal_kinds"]
+    if not kinds:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{team['name']} has no pipeline to launch — its goals are steering only.")
+    kind = req.kind or kinds[0]
+    if kind not in kinds:
+        raise HTTPException(status_code=422,
+                            detail=f"{team['name']} can run: {', '.join(kinds)}")
+
+    theme = (req.theme or goal["goal"]).strip()
+
+    try:
+        out = launch_team_pipeline(kind, theme, detail=goal["detail"] or "",
+                                   language=req.language, started_by="colony")
+    except ValueError as e:  # unreachable given the membership check above
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if out["result"] == "project_created":
+        colony.update_goal(goal_id, launched_job_id=f"video:{out['video_project_id']}")
+    else:
+        colony.update_goal(goal_id, launched_job_id=out["job_id"])
+    return out
+
+
+# --- The project wallet (Nora's domain) --------------------------------------
+#
+# Safety model lives in agents/wallet.py, not here: owner-only allowlist, hard
+# per-transaction and daily caps, USDC-only for the agent, mainnet opt-in, and
+# on-chain verification of the token contract before every transfer.
+
+class AllowlistRequest(BaseModel):
+    label: str
+    address: str
+    note: str = ""
+
+
+class TreasuryRequest(BaseModel):
+    label: str
+    address: str
+
+
+class WalletSendRequest(BaseModel):
+    to: str
+    amount: str
+    chain: Optional[str] = None
+    note: str = ""
+
+
+@app.get("/wallet/status")
+def wallet_status():
+    from agents import wallet
+    return wallet.status()
+
+
+@app.get("/wallet/balances")
+def wallet_balances(address: Optional[str] = None):
+    """Live holdings. An unreachable chain reports as unreachable, never as zero."""
+    from agents import wallet
+    try:
+        out = wallet.balances(address)
+    except wallet.WalletError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    out["treasury"] = [
+        t | {"balances": _safe_balances(t["address"])} for t in wallet.list_treasury()
+    ]
+    return out
+
+
+def _safe_balances(address: str) -> dict | None:
+    from agents import wallet
+    try:
+        return wallet.balances(address)
+    except Exception:
+        return None
+
+
+@app.post("/wallet/create")
+def wallet_create():
+    """
+    Create the hot wallet. Returns the private key ONCE so Sheraj can back it
+    up offline; it is never returned again and never logged.
+    """
+    from agents import wallet
+    try:
+        return wallet.create_wallet()
+    except wallet.WalletError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/wallet/history")
+def wallet_history(limit: int = 50):
+    from agents import wallet
+    wallet.init_wallet_db()
+    return {"transactions": wallet.history(limit)}
+
+
+@app.post("/wallet/allowlist")
+def wallet_add_allowlist(req: AllowlistRequest):
+    """
+    Approve an address to receive funds. OWNER-ONLY by construction: no tool in
+    colony_tools writes this table, mirroring the WhatsApp contacts allowlist
+    (rule 28). It is what stops a prompt-injected Nora paying an attacker.
+    """
+    from agents import wallet
+    wallet.init_wallet_db()
+    try:
+        return wallet.add_allowlist(req.label, req.address, req.note)
+    except wallet.WalletError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.delete("/wallet/allowlist/{entry_id}")
+def wallet_remove_allowlist(entry_id: int):
+    from agents import wallet
+    wallet.remove_allowlist(entry_id)
+    return {"result": "ok"}
+
+
+@app.post("/wallet/treasury")
+def wallet_add_treasury(req: TreasuryRequest):
+    """A watch-only address held elsewhere. Nora can read it and never spend it."""
+    from agents import wallet
+    wallet.init_wallet_db()
+    try:
+        return wallet.add_treasury(req.label, req.address)
+    except wallet.WalletError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.delete("/wallet/treasury/{entry_id}")
+def wallet_remove_treasury(entry_id: int):
+    from agents import wallet
+    wallet.remove_treasury(entry_id)
+    return {"result": "ok"}
+
+
+@app.post("/wallet/send")
+def wallet_send(req: WalletSendRequest):
+    """
+    Sheraj's OWN send, straight from the dashboard with no LLM anywhere in the
+    path — the safest way to move money here.
+
+    It still requires the destination to be on the allowlist, because that also
+    catches a mistyped address, and a wrong address is unrecoverable. It does
+    NOT apply Nora's caps: those exist to bound an agent, not its owner.
+    """
+    from agents import wallet
+    wallet.init_wallet_db()
+    try:
+        return wallet.send_usdc(
+            req.chain or wallet.DEFAULT_CHAIN, req.to, req.amount,
+            initiated_by="sheraj", note=req.note, bypass_limits=True)
+    except wallet.WalletError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Colony: team consultation ----------------------------------------------
+
+@app.post("/colony/teams/{team_id}/consult")
+def colony_team_consult(team_id: str, req: TeamConsultRequest):
+    """
+    Put a question to a whole team; each member answers in turn, seeing what
+    the others said. Several LLM calls, so it runs as a background job and
+    streams its turns exactly like a pipeline consultation does.
+    """
+    from agents import colony, colony_chat
+    colony.init_colony_db()
+    if team_id not in colony.TEAMS:
+        raise HTTPException(status_code=404, detail=f"No team called '{team_id}'")
+    if not req.question.strip():
+        raise HTTPException(status_code=422, detail="A consultation needs a question")
+
+    def _run(progress, on_turn, ask):
+        # Streamed in the SAME shape as a pipeline consultation turn
+        # (agent/role/message) so the dashboard renders it with the components
+        # it already has, instead of a second near-identical turn format.
+        return colony_chat.run_team_consultation(
+            team_id, req.question, progress=progress,
+            on_turn=lambda t: on_turn({"agent": t["agent"], "role": "member",
+                                       "message": t["text"]}))
+
+    job_id = _start_job("team-consult", _run)
+    return {"job_id": job_id, "status": "running", "team": team_id}
 
 
 # --- Google Workspace OAuth (the Secretary's; mirrors the Etsy flow) ---
@@ -5643,6 +6343,31 @@ def video_assemble(project_id: str, req: AssembleRequest):
     result["metadata_url"] = _web_image_path(result.get("metadata_path") or "")
     result["subtitles_url"] = _web_image_path(result.get("subtitles_path") or "")
     return result
+
+
+@app.get("/video/finished")
+def video_finished():
+    """
+    Finished videos for the Products shelf — every project with a real
+    assembled file on disk, newest first.
+
+    DERIVED from the video tables on every read, never a second saved copy of
+    the fact: re-assembling a project changes what this returns, and deleting
+    it removes the entry, with nothing to keep in step by hand. Videos are
+    deliberately NOT rows in `products` — that would double-count them in the
+    Steward's ledger and hand every bookmark/card action (print sheet, layout
+    editor, Etsy publish) a product type it cannot act on.
+    """
+    from agents import video_assembly
+    videos = []
+    for item in video_assembly.list_finished():
+        entry = dict(item)
+        entry["video_url"] = _web_image_path(item.get("video_path") or "")
+        entry["poster_url"] = _web_image_path(item.get("poster_path") or "")
+        entry["metadata_url"] = _web_image_path(item.get("metadata_path") or "")
+        entry["subtitles_url"] = _web_image_path(item.get("subtitles_path") or "")
+        videos.append(entry)
+    return {"videos": videos}
 
 
 @app.get("/video/projects/{project_id}/export")

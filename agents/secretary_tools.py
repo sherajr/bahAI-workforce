@@ -170,10 +170,31 @@ LIST_PRODUCTS_TOOL = {
     },
 }
 
+WORKFORCE_REPORT_TOOL = {
+    "name": "workforce_report",
+    "description": (
+        "What the workforce teams have actually been doing — every agent's "
+        "trust and whether they're working right now, each team's current "
+        "goal and real progress against it, the last steps of recorded work, "
+        "what was finished recently, what's running, and anything waiting for "
+        "Sheraj's approval in the Colony tab. Call this before reporting on "
+        "the teams — never describe their work from memory or assumption."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "team": {"type": "string",
+                     "description": "One team ('Print Studio', 'Film Crew', 'Ledger'). Omit for all."},
+            "days": {"type": "integer", "description": "How far back to count finished work. Default 7."},
+        },
+        "additionalProperties": False,
+    },
+}
+
 READ_TOOLS = [
     SEARCH_CALENDAR_TOOL, SEARCH_DRIVE_TOOL, READ_DOC_TOOL, READ_SHEET_TOOL,
     READ_SLIDE_TEXT_TOOL, SEARCH_GMAIL_TOOL, READ_GMAIL_MESSAGE_TOOL,
-    LIST_PRODUCTS_TOOL,
+    LIST_PRODUCTS_TOOL, WORKFORCE_REPORT_TOOL,
 ]
 
 # ── Write tools — CLAUDE.md rule 22 (migrated 2026-07-07) ──────────────────────
@@ -460,12 +481,124 @@ EDIT_PRODUCT_TOOL = {
     },
 }
 
+# ── The workforce teams (agents/secretary_colony.py) ──────────────────────────
+# The gate is "talking is immediate, MAKING is approved": asking, briefing and
+# goal-setting happen at once; a pipeline run always queues. Enforced in the
+# handlers below, never in the wording of these descriptions.
+
+ASK_AGENT_TOOL = {
+    "name": "ask_agent",
+    "description": (
+        "Put a question or an instruction to ONE workforce agent and get their "
+        "real answer back in their own voice — Ruth (librarian, verifies "
+        "quotations), Theo (artist), Clara (scribe), Amos (reviewer), Nora "
+        "(steward, money and trust), Sofia (translator), Silas (director), "
+        "Marta (videographer). Use this to find something out from them, pass "
+        "on what Sheraj wants, or check how they'd approach a piece of work. "
+        "They answer on their own model, with their own tools; anything they "
+        "try that costs money or changes a product queues for Sheraj instead "
+        "of running. Sheraj can read the exchange in the Colony tab. This does "
+        "NOT start a pipeline run — use request_team_job for that."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "string", "description": "Name or id, e.g. 'Ruth' or 'librarian'"},
+            "message": {"type": "string", "description": "What to ask or tell them"},
+        },
+        "required": ["agent", "message"],
+        "additionalProperties": False,
+    },
+}
+
+SET_TEAM_GOAL_TOOL = {
+    "name": "set_team_goal",
+    "description": (
+        "Give a whole team a standing goal. Every agent on that team then "
+        "carries it in every prompt they run — pipeline work included — so it "
+        "genuinely steers what they choose and prioritise. Teams: 'Print "
+        "Studio' (bookmarks and quote cards), 'Film Crew' (video), 'Ledger' "
+        "(money and trust). Progress is counted from products they actually "
+        "finish. Free and immediate; it does not start any work."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "team": {"type": "string"},
+            "goal": {"type": "string", "description": "One clear sentence — this is the steering line"},
+            "detail": {"type": "string", "description": "Optional fuller brief kept on the team's card"},
+            "target_count": {"type": "integer", "description": "Optional number of products to aim for"},
+        },
+        "required": ["team", "goal"],
+        "additionalProperties": False,
+    },
+}
+
+BRIEF_AGENT_TOOL = {
+    "name": "brief_agent",
+    "description": (
+        "Give ONE agent standing instructions — what they need to know to do "
+        "their work the way Sheraj wants it. Carried into every prompt they "
+        "run, so it shapes real pipeline work, not just conversation. Adds to "
+        "what they already have unless replace=true. Free and immediate."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "string", "description": "Name or id, e.g. 'Clara' or 'scribe'"},
+            "instructions": {"type": "string"},
+            "replace": {"type": "boolean",
+                        "description": "true to overwrite their existing instructions"},
+        },
+        "required": ["agent", "instructions"],
+        "additionalProperties": False,
+    },
+}
+
+REQUEST_TEAM_JOB_TOOL = {
+    "name": "request_team_job",
+    "description": (
+        "Ask a team to actually MAKE something: a 'quote_card' (given away), a "
+        "'bookmark' (an Etsy listing), or a 'video' project. This ALWAYS "
+        "queues for Sheraj's approval and never starts on its own, because a "
+        "run spends real money on artwork and review — so it is always safe to "
+        "call when he asks for one. Put everything the team needs into theme "
+        "(the subject, in a sentence) and detail (for a video, the story "
+        "itself). Tell him it is waiting.\n"
+        "MANY CARDS AT ONCE: set count to how many quote cards he wants (up to "
+        "19 in one run) and Ruth finds that many verified quotes on the theme "
+        "before it queues, so the approval names the exact quotes — one "
+        "request, one approval, one hands-free run. Only pass quotes yourself "
+        "if he dictated the exact wording. Bookmarks and videos are one per "
+        "run."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["quote_card", "bookmark", "video"]},
+            "theme": {"type": "string", "description": "The subject of the run, in a sentence"},
+            "detail": {"type": "string",
+                       "description": "Fuller brief; for a video, the story or passage itself"},
+            "count": {"type": "integer",
+                      "description": "How many quote cards to make in this run (1-19). Default 1."},
+            "quotes": {"type": "array", "items": {"type": "string"},
+                       "description": "Exact quotes ONLY if Sheraj dictated them; "
+                                      "otherwise leave empty and Ruth finds them"},
+            "language": {"type": "string",
+                         "description": "Optional language code for a translated card, e.g. 'es'"},
+        },
+        "required": ["kind", "theme"],
+        "additionalProperties": False,
+    },
+}
+
 WRITE_TOOLS = [
     REMEMBER_TOOL, ADD_TASK_TOOL, CREATE_EVENT_TOOL, UPDATE_EVENT_TOOL,
     DELETE_EVENT_TOOL, SET_EVENT_REMINDERS_TOOL, SET_REMINDER_TOOL,
     SEND_EMAIL_TOOL, CREATE_DOC_TOOL, APPEND_DOC_TOOL, CREATE_SHEET_TOOL,
     APPEND_SHEET_ROWS_TOOL, ORGANIZE_DRIVE_FILE_TOOL, SEND_WHATSAPP_TOOL,
-    EDIT_PRODUCT_TOOL,
+    EDIT_PRODUCT_TOOL, ASK_AGENT_TOOL, SET_TEAM_GOAL_TOOL, BRIEF_AGENT_TOOL,
+    REQUEST_TEAM_JOB_TOOL,
 ]
 
 ALL_TOOLS = READ_TOOLS + WRITE_TOOLS
@@ -514,6 +647,13 @@ def make_executor(event_map: dict, effects: dict):
         return store.add_pending_action(kind, desc, json.dumps(payload))
 
     def executor(name: str, tool_input: dict) -> str:
+        # Every tool call, read or write, is recorded here — this is what
+        # secretary._finalize_reply's uncommitted-action check tests against.
+        # Recording only WRITES made a read-only turn indistinguishable from a
+        # turn that called nothing at all, so any reply mentioning "set"/"now"
+        # after a plain lookup was wrongly flagged as an action that never
+        # happened (seen live 2026-08-14 on a workforce_report turn).
+        effects.setdefault("tool_calls", []).append(name)
         if name in write_tool_names:
             call_key = name + ":" + json.dumps(tool_input, sort_keys=True, default=str)
             if call_key in done_calls:
@@ -586,6 +726,61 @@ def make_executor(event_map: dict, effects: dict):
                         f"{p.get('product_type') or 'bookmark'}, {p.get('status')}, {published}, "
                         f"revenue ${p.get('revenue') or 0:.2f}, created {p.get('created_at')}{best_effort}")
                 return "\n".join(lines)
+
+            elif name == "workforce_report":
+                from agents import secretary_colony
+                return secretary_colony.workforce_report(
+                    team=tool_input.get("team") or None,
+                    days=int(tool_input.get("days") or 7))
+
+            elif name == "ask_agent":
+                # Talking is immediate (see secretary_colony's module docstring).
+                # The agent answers on its OWN model — rule 16 holds: she is a
+                # caller here, never a stand-in, and never lends them Claude.
+                from agents import secretary_colony
+                result = secretary_colony.ask_agent(
+                    tool_input.get("agent", ""), tool_input.get("message", ""))
+                if result.get("ok"):
+                    effects["workforce"].append(
+                        f"asked {result['agent']} — their answer is in the Colony tab")
+                    for q in result.get("queued") or []:
+                        effects["queued_for_approval"].append(
+                            f"#{q['id']} (Colony tab) {q['description']}")
+                return result["text"]
+
+            elif name == "set_team_goal":
+                from agents import secretary_colony
+                out = secretary_colony.set_team_goal(
+                    tool_input.get("team", ""), tool_input.get("goal", ""),
+                    detail=tool_input.get("detail") or "",
+                    target_count=tool_input.get("target_count"))
+                if out.startswith("Goal #"):
+                    effects["workforce"].append(out.split(".")[0])
+                return out
+
+            elif name == "brief_agent":
+                from agents import secretary_colony
+                out = secretary_colony.brief_agent(
+                    tool_input.get("agent", ""), tool_input.get("instructions", ""),
+                    replace=bool(tool_input.get("replace", False)))
+                if "standing instructions" in out:
+                    effects["workforce"].append(out.split(".")[0])
+                return out
+
+            elif name == "request_team_job":
+                # MAKING is approved. Nothing starts here, ever — the payload
+                # waits in the same queue as an email until Sheraj says yes.
+                from agents import secretary_colony
+                out = secretary_colony.request_team_job(
+                    tool_input.get("kind", ""), tool_input.get("theme", ""),
+                    detail=tool_input.get("detail") or "",
+                    language=tool_input.get("language") or None,
+                    count=tool_input.get("count") or 1,
+                    quotes=tool_input.get("quotes") or None)
+                if out.get("ok"):
+                    effects["queued_for_approval"].append(
+                        f"#{out['action_id']} {out['description']}")
+                return out["text"]
 
             elif name == "remember":
                 note = tool_input.get("note") or "general"
@@ -872,6 +1067,16 @@ def make_executor(event_map: dict, effects: dict):
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
+            # The privacy boundary refusing something is not a broken tool
+            # (rule 15) — it is the system working. Hand her the reason as an
+            # ordinary result so she can say it a different way, instead of
+            # reporting a failure Sheraj can do nothing about.
+            try:
+                from agents.secretary_colony import PrivateLeak
+                if isinstance(e, PrivateLeak):
+                    return f"Nothing was written to the workforce's records: {e}"
+            except Exception:
+                pass
             if name in write_tool_names:
                 effects["errors"].append(f"{name} failed: {type(e).__name__}")
             return f"{name} failed ({type(e).__name__}): {e}"

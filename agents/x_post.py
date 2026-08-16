@@ -178,7 +178,7 @@ def scribe_select_quote(topic: str, tone: str, quotes: list[dict]) -> dict:
     raw = call_llm("scribe", [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
-    ], temperature=0.3, max_tokens=10).strip()
+    ], temperature=0.3, max_tokens=10, agent="scribe").strip()
     m = re.search(r"\d+", raw)
     idx = int(m.group()) - 1 if m else 0
     if not (0 <= idx < len(quotes)):
@@ -272,7 +272,7 @@ def scribe_write_tweet_no_quote(topic: str, tone: str, inspiration: list[dict],
     return call_llm("scribe", [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
-    ], temperature=0.8, max_tokens=180).strip()
+    ], temperature=0.8, max_tokens=180, agent="scribe").strip()
 
 
 def scribe_revise_tweet_no_quote(topic: str, tone: str, inspiration: list[dict],
@@ -301,7 +301,7 @@ def scribe_revise_tweet_no_quote(topic: str, tone: str, inspiration: list[dict],
     return call_llm("scribe", [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
-    ], temperature=0.8, max_tokens=180).strip()
+    ], temperature=0.8, max_tokens=180, agent="scribe").strip()
 
 
 def scribe_write_tweet(topic: str, tone: str, quote: str, author: str,
@@ -331,7 +331,7 @@ def scribe_write_tweet(topic: str, tone: str, quote: str, author: str,
     return call_llm("scribe", [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
-    ], temperature=0.7, max_tokens=180).strip()
+    ], temperature=0.7, max_tokens=180, agent="scribe").strip()
 
 
 def scribe_revise_tweet(topic: str, tone: str, quote: str, author: str,
@@ -354,7 +354,7 @@ def scribe_revise_tweet(topic: str, tone: str, quote: str, author: str,
     return call_llm("scribe", [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
-    ], temperature=0.7, max_tokens=180).strip()
+    ], temperature=0.7, max_tokens=180, agent="scribe").strip()
 
 
 # --- Phase 4: Reviewer QA -----------------------------------------------------
@@ -555,7 +555,7 @@ def review_tweet(topic: str, tweet: str, quote: str, author: str,
     raw = call_llm("reviewer", [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
-    ], temperature=0.2, max_tokens=500, json_mode=True).strip()
+    ], temperature=0.2, max_tokens=500, json_mode=True, agent="reviewer").strip()
 
     review = _parse_review(raw)
     if mechanical_failures:

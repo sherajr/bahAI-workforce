@@ -176,6 +176,19 @@ def init_db():
     # flipping it at startup is what makes "Resume" truthful.
     mark_interrupted_jobs()
 
+    # The Colony's tables (team goals, agent settings, agent chat, the
+    # confirm-before-acting queue). Same rule as video above: it opens its own
+    # connection, so it MUST stay outside this function's `with _connect()`
+    # block or SQLite refuses the second writer and the tables are silently
+    # skipped on a fresh database.
+    from agents.colony import init_colony_db
+    init_colony_db()
+
+    # The wallet's ledger, owner-only allowlist and treasury watch-list. Same
+    # outside-the-connection rule as the two above.
+    from agents.wallet import init_wallet_db
+    init_wallet_db()
+
 
 # --- Task management ---
 

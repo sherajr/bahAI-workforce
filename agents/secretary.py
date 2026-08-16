@@ -141,19 +141,61 @@ him to the Secretary tab setup)
 
 ### The bahAI Workforce app itself
 You're built into the same app Sheraj uses to run his Etsy shop (Bahá'í
-bookmarks and quote cards, made by a separate pipeline — Librarian/Artist/
-Scribe/Reviewer — that you don't operate). Use list_products whenever he
-asks what products/bookmarks/cards exist, their status, whether something's
-published to Etsy, or revenue — the same data shown in the app's Products
-tab. Never say you don't have access to the Products tab or don't know
-what app you're in — call the tool instead.
+bookmarks and quote cards, made by a separate workforce of agents). Use
+list_products whenever he asks what products/bookmarks/cards exist, their
+status, whether something's published to Etsy, or revenue — the same data
+shown in the app's Products tab. Never say you don't have access to the
+Products tab or don't know what app you're in — call the tool instead.
 - edit_product overwrites a bookmark's title/description/quote/tags/
   materials/price note with EXACTLY what he dictates — a literal transcript
   of his words, never your own rewrite or improvement. Bookmarks only
   (quote cards have no listing to edit); it doesn't publish anything or
   spend any money, just updates the saved listing.
-- You still can't create new products, publish to Etsy, regenerate art, or
-  start a pipeline run — say so plainly if he asks for one of those.
+- You still can't publish to Etsy or edit a card — say so plainly if asked.
+
+### The workforce teams — you work WITH them on his behalf
+They are real colleagues with their own models, trust records and work:
+**Print Studio** — Ruth (librarian, verifies every quotation), Theo (artist),
+Clara (scribe), Amos (reviewer), Sofia (translator); **Film Crew** — Silas
+(director), Marta (videographer); **Ledger** — Nora (steward: money, trust,
+the project wallet). You are the Office. Four things you can do:
+- **workforce_report** — what they've actually done: trust, current goals and
+  real progress, the last recorded steps, what finished, what's running, what
+  is waiting for his approval. ALWAYS call this before telling him how a team
+  is doing. Never describe their work from memory, never estimate progress,
+  and keep the distinction it gives you between a JUDGED step (a real review
+  verdict) and a mechanical one — calling a render step "passed" would be a
+  false claim about quality.
+- **ask_agent** — put a question or instruction to one of them and relay their
+  real answer. Use it freely: to find something out (ask Ruth to verify a
+  quotation, Nora what things have cost), to pass on what Sheraj wants, or to
+  hear how they'd approach something. He can read the exchange in the Colony
+  tab. Never invent what an agent "would say" — ask them.
+- **set_team_goal** / **brief_agent** — this is how you give a team what they
+  need to do the work well. Both reach every prompt those agents run,
+  pipeline work included, so write them as instructions to a colleague: what
+  the work is for, who it's for, what to favour, what to avoid. When Sheraj
+  gives you a goal or a standing preference that belongs to their work, put it
+  there in your own words rather than keeping it to yourself. Free, immediate,
+  and they do not start any work.
+- **request_team_job** — ask a team to actually MAKE something (a quote card,
+  a bookmark, a video project). This always queues for his approval and never
+  starts on its own, because a run spends real money on artwork and review.
+  Call it whenever he asks for one, put everything the team needs into the
+  theme and detail, and tell him plainly that it's waiting for his OK. For
+  cards you are NOT limited to one: pass count for however many he wants (up
+  to 19 in a single run) and Ruth finds that many verified quotes before it
+  queues, so one request covers the lot. Never tell him you can only do one at
+  a time. Once he approves, it starts immediately and shows in the Pipeline
+  tab with the team lit up in the Colony map — so say where to watch it, and
+  never suggest he go and start it himself.
+
+**Their records are not private the way yours are.** Everything you write into
+a goal, a brief, a question or a job brief is stored in the workforce database
+and visible in the Colony tab, so send only what the WORK needs. Never pass on
+anything from your notes about his personal life, his health, his family, his
+money or his messages — the code refuses the worst of it outright, but the
+judgement is yours. Describe the work, not the man.
 
 ### Bahá'í dates — Trustworthiness rule
 The "Bahá'í dates" list below comes from a hand-verified table (2026–2028).
@@ -245,10 +287,26 @@ def _build_system_prompt() -> tuple[str, dict]:
                           + f": {r['message']}" for r in reminders[:10])
         known.append(f"### Pending reminders\n{lines}")
 
+    # ALWAYS stated, including when empty. Omitting the section when nothing is
+    # pending left her with no ground truth at all, and she filled the gap from
+    # earlier turns in the conversation — telling Sheraj three actions were
+    # waiting when two had already been approved or declined (real, 2026-08-14).
+    # A queue is exactly the kind of state that changes behind the conversation,
+    # so the current list has to outrank anything she remembers saying.
     pending = store.get_pending_actions()
     if pending:
         lines = "\n".join(f"- [#{p['id']}] {p['description']}" for p in pending)
-        known.append("### Awaiting Sheraj's approval (he can reply 'approve <number>')\n" + lines)
+        known.append(
+            "### Awaiting Sheraj's approval (he can reply 'approve <number>')\n"
+            "This is the COMPLETE current queue. Anything not listed here has already "
+            "been approved, declined or run — never describe it as still waiting.\n"
+            + lines)
+    else:
+        known.append(
+            "### Awaiting Sheraj's approval\nNothing is waiting right now. Everything "
+            "queued earlier in this conversation has since been approved, declined or "
+            "run — never tell him an older action is still waiting. (Anything you queue "
+            "during THIS reply is new and does count.)")
 
     context_parts.append("## What you know\n\n" + "\n\n".join(known))
     return build_system_prompt("secretary", "assist",
@@ -265,6 +323,15 @@ def execute_pending_action(action_id: int) -> str:
         return f"Action #{action_id} is not pending."
     payload = json.loads(action["payload"])
     try:
+        if action["kind"] == "workforce_job":
+            # A real pipeline run she asked a team for. Its outcome is a job
+            # that takes minutes, so return the launch confirmation and let the
+            # Pipeline tab report the rest — same as any hand-started run.
+            from agents import secretary_colony
+            outcome = secretary_colony.run_approved_job(payload)
+            store.resolve_pending_action(action_id, "done")
+            store.add_notification("approval", f"Approved & started: {action['description'][:80]}")
+            return outcome
         if action["kind"] == "event_update":
             gcal.update_event(payload["calendar_id"], payload["event_id"], **payload["fields"])
         elif action["kind"] == "event_delete":
@@ -348,9 +415,15 @@ def _finalize_reply(reply: str, effects: dict) -> str:
     Actions are now real tool calls executed live during the agentic loop
     (secretary_tools.make_executor), not markup embedded in this text — so
     there is nothing left here to parse or strip. The one remaining check:
-    a reply that READS like a commitment to act ("Adding that now") while
-    no tool call recorded anything in `effects` at all — see
-    _looks_like_uncommitted_action.
+    a reply that READS like a commitment to act ("Adding that now") when she
+    called NO TOOL AT ALL that turn — see _looks_like_uncommitted_action.
+
+    "No tool at all" is the real condition, and `effects["tool_calls"]` is
+    what makes it testable. Before 2026-08-14 this tested "no effect was
+    recorded", which is a different thing: a read-only turn records no
+    effect, so an ordinary lookup answer containing an action verb was
+    flagged as an action that silently failed. A warning that fires when
+    nothing is wrong teaches him to ignore the warning.
     """
     clean = re.sub(r"\n{3,}", "\n\n", reply).strip()
     if _looks_like_uncommitted_action(reply) and not any(effects.values()):
@@ -359,6 +432,44 @@ def _finalize_reply(reply: str, effects: dict) -> str:
             "that sounded like I was taking an action, but no tool actually "
             "ran — nothing happened; ask me again")
     return clean
+
+
+# An action she names by number, and the words that mean she is describing the
+# approval queue. Used by _approval_ground_truth below.
+_ACTION_REF_RE = re.compile(r"#(\d{1,6})\b")
+_APPROVAL_WORD_RE = re.compile(r"\b(approv\w*|waiting|queued?|pending)\b", re.IGNORECASE)
+
+
+def _approval_ground_truth(reply: str) -> str:
+    """
+    Correct, in code, any claim that a finished action is still waiting.
+
+    The pending queue is stated in her system prompt, and she still listed two
+    already-resolved actions as waiting because her OWN earlier reply in the
+    conversation said so (real, 2026-08-14). A queue changes behind the
+    conversation, so what she remembers saying about it is worth less than the
+    table — and a wrong queue is not a cosmetic error: it invites Sheraj to
+    approve something twice, which is exactly how a card got made twice.
+
+    Same class as _ground_truth_confirmation: the record overrules the model.
+    Silent when every number she named is genuinely pending, so a correct reply
+    is never cluttered with a redundant footer.
+    """
+    if not _APPROVAL_WORD_RE.search(reply):
+        return ""
+    referenced = {int(n) for n in _ACTION_REF_RE.findall(reply)}
+    if not referenced:
+        return ""
+    pending = store.get_pending_actions()
+    live = {p["id"] for p in pending}
+    stale = sorted(r for r in referenced if r not in live)
+    if not stale:
+        return ""
+    named = ", ".join(f"#{s}" for s in stale)
+    waiting = ", ".join(f"#{p['id']}" for p in pending)
+    return (f"ℹ️ From the record: {named} {'is' if len(stale) == 1 else 'are'} NOT "
+            "waiting — already approved, declined or run. "
+            + (f"Waiting now: {waiting}." if pending else "Nothing is waiting now."))
 
 
 def _ground_truth_confirmation(effects: dict) -> str:
@@ -375,6 +486,8 @@ def _ground_truth_confirmation(effects: dict) -> str:
         lines.append(f"✅ Calendar: {e}")
     for w in effects["workspace"]:
         lines.append(f"✅ Workspace: {w}")
+    for w in effects["workforce"]:
+        lines.append(f"✅ Workforce: {w}")
     for r in effects["reminders"]:
         lines.append(f"✅ Reminder set: {r}")
     for q in effects["queued_for_approval"]:
@@ -385,6 +498,21 @@ def _ground_truth_confirmation(effects: dict) -> str:
 
 
 # ── The conversation turn ──────────────────────────────────────────────────────
+
+def _her_model() -> str | None:
+    """
+    The Claude model Sheraj picked for her in the Colony tab, or None for the
+    ANTHROPIC_MODEL default. Fails open — a model registry that can't be read
+    must never stop her answering. models.validate_choice guarantees at SAVE
+    time that this can only ever be a Claude model (rule 16), so nothing here
+    needs to re-police the provider.
+    """
+    try:
+        from agents.colony import get_agent_settings
+        return (get_agent_settings("secretary").get("model") or "").strip() or None
+    except Exception:
+        return None
+
 
 def chat(user_message: str, channel: str = "dashboard") -> dict:
     store.init_db()
@@ -402,12 +530,14 @@ def chat(user_message: str, channel: str = "dashboard") -> dict:
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
     effects = {"remembered": [], "tasks_added": [], "events": [], "reminders": [],
-               "workspace": [], "queued_for_approval": [], "errors": []}
+               "workspace": [], "workforce": [], "queued_for_approval": [], "errors": [],
+               "tool_calls": []}
     executor = secretary_tools.make_executor(event_map, effects)
     # max_tokens is per ROUND; bulk Workspace work (many rows in one
     # append_sheet_rows call) needs room for a large tool_use input block.
     raw_reply = call_claude_agentic(messages, system=system, tools=secretary_tools.ALL_TOOLS,
-                                    executor=executor, max_tokens=4000, max_rounds=6)
+                                    executor=executor, max_tokens=4000, max_rounds=6,
+                                    model=_her_model())
     reply = _finalize_reply(raw_reply, effects)
 
     # Ground truth wins: append a deterministic, code-authored confirmation
@@ -416,11 +546,15 @@ def chat(user_message: str, channel: str = "dashboard") -> dict:
     confirmation = _ground_truth_confirmation(effects)
     if confirmation:
         reply = (reply + "\n\n" + confirmation) if reply else confirmation
+    correction = _approval_ground_truth(reply)
+    if correction:
+        reply += "\n\n" + correction
     if not reply:
         reply = "Noted."
 
     store.add_message("assistant", reply, channel=channel)
-    actions = effects["events"] + effects["workspace"] + effects["reminders"] + \
+    actions = effects["events"] + effects["workspace"] + effects["workforce"] + \
+        effects["reminders"] + \
         [f"queued for approval: {q}" for q in effects["queued_for_approval"]]
     return {"reply": reply, "remembered": effects["remembered"],
             "tasks_added": effects["tasks_added"], "actions": actions}
@@ -444,7 +578,7 @@ def guest_chat(contact: dict, user_message: str) -> dict:
     history = store.get_recent_messages(HISTORY_WINDOW, thread=name)
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
-    reply = call_claude(messages, system=guest_system)
+    reply = call_claude(messages, system=guest_system, model=_her_model())
     if not reply:
         reply = "Hi — I'll let Sheraj know you messaged."
 

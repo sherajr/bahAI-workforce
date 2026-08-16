@@ -331,7 +331,7 @@ def score(
         raw = call_llm("reviewer", [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_message},
-        ], temperature=0.15, max_tokens=5200, json_mode=True).strip()
+        ], temperature=0.15, max_tokens=5200, json_mode=True, agent="reviewer").strip()
 
     return _parse_review(raw)
 
@@ -634,7 +634,7 @@ def score_quote_card(
         raw = call_llm("reviewer", [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_message},
-        ], temperature=0.15, max_tokens=1600, json_mode=True).strip()
+        ], temperature=0.15, max_tokens=1600, json_mode=True, agent="reviewer").strip()
 
     review = _parse_review(raw)
     action = str(review.get("action") or "").strip().lower()

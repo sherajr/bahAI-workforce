@@ -241,7 +241,11 @@ export interface JobStep {
 export interface JobBase {
   job_id: string;
   kind: string;
-  status: "running" | "waiting_for_input" | "done" | "error";
+  status: "running" | "waiting_for_input" | "done" | "error" | "cancelled";
+  /** True from the moment Cancel is pressed until the worker actually stops —
+   *  the run is finishing the step it's on, so the UI says "stopping", never
+   *  "stopped". */
+  cancel_requested?: boolean;
   progress: string;
   steps: JobStep[];
   // Consultation turns streamed live as they happen (round 1, round 2, then
@@ -251,6 +255,10 @@ export interface JobBase {
   // Set while status is "waiting_for_input": what the Reviewer is asking Sheraj.
   pending_prompt?: string | null;
   error: string | null;
+  /** Who set this job going: "sheraj" (a dashboard button), "abigail" (a
+   *  request of hers he approved), or "colony" (a team goal). The Pipeline tab
+   *  adopts running jobs it didn't start, so it has to be able to say whose. */
+  started_by?: string;
   created_at: string;
   updated_at: string;
 }
@@ -947,4 +955,338 @@ export interface VideoExportResult {
   video_url?: string;
   metadata_url?: string;
   subtitles_url?: string;
+}
+
+/**
+ * A finished video, as the Products shelf sees it (GET /video/finished).
+ *
+ * Derived on the backend from the video tables every time it's read — a
+ * finished video is not a `products` row, so nothing here can drift out of
+ * step with the project it came from.
+ */
+export interface FinishedVideo {
+  id: string;                       // the video PROJECT id
+  title: string;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  source_kind: string | null;       // scene_story | bookmark | quote_card
+  source_product_id: string | null;
+  video_url: string;
+  poster_url: string;
+  metadata_url: string;
+  subtitles_url: string;
+  file_missing: boolean;
+  clip_count: number;
+  shot_count: number;
+  duration_seconds: number;
+  /** False = the file couldn't be measured, so this is the plan's length. */
+  duration_measured: boolean;
+  /** Built from mock clips — never presentable as real generation (rule 32). */
+  is_mock: boolean;
+}
+
+// ── The Colony (dashboard tab: the workforce as an organisation) ─────────────
+// Mirrors agents/colony.py. Handoff edges are DERIVED from task_runs on the
+// backend, so an edge on screen is recorded work, never a drawn assumption.
+
+export interface ColonyAgent {
+  name: string;
+  team: string | null;
+  /** A pipeline tool (compositor, consultation), not a person: no chat, no settings. */
+  is_instrument: boolean;
+  /** False for instruments and for the Secretary — she has her own tab (rules 15/16). */
+  chattable: boolean;
+  trust_level: number;
+  trust_level_name: string;
+  trust_score: number;
+  total_runs: number;
+  clean_runs: number;
+  consecutive_failures: number;
+  promotion_note: string;
+  live: boolean;
+  paused: boolean;
+  has_instructions: boolean;
+}
+
+export interface GoalProgress {
+  done: number;
+  target: number | null;
+  /** False for teams with no product pipeline — their goals steer, not ship. */
+  measurable: boolean;
+}
+
+export interface TeamGoal {
+  id: number;
+  team: string;
+  goal: string;
+  detail: string;
+  target_count: number | null;
+  status: string;
+  created_at: string;
+  completed_at: string | null;
+  launched_job_id: string | null;
+  baseline_products: number;
+  /** "sheraj" or "abigail" — a goal steers every agent on the team, so where
+   *  it came from must never be ambiguous on screen. */
+  set_by?: string;
+  progress?: GoalProgress;
+}
+
+/** A pipeline job running for a team right now (derived from the live job
+ *  store, never a second record of it). */
+export interface TeamJob {
+  job_id: string;
+  kind: string;
+  label: string;
+  progress: string;
+  status: string;
+  started_by: string;
+  started_by_label: string;
+}
+
+export interface ColonyTeam {
+  id: string;
+  name: string;
+  blurb: string;
+  accent: string;
+  members: string[];
+  instruments: string[];
+  goal_kinds: string[];
+  consultable: boolean;
+  active_goals: TeamGoal[];
+  jobs?: TeamJob[];
+  /** True while a job is running for this team, or one of its agents logged a
+   *  step in the last few minutes. */
+  working?: boolean;
+}
+
+export interface HandoffEdge {
+  source: string;
+  target: string;
+  count: number;
+  last_at: string | null;
+}
+
+export interface ColonySnapshot {
+  agents: ColonyAgent[];
+  teams: ColonyTeam[];
+  edges: HandoffEdge[];
+  pending_actions: number;
+  generated_at: string;
+}
+
+export interface AgentRun {
+  id: number;
+  task_id: string;
+  agent: string;
+  step: string;
+  input_summary: string | null;
+  output_summary: string | null;
+  /** null when the run was mechanical — rule 14, never collapse this to false. */
+  passed_review: boolean | null;
+  judged: boolean;
+  timestamp: string;
+}
+
+export interface AgentSettings {
+  agent: string;
+  custom_instructions: string;
+  paused: boolean;
+  /** "" means no override — the router's task-type default applies. */
+  model: string;
+  updated_at: string | null;
+}
+
+export interface ColonyAgentMessage {
+  id: number;
+  agent: string;
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+}
+
+export interface ColonyAgentDetail {
+  name: string;
+  team: string | null;
+  team_name: string | null;
+  is_instrument: boolean;
+  chattable: boolean;
+  trust_level: number;
+  trust_level_name: string;
+  trust_score: number;
+  total_runs: number;
+  clean_runs: number;
+  consecutive_failures: number;
+  promotion_note: string;
+  live: boolean;
+  settings: AgentSettings;
+  goal_note: string;
+  recent_runs: AgentRun[];
+  hands_to: HandoffEdge[];
+  receives_from: HandoffEdge[];
+  messages: ColonyAgentMessage[];
+}
+
+export interface ColonyAction {
+  id: number;
+  agent: string;
+  kind: string;
+  description: string;
+  payload: string;
+  status: string;
+  result: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface ColonyChatResult {
+  agent: string;
+  reply: string;
+  queued: { id: number; description: string }[];
+  used: string[];
+}
+
+export interface GoalLaunchResult {
+  result: string;
+  job_id?: string;
+  kind?: string;
+  theme?: string;
+  video_project_id?: string;
+  message?: string;
+}
+
+export interface TeamConsultTurn {
+  agent: string;
+  text: string;
+}
+
+export interface TeamConsultResult {
+  team: string;
+  team_name: string;
+  question: string;
+  turns: TeamConsultTurn[];
+  summary: string;
+}
+
+// ── Per-agent model selection ───────────────────────────────────────────────
+// Mirrors agents/models.py. The provider boundary (workforce = ollama|xai,
+// Abigail = anthropic only) is enforced on the BACKEND — this is display.
+
+export interface ModelOption {
+  id: string;
+  provider: "ollama" | "xai" | "anthropic";
+  label: string;
+  paid: boolean;
+  note: string;
+}
+
+export interface ModelChoices {
+  models: ModelOption[];
+  /** Whether each provider actually answered. An empty local list because
+   *  Ollama is DOWN is a different fact from nothing being installed. */
+  reachable: Record<string, boolean>;
+  agent?: string;
+  /** "" when the agent is on the default routing. */
+  chosen?: string;
+  default_model?: string;
+  default_provider?: string;
+  default_paid?: boolean;
+  /** True for the Reviewer and Artist: their image work goes through
+   *  call_grok_vision, a separate path a local model choice cannot make free. */
+  uses_vision?: boolean;
+}
+
+// ── The project wallet (Nora's domain) ──────────────────────────────────────
+// Mirrors agents/wallet.py. All safety lives on the backend: owner-only
+// allowlist, hard caps, USDC-only for the agent, mainnet opt-in.
+
+export interface AllowlistEntry {
+  id: number;
+  label: string;
+  address: string;
+  note?: string;
+  created_at: string;
+}
+
+export interface WalletLimits {
+  auto_send_usdc: string;
+  max_per_tx_usdc: string;
+  daily_cap_usdc: string;
+  spent_today_usdc: string;
+}
+
+export interface WalletChain {
+  id: string;
+  name: string;
+  testnet: boolean;
+  explorer: string;
+  native: string;
+}
+
+export interface WalletStatus {
+  exists: boolean;
+  address: string | null;
+  can_send: boolean;
+  cannot_send_reason: string;
+  mainnet_enabled: boolean;
+  default_chain: string;
+  chains: WalletChain[];
+  limits: WalletLimits;
+  allowlist: AllowlistEntry[];
+  treasury: AllowlistEntry[];
+}
+
+export interface ChainBalance {
+  chain: string;
+  name: string;
+  testnet: boolean;
+  /** null when the chain could not be reached — NOT zero. */
+  usdc: string | null;
+  native: string | null;
+  native_symbol: string;
+  explorer: string;
+  reachable: boolean;
+  error?: string;
+}
+
+export interface WalletBalances {
+  address: string | null;
+  chains: ChainBalance[];
+  /** REAL money only. Testnet holdings are never folded into this. */
+  total_usdc: string;
+  total_testnet_usdc?: string;
+  treasury?: (AllowlistEntry & { balances: WalletBalances | null })[];
+  error?: string;
+}
+
+export interface WalletTx {
+  id: number;
+  chain: string;
+  token: string;
+  to_address: string;
+  to_label: string;
+  amount: string;
+  tx_hash: string | null;
+  status: string;
+  initiated_by: string;
+  note: string;
+  created_at: string;
+  explorer_url: string | null;
+}
+
+export interface CreatedWallet {
+  address: string;
+  private_key: string;
+  warning: string;
+}
+
+export interface WalletSendResult {
+  id: number;
+  tx_hash: string;
+  chain: string;
+  amount: string;
+  to: string;
+  to_label: string;
+  explorer_url: string;
 }

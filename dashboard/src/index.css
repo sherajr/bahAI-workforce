@@ -25,3 +25,48 @@ body {
 input[type="range"] {
   @apply accent-amber-400;
 }
+
+/* ── Colony constellation ──────────────────────────────────────────────────
+   The Colony tab draws the workforce as orbiting systems. These animations
+   run on SVG attributes Tailwind can't reach. Everything here respects
+   prefers-reduced-motion: the graph must stay fully readable when still —
+   motion carries emphasis, never information. */
+
+@keyframes colony-flow {
+  to { stroke-dashoffset: -28; }
+}
+@keyframes colony-orbit {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes colony-pulse {
+  0%, 100% { opacity: 0.25; transform: scale(1); }
+  50%      { opacity: 0.6;  transform: scale(1.08); }
+}
+
+/* A handoff edge: dashes travelling from source to target. */
+.colony-edge-flow {
+  stroke-dasharray: 3 9;
+  animation: colony-flow 1.6s linear infinite;
+}
+
+/* An orbit ring turns slowly about its own system's centre. */
+.colony-orbit-spin {
+  animation: colony-orbit 90s linear infinite;
+  transform-origin: var(--spin-origin);
+}
+
+/* The halo behind an agent that logged a run in the last few minutes. */
+.colony-live-pulse {
+  animation: colony-pulse 2.4s ease-in-out infinite;
+  transform-origin: var(--spin-origin);
+  transform-box: fill-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .colony-edge-flow,
+  .colony-orbit-spin,
+  .colony-live-pulse {
+    animation: none;
+  }
+}

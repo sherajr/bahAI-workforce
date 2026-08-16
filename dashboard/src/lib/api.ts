@@ -14,7 +14,10 @@ import type {
   RuhiQuoteSuggestResult, QuoteSourceOption,
   VideoProject, VideoProjectDetail, VideoProvidersResult, VideoDefaults, VideoShot,
   VideoValidation, VideoExportResult, VideoDirection, ContinuityBible,
-  VideoShotData, VideoMotionRepair,
+  VideoShotData, VideoMotionRepair, FinishedVideo,
+  ColonySnapshot, ColonyAgentDetail, ColonyChatResult, AgentSettings, HandoffEdge,
+  AgentRun, ColonyAction, TeamGoal, GoalLaunchResult, ModelChoices,
+  WalletStatus, WalletBalances, WalletTx, CreatedWallet, WalletSendResult,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -241,6 +244,19 @@ export const api = {
     return job;
   },
   getJobs: () => get<JobSummary[]>("/pipeline/jobs"),
+  // Stop a running job. The server flags it and the worker stops at its next
+  // step boundary, so the panel keeps polling until the status really is
+  // "cancelled" rather than assuming this call ended it.
+  cancelJob: async (jobId: string) => {
+    const res = await post<{ status: string; message: string; already_finished?: boolean }>(
+      `/pipeline/status/${jobId}/cancel`, {});
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "CANCEL", path: jobId, status: "OK", ms: 0,
+      detail: res.message,
+    });
+    return res;
+  },
   respondToJob: async (jobId: string, text: string) => {
     const res = await post<{ status: string }>(`/pipeline/status/${jobId}/respond`, { text });
     pushActivity({
@@ -407,6 +423,142 @@ export const api = {
   // Trust + agents
   getTrustReport: () => get<TrustReport>("/trust/report"),
   getAgents: () => get<AgentStatus[]>("/agents"),
+
+  // ── The Colony ────────────────────────────────────────────────────────────
+  // Polled views are `silent` so a graph refreshing every few seconds doesn't
+  // drown the Activity Log; anything that CHANGES something stays loud.
+  getColony: () => request<ColonySnapshot>("GET", "/colony", undefined, { silent: true }),
+  getColonyAgent: (agent: string) =>
+    request<ColonyAgentDetail>("GET", `/colony/agents/${agent}`, undefined, { silent: true }),
+  colonyChat: (agent: string, message: string) =>
+    post<ColonyChatResult>(`/colony/agents/${agent}/chat`, { message }),
+  clearColonyChat: (agent: string) =>
+    request<{ result: string }>("DELETE", `/colony/agents/${agent}/chat`),
+  getAgentModels: (agent: string) =>
+    request<ModelChoices>("GET", `/colony/models?agent=${agent}`, undefined, { silent: true }),
+  setAgentSettings: async (
+    agent: string,
+    patch: { custom_instructions?: string; paused?: boolean; model?: string },
+  ) => {
+    const res = await post<AgentSettings>(`/colony/agents/${agent}/settings`, patch);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "COLONY", path: agent, status: "OK", ms: 0,
+      detail: patch.paused !== undefined
+        ? `${agent} ${patch.paused ? "paused" : "un-paused"}.`
+        : patch.model !== undefined
+          ? (patch.model
+              ? `${agent} now runs on ${patch.model}.`
+              : `${agent} reset to the default model.`)
+          : `Saved standing instructions for ${agent}.`,
+    });
+    return res;
+  },
+  getColonyHandoffs: (days = 30) =>
+    request<{ days: number; edges: HandoffEdge[]; recent_runs: AgentRun[] }>(
+      "GET", `/colony/handoffs?days=${days}`, undefined, { silent: true },
+    ),
+
+  getColonyActions: (status = "pending") =>
+    request<{ actions: ColonyAction[] }>(
+      "GET", `/colony/actions?status=${status}`, undefined, { silent: true },
+    ),
+  resolveColonyAction: async (id: number, approve: boolean) => {
+    const res = await post<{ result: string; outcome?: string; action: ColonyAction }>(
+      `/colony/actions/${id}?approve=${approve}`, {},
+    );
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "COLONY", path: `action #${id}`,
+      status: res.result === "done" ? "OK" : "SKIPPED", ms: 0,
+      detail: res.result === "done"
+        ? `Approved and ran action #${id}: ${res.outcome ?? ""}`
+        : `Declined action #${id}.`,
+    });
+    return res;
+  },
+
+  getGoals: (team?: string, status?: string) => {
+    const q = new URLSearchParams();
+    if (team) q.set("team", team);
+    if (status) q.set("status", status);
+    const qs = q.toString();
+    return request<{ goals: TeamGoal[] }>(
+      "GET", `/colony/goals${qs ? `?${qs}` : ""}`, undefined, { silent: true },
+    );
+  },
+  createGoal: (body: { team: string; goal: string; detail?: string; target_count?: number | null }) =>
+    post<TeamGoal>("/colony/goals", body),
+  updateGoal: (id: number, patch: Partial<Pick<TeamGoal, "goal" | "detail" | "target_count" | "status">>) =>
+    request<TeamGoal>("PATCH", `/colony/goals/${id}`, patch),
+  deleteGoal: (id: number) => request<{ result: string }>("DELETE", `/colony/goals/${id}`),
+  launchGoal: async (id: number, body: { kind?: string; theme?: string; language?: string | null }) => {
+    const res = await post<GoalLaunchResult>(`/colony/goals/${id}/launch`, body);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "COLONY", path: `goal #${id}`, status: "OK", ms: 0,
+      detail: res.result === "project_created"
+        ? `Goal #${id} created video project ${res.video_project_id}.`
+        : `Goal #${id} started a real ${res.kind} run (job ${res.job_id}).`,
+    });
+    return res;
+  },
+  // ── The project wallet ────────────────────────────────────────────────────
+  // Money moves are LOUD in the activity log by design — an irreversible
+  // action must never be something you have to go looking for.
+  getWalletStatus: () => get<WalletStatus>("/wallet/status"),
+  getWalletBalances: () =>
+    request<WalletBalances>("GET", "/wallet/balances", undefined, { silent: true }),
+  getWalletHistory: (limit = 50) =>
+    request<{ transactions: WalletTx[] }>(
+      "GET", `/wallet/history?limit=${limit}`, undefined, { silent: true }),
+  createWallet: async () => {
+    const res = await post<CreatedWallet>("/wallet/create", {});
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "WALLET", path: "create", status: "OK", ms: 0,
+      // The address is public; the key is never logged anywhere.
+      detail: `Project wallet created: ${res.address}`,
+    });
+    return res;
+  },
+  addAllowlist: async (label: string, address: string, note = "") => {
+    const res = await post<{ label: string; address: string }>(
+      "/wallet/allowlist", { label, address, note });
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "WALLET", path: "approve", status: "OK", ms: 0,
+      detail: `Approved "${label}" (${address}) to receive funds.`,
+    });
+    return res;
+  },
+  removeAllowlist: async (id: number) => {
+    const res = await request<{ result: string }>("DELETE", `/wallet/allowlist/${id}`);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "WALLET", path: "approve", status: "OK", ms: 0,
+      detail: `Removed an approved address (#${id}).`,
+    });
+    return res;
+  },
+  addTreasury: (label: string, address: string) =>
+    post<{ label: string; address: string }>("/wallet/treasury", { label, address }),
+  removeTreasury: (id: number) =>
+    request<{ result: string }>("DELETE", `/wallet/treasury/${id}`),
+  walletSend: async (body: { to: string; amount: string; chain?: string; note?: string }) => {
+    const res = await post<WalletSendResult>("/wallet/send", body);
+    pushActivity({
+      ts: new Date().toLocaleTimeString(),
+      method: "WALLET", path: "send", status: "OK", ms: 0,
+      detail: `Sent ${res.amount} USDC to ${res.to_label} — ${res.tx_hash}`,
+    });
+    return res;
+  },
+
+  consultTeam: (team: string, question: string) =>
+    post<{ job_id: string; status: string; team: string }>(
+      `/colony/teams/${team}/consult`, { question },
+    ),
 
   // Integrations
   getCanvaStatus: () => get<CanvaStatus>("/canva/status"),
@@ -648,6 +800,9 @@ export const api = {
   getVideoProviders: () => get<VideoProvidersResult>("/video/providers"),
   getVideoDefaults: () => get<VideoDefaults>("/video/defaults"),
   getVideoProjects: () => get<{ projects: VideoProject[] }>("/video/projects"),
+  // Finished videos for the Products shelf. Derived server-side from the video
+  // tables, so it always agrees with the Video tab.
+  getFinishedVideos: () => get<{ videos: FinishedVideo[] }>("/video/finished"),
   getVideoProject: (id: string) =>
     request<VideoProjectDetail>("GET", `/video/projects/${id}`, undefined, { silent: true }),
   createVideoProject: async (payload: {

@@ -101,7 +101,52 @@ export const ROSTER: Record<string, RosterEntry> = {
   steward:    { name: "Nora",    role: "Steward",     avatar: "/roster/steward.jpg" },
   translator: { name: "Sofia",   role: "Translator",  avatar: "/roster/translator.jpg" },
   secretary:  { name: "Abigail", role: "Secretary",   avatar: "/abigail.jpg" },
+  // The Video pipeline's two agents had backend ids but no display identity
+  // until the Colony tab gave every node a face (2026-08-13). Same rule as the
+  // rest: display only — video_director.py / videographer.py still key on the
+  // lowercase ids, so their trust history is untouched by the naming.
+  director:     { name: "Silas", role: "Director",     avatar: "/roster/director.jpg" },
+  videographer: { name: "Marta", role: "Videographer", avatar: "/roster/videographer.jpg" },
 };
+
+// The pipeline instruments: real rows in task_runs (so they carry the handoff
+// graph) but not people. They render as small unnamed nodes — no avatar, no
+// chat, no settings — because pretending a render step is a colleague would
+// make the graph lie about who is actually doing the judging.
+export const INSTRUMENT_LABELS: Record<string, string> = {
+  compositor: "Compositor",
+  consultation: "Consultation",
+};
+
+export function agentLabel(id: string): string {
+  return ROSTER[id]?.name ?? INSTRUMENT_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+export function agentRole(id: string): string {
+  return ROSTER[id]?.role ?? (INSTRUMENT_LABELS[id] ? "pipeline step" : "agent");
+}
+
+// Team accent → the concrete colours the constellation draws with. Kept as
+// explicit literals rather than built from template strings so Tailwind's
+// scanner can actually see every class name it needs to emit.
+export interface TeamAccent {
+  hex: string;        // for SVG strokes/gradients, which Tailwind can't reach
+  text: string;
+  border: string;
+  bg: string;
+  dot: string;
+}
+
+export const TEAM_ACCENTS: Record<string, TeamAccent> = {
+  amber:   { hex: "#fbbf24", text: "text-amber-300",   border: "border-amber-400/40",   bg: "bg-amber-400/10",   dot: "bg-amber-400" },
+  sky:     { hex: "#38bdf8", text: "text-sky-300",     border: "border-sky-400/40",     bg: "bg-sky-400/10",     dot: "bg-sky-400" },
+  violet:  { hex: "#a78bfa", text: "text-violet-300",  border: "border-violet-400/40",  bg: "bg-violet-400/10",  dot: "bg-violet-400" },
+  emerald: { hex: "#34d399", text: "text-emerald-300", border: "border-emerald-400/40", bg: "bg-emerald-400/10", dot: "bg-emerald-400" },
+};
+
+export function accentFor(accent: string | undefined): TeamAccent {
+  return TEAM_ACCENTS[accent ?? ""] ?? TEAM_ACCENTS.amber;
+}
 
 /** Look up a roster entry by the backend id ("librarian") or the consultation
  *  label ("Librarian"). Returns undefined for non-persona labels (System,
