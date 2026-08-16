@@ -19,118 +19,464 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-07-09)
+## Snapshot (as of 2026-08-16)
 
-Sheraj approved committing and pushing the current working tree on
-2026-07-09. After that push, start from `git status` as usual before
-making more changes.
+**Live and working** (committed, in production):
+- **Bookmark pipeline** (Librarian → Artist → consultation → Scribe → Reviewer
+  → Compositor) and the **quote-card giveaway pipeline** (owner-selectable
+  sources, default Ruhi Book 1, optional translation). Etsy publishing is built
+  but has never run; Canva autofill is built, broken (0/10) and now off by
+  default.
+- **The visual layout editor** for both product types, **print sheets**
+  (single + multi-product gathering sheets), the **X-post giveaway pipeline**,
+  and the **named roster + avatars** on the dashboard.
+- **Abigail (the Secretary)** Phases 1–3: dashboard chat + WhatsApp (owner tier
+  and a tool-less guest tier), real Claude tool-calling for every read/write,
+  Google Workspace. Phase 4 (recovery rhythms) not started.
 
-**What's live and working** (committed, in production):
-- Bookmark pipeline (Librarian → Artist → consultation → Scribe → Reviewer →
-  Compositor → Canva autofill → Etsy draft) and the Quote Card giveaway
-  pipeline (Ruhi Book 1 only, optional translation).
-- Abigail (the Secretary) — Phases 1–3: dashboard chat + WhatsApp, real
-  Claude tool-calling for every read/write, Google Workspace integration.
-  Phase 4 (recovery rhythms) not started. Guest WhatsApp messages are styled
-  and labeled by sender name.
-- Trust/Steward reporting, print sheets, X-post giveaway pipeline.
+Also committed: the **Video Generation pipeline** (`58a785f`), the quote-card
+redesign and exactness work, print sheets and the giving ledger. (Earlier
+Snapshots claimed video and the card work were still uncommitted long after they
+had landed — check `git status` rather than trusting a line like this.)
 
-**What's new and committed/pushed on 2026-07-09:**
-- **Native visual layout editor** (both bookmarks and quote cards) —
-  `agents/layout.py`, threaded through both compositors, 3 new API endpoints
-  (`GET/POST /products/{id}/layout`, `.../layout/preview`), and
-  `LayoutEditor.tsx` in the product drawer. Adjusts font/size/position/
-  colour/shading only — never the printed text (verified: locked quote,
-  Ruhi Book 1 restriction, and script-verified translation fonts all hold
-  through it). Built in response to Sheraj's ask for Canva-like editing;
-  Sheraj explicitly chose "build it yourself, skip the Canva round-trip."
-  Grok has already exercised this live in production (see Activity Log
-  2026-07-08 20:0x below) — it works.
-- **Named roster + avatars** — `dashboard/src/lib/utils.ts`'s `ROSTER` maps
-  backend ids to display names (Ruth/Librarian, Theo/Artist, Clara/Scribe,
-  Amos/Reviewer, Nora/Steward, Sofia/Translator, alongside Abigail), wired
-  into the Trust tab and consultation transcript. Display layer only —
-  backend still keys on lowercase ids. **Avatars approved by Sheraj
-  2026-07-10** ("pics are good, more zoomed in on their faces though") —
-  all six were re-cropped tight on the faces (originals preserved in
-  `dashboard/public/roster/originals/`; re-crop script pattern: crop from
-  the ORIGINAL each time, per-face centers, so it's idempotent). Avatars
-  live in `dashboard/public/roster/` (gitignored, private, like Abigail's
-  photo).
-- **Manual-edit honesty fix** — hand-editing a bookmark's quote via
-  `PATCH /products/{id}` now flags `quote_verified: false` (dashboard shows
-  a warning) and re-renders the printed face, and the honesty scrub
-  (`_sanitize_claims`) now runs on every hand-edited field, closing a
-  pre-existing gap. Owner decision: keep the field editable, don't lock it —
-  just make the edit visibly honest.
-- **Multi-coder infra** (this session, in progress) — `AGENTS.md` created as
-  the canonical tool-agnostic instructions file; `CLAUDE.md` reduced to an
-  `@AGENTS.md` import so Claude Code still auto-loads full context without
-  duplicating it; this file (`STATUS.md`) created; `requirements.txt` fixed
-  (was missing `chromadb`, `chonkie`, `beautifulsoup4`, which are real
-  runtime/setup-script dependencies).
+**Uncommitted in the working tree** (verified against `git status` 2026-08-16) —
+five features plus docs, none reviewed by Sheraj yet. Proposed commit breakdown
+in the 2026-08-16 log entry:
+- **The Colony** (2026-08-13) — replaced the Trust tab. `colony.py`,
+  `colony_chat.py`, `colony_tools.py`, `models.py` (per-agent model choice),
+  `dashboard/src/components/colony/`, `TrustPanel.tsx` deleted. Rules 35–41a.
+- **The project wallet** (2026-08-14) — `wallet.py`, Nora's money tool, the
+  hot/treasury split. Rules 42–49.
+- **Abigail ↔ the teams** (2026-08-14) — `secretary_colony.py` and her five new
+  tools in `secretary_tools.py`. Rules 50–54.
+- **Run cancellation** (2026-08-14) — `api.py` + `scripts/test_job_cancel.py`.
+  Rules 55–57.
+- **Finished videos on the Products page + product filters** (2026-08-15) —
+  `video_assembly.py`, `api.py`, `ProductsGallery.tsx`, `settings.ts`. Rule 58.
+- Post-commit **video fixes** in `video_director.py` / `test_video_pipeline.py`,
+  and the **doc rewrites** (AGENTS.md reorganised, STATUS.md trimmed).
 
-**Deferred / proposed but not started** (from
-`docs/improvement-plan-2026-07-08.md`'s Part 2 audit — Sheraj hasn't asked
-for these yet, listed so nobody re-discovers them from scratch):
-- ~~Retire the vestigial "Operator" and "Producer" labels~~ — **done
-  2026-07-10 by Grok** (assignee → `pipeline`, publish log → `steward`,
-  removed from `AGENT_NAMES` + dead trust-row cleanup on init, dead
-  persona/`plan`/`produce` prompt-builder entries removed).
-- ~~Hide non-persona rows (`compositor`, `consultation`) from the Trust tab~~ — **done
-  2026-07-10 by Antigravity** (filtered to active personas with runs).
+**Deferred / proposed, not started** (nobody should re-discover these from
+scratch):
+- **Devotional-gathering KIT pipeline** (N new cards + a program page) — the
+  agreed flagship next per Sheraj's deeds-first direction.
+- Abigail **Phase 4** (recovery rhythms) — read
+  `docs/fable5-briefing-secretary.md` first.
+- Grounding-bar tightening for bookmarks; retrieval enrichment; free
+  share-image exports; multilingual packs.
 - Relabel the Canva-autofill `log_run` entry from `"artist"` to whichever
-  persona ends up representing publishing (currently misattributed —
-  publish itself now logs under `steward`).
-- ~~Remove the dead `framing_contribution` scripture entry and unused
-  `GROK_TASK_TYPES` entries~~ — **done, see Activity Log below** (dispatched
-  to Grok as the first real orchestration test).
-- ~~Fix Codex's local-model routing~~ — **worked around 2026-07-09** without
-  touching his config: per-invocation CLI overrides route dispatches to the
-  cloud (`gpt-5.5`); exact command in `AGENTS.md`. The config file itself
-  still points at the never-pulled `gemma4` — only matters if Sheraj wants
-  the desktop app's local mode working.
-- ~~Rule-4 gap in Abigail's `edit_product` tool~~ — **FIXED 2026-07-09**
-  (Sheraj approved; implemented by Grok under Claude supervision, verified
-  live, backend restarted — see Activity Log). Her tool now mirrors the
-  dashboard PATCH path: `_sanitize_claims` scrub, `quote_verified=false`
-  demotion on quote change, re-render that degrades to a note.
-- ~~corrupted non-dict `layout_json` crash on GET layout~~ — **done
-  2026-07-10 by Grok** (`sanitize` treats any non-dict as `{}`).
-- ~~New (UX, advisory): LayoutEditor improvements~~ — **done
-  2026-07-10 by Antigravity** (fixed Saved badge reset, close guard, and confirm on Reset).
-- ~~etsy_publish docstring "price parsed from price_note"~~ — **done
-  2026-07-10 by Grok** (now correctly documents policy price / rule 13).
-
-**Uncommitted in the working tree (2026-08-12):** the **Video Generation
-pipeline** — the third product pipeline alongside bookmarks and quote cards.
-A scene/story/passage becomes many simple 3–4s shots that assemble into a
-video; bookmarks and quote cards are secondary source options. New backend
-modules `agents/video_{store,director,safety,provider,pipeline,assembly}.py`
-plus an expanded `agents/videographer.py`; ~30 new `/video/*` routes in
-`agents/api.py`; a new dashboard **Video** tab
-(`components/VideoPanel.tsx` + `components/video/*`). New tables in
-`workforce.db` (`video_projects`/`video_shots`/`video_assets`/`video_jobs`,
-created from `state.init_db()`). Verified by
-`scripts/test_video_pipeline.py` (117 checks, offline/free) plus a live run
-against the real API and local model. See the video section of `AGENTS.md`
-for the design and its four hard rules (30–34). Awaiting Sheraj's
-review/commit decision.
-
-**Uncommitted in the working tree (2026-07-11):** quote-card exactness work —
-pinned quotes, quote lock, elision marks, tightened verbatim gate, non-italic
-English card default, dashboard "Exact quote" field — plus a follow-up that
-makes the consultation/Reviewer coherent when a quote is owner-pinned (they
-stop re-picking/critiquing the quote and score artwork + framing only). See
-Activity Log. Awaiting Sheraj's review/commit decision.
+  persona represents publishing (publish itself already logs under `steward`).
+  Low value while autofill is switched off.
+- Splitting `agents/api.py` (6,400 lines). Recommended only AFTER the tree
+  above is committed, as pure extraction guarded by the test suites.
 
 **Blocked on Sheraj:**
-- Whether to proceed with the Canva-autofill log_run relabel (last remaining
-  deferred item).
+- **Create the WhatsApp `secretary_update` template** (UTILITY, body exactly
+  `{{1}}`, English US, in WhatsApp Manager). Without it the outside-24h-window
+  reminder fallback cannot send — it errored 132001 on 2026-07-11 and has not
+  been re-checked. `GET /whatsapp/setup` has the walkthrough.
+- Whether to move Abigail off Meta's sandbox test number (5-recipient limit,
+  so every allowlisted guest must also sit in Meta's test-recipient list).
+- Reviewing and committing the pile above.
 
 ---
 
 ## Activity Log (newest first)
+
+*Trimmed to the last 20 entries on 2026-08-16, per this file's own policy.
+Everything older is in `git log` — `git log -p -- STATUS.md` shows every entry
+back to 2026-07-07, and the lessons worth keeping were promoted into
+`AGENTS.md` before the cut.*
+
+### 2026-08-16 — Claude Code (Opus 5), direct — STATUS.md harvested and trimmed; four lost facts promoted
+The Activity Log had reached 52 entries against this file's own cap of 15–20,
+making STATUS.md (24.6k tokens) a bigger per-session context cost than AGENTS.md
+itself — and AGENTS.md tells every agent to read it first. Trimmed to 20 entries
+(back to 2026-07-16): **13.7k tokens, ~10.9k saved per session.** Nothing is
+lost — `git log -p -- STATUS.md` has every entry, and the dropped text was also
+saved to this session's scratchpad.
+
+Before cutting, the 32 doomed entries were read for knowledge that existed
+NOWHERE else. Four things did, and are now in `AGENTS.md`:
+- **Canva autofill is off by default and off in practice**
+  (`CANVA_AUTOFILL_ENABLED` unset; 0/10 attempts ever succeeded). AGENTS.md had
+  been describing it as the bookmark pipeline's final step, which would have
+  misled anyone reading the pipeline map.
+- **The WhatsApp `secretary_update` template does not exist in Meta** (error
+  132001, found 2026-07-11), so the outside-24h-window reminder fallback has
+  never worked. Now a Gotcha AND a Blocked-on-Sheraj item — it needs him to
+  create the template, not a code change.
+- **`card_compositor._SS = 2` supersampling**: every absolute pixel constant in
+  that file must be multiplied by `_SS` or it renders at half its printed size.
+- **Don't identify fresh records against a react-query cache** — the bug that
+  made a correctly-rendered Spanish card pair invisible and read as "the run
+  only did English".
+Plus two smaller ones: Abigail's number is still Meta's 5-recipient sandbox
+number (so allowlisted guests must sit in Meta's test-recipient list), and Codex
+has corrupted files on Windows with BOM/cp1252 mojibake while otherwise
+completing its task — read dispatched diffs for encoding damage, not just logic.
+
+The Snapshot was also a month stale (dated 2026-07-09, describing the layout
+editor as the newest work and listing mostly struck-through resolved items). It
+now states current reality: what's live, the whole uncommitted pile, the
+deferred backlog — including the **devotional-gathering kit pipeline**, which
+was only recorded in a doomed entry despite being the agreed flagship next — and
+what's genuinely blocked on Sheraj. It had also gone on calling the **Video
+pipeline uncommitted** long after `58a785f` landed it, along with the card
+redesign and exactness work; all three are committed. Verify against
+`git status`, never against a previous Snapshot.
+
+**Proposed commit breakdown, awaiting Sheraj's approval (nothing committed):**
+The five uncommitted features are NOT cleanly separable — built consecutively
+over four days without committing in between, they share the same `api.py` job
+store (cancellation, `started_by`, and job adoption all edit `_start_job`), so
+per-feature commits would need hunk surgery and could produce commits that don't
+import. Three whole-file commits instead, no surgery, each coherent:
+1. **Features** — all code and test scripts: the Colony (+ per-agent models,
+   `TrustPanel.tsx` deleted), the wallet, Abigail's bridge to the teams, run
+   cancellation, the finished-video shelf and product filters, and the
+   post-commit video fixes.
+2. **AGENTS.md + README.md** — the rules describing those features, plus the
+   reorganisation.
+3. **STATUS.md** — this hand-off log.
+The real cure is upstream: commit per feature as it finishes, rather than
+letting four days of interleaved work accumulate in one tree.
+
+### 2026-08-15 — Claude Code (Opus 5), direct — AGENTS.md reorganised and compacted
+Second pass the same day, at Sheraj's ask. `AGENTS.md` had grown to 1122 lines
+(~18.6k tokens) in feature-arrival order, so the rules ran 55-57 → 30-34,58 →
+1-14 → 35-41 → 50-54 → 42-49 → 15-29 and were out of order inside sections too.
+It is now 993 lines (~16.6k tokens, -11%) with the rules in numeric order under
+subsystem headings and a range table at the top, so "rule 24" is findable
+without grepping.
+
+**Nothing was renumbered** — over 170 code comments cite rules by number, so the
+numbering is frozen; only the order of presentation changed. All 68 rules (58
+numbers plus the 10 lettered ones) are verified present, and every backticked
+identifier the old file mentioned still appears except six shortened forms and
+one piece of dead archaeology.
+
+The compaction came from redundancy, not substance: rules 18 and 22 were the
+same rule stated twice (18 is now a one-line pointer to 22, keeping its number
+live), the restart procedure and the `init_db()`-outside-`_connect()` warning
+each appeared twice, and the Grok/Codex/agy invocation notes lost their
+archaeology and moved to an appendix — they're needed rarely and were sitting
+second in the file. Two stale check counts were corrected against real runs
+(Colony said 94, is 135; wallet said 63, is 90) and counts now appear ONLY in
+the Commands block so they can't drift in two places again. The "why" clause on
+every rule was left intact — that's what stops an agent reintroducing the bug,
+and it's most of the remaining length.
+
+### 2026-08-15 — Claude Code (Opus 5), direct — finished videos on the Products page + product filters
+Sheraj asked for two things: completed videos should show up on the Products
+page, and the page should be easier to navigate.
+
+**Videos on the shelf.** A finished video is now listed beside the bookmarks
+and quote cards, DERIVED on every read rather than copied into a product row:
+`video_assembly.list_finished()` builds each entry out of the video tables and
+`GET /video/finished` adds the servable `/outputs/...` URLs (new rule 58 in
+AGENTS.md). Deliberately not a `products` row — that would double-count videos
+in the Steward's ledger and hand the print sheet / layout editor / Etsy publish
+a product type none of them can act on, and it would drift the moment a project
+is re-assembled or deleted. Clicking one opens a drawer with an inline player,
+downloads for the mp4, the production record and the narration subtitles, and a
+button that hands off to the Video tab (it sets the same persisted state the
+tab restores itself from, rule 33c). A draft built from mock clips is badged as
+such on the card and in the drawer (rule 32).
+
+Two honesty details worth keeping: a project whose mp4 has been deleted from
+`outputs/` drops off the shelf instead of showing a player that can't play, and
+the length is the file's REAL length, not the plan's — the difference is not
+academic ("Adam's New Day" plans 122.5s and measures 110.4s). ffprobe costs
+seconds per call and this list is polled, so it runs once per file and the
+result is remembered on the export record against the exact path it measured;
+when ffprobe can't read a file, the plan's length is shown flagged and the UI
+prefixes "~" rather than storing a guess as a measurement. The suite caught
+that one — the first version labelled the fallback as measured.
+
+**Filters.** New toolbar on the Products page: search across titles, themes,
+quotes, citations and tags; kind chips (Everything / Bookmarks / Quote cards /
+Videos, with counts); a review-result filter; and sort by newest, oldest,
+score or title. "Showing X of Y" and a Clear button are always visible. The
+chosen view persists in localStorage (`settings.getProductsUi`), the typed
+search does not. Videos drop out while a review-result filter is active and
+the bar says why — they're reviewed shot by shot, not scored out of 10, so
+listing one under "Approved" would be a false claim about quality.
+
+Verified: `scripts/test_video_pipeline.py` 288/288 (was 266 — 22 new checks in
+`test_finished_shelf`, including the missing-file case, the measurement reuse
+and its staleness guard, mock labelling, and that no video reaches the products
+table); colony 135/135, job-cancel 24/24, secretary-colony 92/92; dashboard
+typecheck and production build clean; and the live endpoint checked against the
+real DB, which shelved Sheraj's three real videos (Grace Drop 60.2s/17 shots,
+Adam's New Day 110.4s/35, Test Scene 1 50.7s/16). The API scheduled task was
+restarted to pick up the new route — no jobs were running at the time. Nothing
+committed; the tree is Sheraj's to review as usual.
+
+### 2026-08-14 — Claude Code (Opus 5), direct — Abigail works with the teams
+Sheraj asked for Abigail to be able to interact with all the teams: report back
+what they did, request them to do jobs, and give them the information they need
+to do a good job based on what he asked her for or set as her goal. Built as a
+single bridge module, `agents/secretary_colony.py`, plus five Claude tools in
+`secretary_tools.py` — `workforce_report`, `ask_agent`, `set_team_goal`,
+`brief_agent`, `request_team_job`. New rules 50-52 in AGENTS.md.
+
+The gate is **talking is immediate, making is approved**: reading what the
+teams did, asking Ruth a question, setting a goal and writing a brief all
+happen at once (an assistant who needs a permission click to ask a question is
+not an assistant), while `request_team_job` always queues in her existing
+approvals queue as kind `workforce_job` and starts nothing — a run spends real
+money and saves a product. Approval runs `api.launch_team_pipeline`, extracted
+so the Colony's goal-launch endpoint and her approved job share one
+implementation (rule 40). She has no tool that approves anything; the suite
+asserts that.
+
+She is the only agent with personal data, so the crossing is checked in code:
+`assert_shareable` refuses contact details and any 12+ word span copied
+verbatim from her private memory notes before it can reach `workforce.db`. It
+reads her memory notes ONLY — including his task list would have refused the
+legitimate relay ("make twenty cards for the devotional") this feature exists
+for. It is narrow on purpose and documented as narrow.
+
+Two things fixed along the way. Standing instructions only ever reached Colony
+*chat*, while the dashboard's own label promised "in the pipelines as well as
+in chat" — they now ride the same single injection point as the team goal
+(`system_prompt_builder._instructions_steer`, capped, fails open), so a brief
+genuinely shapes pipeline work. And goals now record `set_by`, shown on the
+team card, so a goal Abigail set on his behalf never looks like one he typed.
+
+Verified live, not just offline: she briefed Clara (the instruction is in
+`agent_settings` and appears in a real pipeline prompt), relayed a question to
+Ruth who answered from the actual index (the exchange is in Ruth's Colony
+history behind the relay label), reported honestly that the Print Studio had
+been idle, and queued a card request that started nothing until it was
+declined. One real bug fell out of that live run and is fixed: her
+"did you actually act?" check tested "no effect recorded" rather than "no tool
+called", so a read-only turn whose answer contained an action verb was wrongly
+flagged as an action that silently failed — `effects["tool_calls"]` now makes
+the real condition testable.
+
+**Second pass the same day, after Sheraj used it.** Four things came out of
+real use, and the first three share one root cause:
+
+- *"It says see the Pipeline tab but the Pipeline tab shows nothing."* The
+  panel only ever polled the job id it had created itself, so an approved
+  run genuinely ran with the screen blank. Jobs now record `started_by`
+  ("sheraj"/"abigail"/"colony") and the panel ADOPTS any running job of a kind
+  it can display, with a line saying whose it is (rule 53).
+- *"Approval should launch it automatically."* It already did — the record
+  shows her run at 19:13:33 and his hand-started duplicate at 19:14:36. The
+  invisibility above is what made it look otherwise, and it cost a card.
+  Nothing to fix in the launch path; everything to fix in what the screen said.
+- *"The Colony map should show what a team is doing."* `colony.team_activity`
+  derives each team's live work from the same job store (`JOB_KIND_TEAM`), so
+  the team core pulses, carries a "Working — making a batch of quote cards"
+  line, and the drawer shows the live progress and who started it.
+- *"The Pipeline tab says Bookmark while something else is running."* While a
+  run is in flight the mode is read from the JOB, not from whatever this tab
+  last had selected, and the two-way toggle becomes a readout — "Quote cards
+  (batch) · running". A disabled control showing the wrong mode was a small lie
+  about what the team was doing, in the one place he goes to find out.
+- *"She said she can only do one card at a time."* `request_team_job` now takes
+  `count` up to 19 and Ruth finds that many verified quotes BEFORE it queues —
+  one request, one approval, one hands-free batch, and the approval names the
+  actual quotes (rule 51b).
+
+One more fault found while testing live: she listed two already-resolved
+actions as still waiting, reading her own earlier reply instead of the queue.
+Her prompt now always states the queue (even when empty), and because that
+alone did NOT fix it, `_approval_ground_truth` corrects any `#id` she names
+against the real pending list in code (rule 54) — verified live, and she
+self-corrects on the following turn once the correction is in her history.
+
+**Cancelling a run** (`POST /pipeline/status/{job_id}/cancel`, rules 55-57,
+`scripts/test_job_cancel.py`). Cooperative, because a thread cannot be safely
+killed: the job is flagged, a run paused for input is woken, and the worker
+stops at its next `progress(...)` boundary. `JobCancelled` derives from
+BaseException so the codebase's many `except Exception` blocks — the batch loop
+above all — cannot swallow it and keep spending. A cancel closes out the task
+row it was in the middle of and records no result, but never deletes
+`task_runs`, saved products or generated artwork. Verified live against a real
+card run: cancelled during the Artist's brief, task marked `cancelled`, zero
+products saved, no team left lit in the Colony map.
+
+Verify: `python scripts/test_secretary_colony.py` (92 checks, offline, free) —
+plus the existing suites, all still green (colony 135, video 266, wallet 90).
+The backend was restarted, so this is live now. A real 3-card batch (#15,
+"service to humanity") is sitting in her approval queue as the end-to-end
+demo — approving it spends money on three card runs.
+
+### 2026-08-14 — Claude Code (Opus 5), direct — the project crypto wallet
+Sheraj asked to connect Nora to a cross-chain crypto wallet. The
+irreversibility risk was put to him plainly first (everything else in this repo
+is free, reversible or approval-gated; a transfer is none of those). He then
+chose the most capable option at every step: all four purposes, Nora able to
+SEND within a hard cap, and a wallet created in code. That is his call and it
+is built in full — the work went into making it as safe as it honestly can be
+rather than into narrowing it.
+
+`agents/wallet.py`: one EVM address across Base / Arbitrum / OP Mainnet plus
+Base Sepolia. Reads are raw JSON-RPC (no web3.py); signing uses `eth-account`
+alone, keeping the key-touching surface minimal. Controls, all in code:
+owner-only destination allowlist (no tool can write it — rule 28's discipline),
+three-tier caps computed from the on-chain ledger rather than the model's
+claims, USDC-only for the agent, mainnet opt-in via `WALLET_ALLOW_MAINNET`
+(default OFF, so it can be exercised for real with nothing at risk), a
+watch-only treasury Nora has no key for, and `verify_token()` which checks
+`symbol()`/`decimals()` on-chain before every transfer. The four USDC contract
+addresses were verified live against their RPCs rather than trusted from
+memory — a wrong token address destroys funds silently.
+
+Nora gets `wallet_balances` and `wallet_send`; `wallet_send` is deliberately
+NOT in `GATED_KINDS` (that would make every payment an approval and remove the
+autonomy asked for) and instead has its own tiered gate. There is also a
+dashboard send form with no LLM in the path at all, which is the safest way to
+move money and is likely what gets used most. New Treasury view in the Colony
+tab. `/steward/report?include_wallet=1` folds holdings into Nora's report;
+it is opt-in because the routine P&L poll should not pay for an RPC round-trip.
+
+`scripts/test_wallet.py` — 63 offline checks, weighted at the guarantees:
+allowlist cannot be bypassed (including via `bypass_limits`), caps come from
+the ledger, failed sends do not consume the daily cap, a non-Steward cannot
+reach the money tool, guest WhatsApp paths stay tool-less, and mainnet is
+unusable until enabled. Colony 124/124 (its "toolsets stay small" assertion
+correctly caught the Steward's two new tools — carved out as a narrow
+documented exception rather than raising the limit for everyone) and video
+266/266.
+
+**Signing verified later the same day.** Sheraj installed `eth-account`
+(0.13.7) and set `WALLET_PASSPHRASE`. The suite now exercises the real thing on
+a throwaway key in a temp dir: keystore encrypt/decrypt round-trip, the raw key
+absent from the keystore file on disk, a wrong passphrase failing to open it,
+refusal to create a second wallet over the first, a real signature that
+recovers to its own address, and — the useful one — an actual `eth_estimateGas`
+against the LIVE USDC contract on Base Sepolia, which parsed the transfer and
+rejected it only for insufficient balance. That is proof the ERC-20 calldata
+encoding is correct against the real contract rather than merely self-consistent.
+80 checks, still offline-safe and free (nothing is ever broadcast).
+
+That work also caught a genuine config bug: `wallet.py` read every cap at
+module-import time but never called `load_dotenv` itself, so importing it
+before `router.py` silently gave all of them their built-in defaults — a
+tightened `WALLET_MAX_PER_TX_USDC` would not have applied. Fixed, with a
+regression check on the load order.
+
+**Testnet proven, then MAINNET SWITCHED ON (2026-08-14, Sheraj's call).** He
+created the wallet (`0x5872AF78c94CF99D07e0B871f36DFd6103d92862`), funded it,
+and sent a real 5 USDC transfer to his own Coinbase address on Base Sepolia —
+the full path works end to end. `WALLET_ALLOW_MAINNET=true` is now set, so Base,
+Arbitrum One and OP Mainnet are live. Real balance is still 0; the wallet needs
+real USDC plus a little ETH for gas (Base is cheapest) before it does anything.
+Treasury/multisig deferred — no permanent multisig for now.
+
+Going to mainnet immediately exposed two bugs that only matter once money is
+real, both fixed:
+  - `spent_today_usdc()` counted TESTNET sends against the daily cap. His $5
+    practice transfer had already consumed $5 of the real $50 budget. Play
+    money is now excluded.
+  - `balances()` summed testnet and mainnet into one `total_usdc`, so a wallet
+    holding nothing but test tokens reported "15.00 USDC" of holdings. Real and
+    play money are now totalled separately and never mixed, in the API, in
+    Nora's tool output and in the UI — a false holdings figure is the one thing
+    the Steward exists not to produce.
+
+An earlier fix had a knock-on: because `wallet.py` now loads `.env` itself, the
+test suite started asserting against Sheraj's live config and four checks
+failed the moment he enabled mainnet. The suite now pins
+`WALLET_ALLOW_MAINNET=false` before importing, and additionally checks the gate
+is strict opt-in (blank, "0", "yes", "ture", unset all leave it off). 90 checks.
+
+Operational reality worth restating for whoever reads this next: the hot
+wallet's key sits on this machine, encrypted with a passphrase stored in `.env`
+on the same machine. That protects against someone copying the keystore file
+alone, NOT against anyone who has the machine. It should hold only a small
+working float; anything else belongs in a wallet whose key is not here.
+**Not committed.**
+
+### 2026-08-13 — Claude Code (Opus 5), direct — per-agent model selection
+Sheraj asked to be able to pick the model each agent uses. Two decisions were
+his: Abigail is included but restricted to Claude models, and moving a free
+agent onto a paid model warns clearly and saves on one click.
+
+`agents/models.py` discovers the model list LIVE from all three providers
+(Ollama `/api/tags`, xAI `/models`, Anthropic `/v1/models`) and filters what
+isn't a chat model — `nomic-embed-text` (it backs the citation index) and
+`grok-imagine-*` (image/video endpoints). Storage is a new `agent_settings.model`
+column. The router became agent-aware: `call_llm`/`call_llm_agentic` take
+`agent=`, `_call_ollama` gained the `model` param it used to hardcode, and
+`agent=` was threaded through EVERY real call site (consultation, scribe,
+reviewer, artist, translator, director, x_post, api's card reflection) so the
+choice applies to pipeline runs and not just chat. An AST sweep confirms the
+only remaining site without it is consultation's team-synthesis call, which
+belongs to no single agent. Abigail's Claude path takes the same override via
+`call_claude`/`call_claude_agentic`.
+
+**The provider boundary is code, not UI.** Verified live: scribe→claude-opus-5
+and librarian→claude-sonnet-5 both 422; secretary→grok-4.6 and
+secretary→qwen3:8b both 422; a nonexistent model 422s. Also verified live
+end-to-end that a choice actually takes effect — Clara was set to llama3.1:8b,
+answered, and `ollama ps` showed **llama3.1:8b** loaded rather than the default
+qwen3-16k.
+
+Three real defects found and fixed along the way: a first pass at threading
+`agent=` inserted it before the positional messages list and broke four modules
+(rewritten to insert at the matching close-paren); Abigail's Claude default was
+labelled **"(free)"** because "paid" was computed as `provider == xai`; and the
+Settings tab's "Model routing" card was already wrong before this work — it
+listed six task types as Grok-routed that have always run locally, and credited
+image vision to Claude Haiku when it goes to Grok. All corrected.
+
+`scripts/test_colony.py` now 124 checks, all passing; video suite still
+266/266. **Not committed.** Server restarted to pick up the endpoints.
+
+### 2026-08-13 — Claude Code (Opus 5), direct — the Trust tab became the Colony
+Sheraj asked for the Trust tab to be replaced by something bigger: a visual
+map of the whole workforce where he can see performance and how the agents
+interact, chat with them individually, change their settings, "perform the
+same functions that they would do in the UI", consult teams and give teams
+goals. He supplied a reference image (dark orbital constellation). Four
+decisions were his, asked up front: the tab is called **Colony**; goals both
+steer and launch; agent chat can really act with writes confirmed; teams are
+grouped **by pipeline**.
+
+**New backend** — `agents/colony.py` (teams, per-agent settings, team goals,
+per-agent chat history, the approval queue, and the handoff graph DERIVED
+from `task_runs` so every line on screen is recorded work, not a diagram),
+`agents/colony_tools.py` (small per-agent toolsets + the gate),
+`agents/colony_chat.py` (per-agent chat + a lean team-consultation
+round-robin), and `router.call_llm_agentic` — a tool-calling loop for **Grok
+and Ollama**, which had to be written because rule 16 reserves Claude for
+Abigail and the workforce agents therefore cannot borrow
+`call_claude_agentic`. ~15 `/colony/*` endpoints in `api.py`. Goal steering
+is injected in ONE place (`system_prompt_builder._goal_steer`) so it reaches
+pipeline runs and chat alike; it is hard-capped at 240 chars and fails open,
+because most agents run on local Qwen (rule 1).
+
+**New frontend** — `dashboard/src/components/colony/`: a hand-rolled SVG
+constellation (no new dependency), an agent drawer with performance /
+chat / settings, a team drawer with goals and consultation, and the approval
+queue. Nav `trust` → `colony`; `TrustPanel.tsx` deleted, its trust scores and
+product-quality history preserved inside the Colony's Performance view.
+
+**Verified live, not just in tests.** The graph renders real data (16 real
+handoff edges out of the actual run log, including `director → videographer`
+from the day before). Nora really called `spend_report` on local Qwen and
+reported $27.19/$8.55 — matching the DB exactly. Theo was told "generate this
+now" and QUEUED instead: no file appeared in `outputs/`, `image_gen` spend
+stayed at $17.05, and only the $0.01 chat itself was metered. Four UI defects
+were found by looking at screenshots and fixed (teams clipped below the fold;
+single-member teams sitting on their own label; team names under the core
+spheres; the canvas letterboxed into the middle third) — the team label now
+sits ABOVE the core because that position is provably never occupied, while
+bottom-centre always is for odd member counts. One real bug was caught by
+live approval: `run_approved_action` read `result["translation"]` when
+`translate_quote` returns `text`, so an approved translation reported success
+with empty content; fixed and pinned by a test using the real return shapes.
+
+`scripts/test_colony.py` — 94 offline checks, free, all passing;
+`test_video_pipeline.py` still 266/266. **Not committed** — Sheraj reviews
+first. The API server was restarted twice during the session to pick up the
+new endpoints (it does not auto-reload).
 
 ### 2026-08-13 — Claude Code (Opus 5), direct — movement descriptions + the invisible chain error
 Chaining worked, but Sheraj reported two things: it "didn't automatically work
@@ -498,627 +844,3 @@ ConsultationTranscript renders Front/Back side by side. tsc clean, backend
 restarted. Existing card 8e53a216's Spanish pair now shows in its drawer.
 Uncommitted — owner decides.
 
-### 2026-07-16 (follow-up ×3) — Claude Code (Fable 5), direct — card back
-tuned per owner over three iterations (each render-viewed, rule 9; final
-values): artwork shows through the ENTIRE back — edges nearly unveiled
-(cream alpha 28), writing panel opaque-enough-for-pen-ink (alpha 214), and
-the opaque→clear shift is one LONG feathered gradient (mask blur h*0.075 —
-no visible panel edge); exactly 3 ruled writing lines spread evenly.
-Backend restarted, 9c71184e re-rendered + persisted. Applies to both
-language variants' backs.
-
-### 2026-07-16 — Claude Code (Fable 5), compositor direct + Grok (pipeline) +
-Antigravity (dashboard) — QUOTE CARD REDESIGN: devotional/reflection format
-Owner spec executed in full. `card_compositor.py` rewritten (Claude, all
-faces human-viewed per rule 9): FRONT = quote in Tahoma dark ink on a light
-wash (artwork Gaussian-blurred under a pale scrim — palette survives as
-texture, no more poster look), thin double gold border, citation under a
-small rule, hard readability floor `MIN_QUOTE_PX=26px/300dpi` (below it the
-render REFUSES — no tiny/crowded/clipped quotes); BACK = reflection face on
-cream (bold question, gentle action label, ruled writing lines, small
-code-owned share line) — the quote NEVER prints on a back. Translated runs
-now render SEPARATE per-language card pairs (variant front = translated
-quote + code-appended disclaimer; variant back = reflection in that
-language; hand-written Spanish defaults, English fallback for unverified
-languages; zh/ar keep verified fonts — Tahoma only where script-safe).
-Pipeline (Grok, diff verified): new `_card_reflection` (local Scribe writes
-a quote-inspired question+action, json-parsed defensively, word-boundary
-capped, translated via the checked translator path for native cards, {} →
-code defaults on any failure), regenerated on every requote, tracked in
-`best`, persisted (`reflection_*`, `variant_faces`) and passed through ALL
-re-render sites (manual requote/repaint + layout endpoints); reviewer +
-consultation wording updated to the new faces (machine contracts untouched).
-Dashboard (Antigravity): variant card pairs shown/downloadable in the
-drawer + pipeline results; layout editor dropped the dead placement select
-and hides text-colour for cards (renderer ignores it now). layout.py:
-default card font "tahoma" (new FONTS entry), translation_placement
-REMOVED. AGENTS.md rule 29 records the format. Verified: imports, mocked
-reflection tests (good/garbage/truncation), offline renders of 6 face types
-viewed, tsc clean, backend restarted, then a REAL Spanish run end-to-end
-(job 5615de05 → product 9c71184e): reflection "Did I trust God's timing in
-my prayers?" + Spanish natives, both pairs persisted, 7.4 ship — final
-faces viewed. Known minors: print sheets still print the ENGLISH pair only
-(variant pairs downloadable individually — follow-up if wanted); LLM-
-translated reflection text can carry small spelling quirks (a requote
-regenerates it). Uncommitted — owner decides.
-
-### 2026-07-12 — Antigravity (dispatched by Claude/Fable 5) — Ruth's display
-title is now "Bahá'í Librarian" (owner ask). One line in
-`dashboard/src/lib/utils.ts` ROSTER (`role` string only — key/backend ids/
-AGENT_COLORS untouched; `rosterFor` matches on the lowercase KEY so
-transcript mapping is unaffected). Verified: diff read, 1 grep hit, tsc
-clean. Display-only; no restart needed.
-
-### 2026-07-12 — Claude Code (Fable 5), direct + Antigravity for the editor UI —
-long-quote cards split across faces: English front, translation on the back
-Sheraj asked for long quotes (his 639-char "O thou who art turning thy face
-towards God" card, 44ab19cb) to print English-only on the front with the
-translation on the back — "it used the space much more effectively". New
-layout knob `translation_placement` (layout.py TRANSLATION_PLACEMENTS:
-auto|front|back, default auto; sanitize + options() extended; cards only):
-"auto" routes the translation to the back when the English alone exceeds
-`card_compositor.AUTO_BACK_QUOTE_CHARS` (320 — the approved 251-char
-tabernacle card stays bilingual-front; 639-char cards split). New
-`_composite_card_back`: without a routed translation it renders exactly as
-always (light edge vignette); with one, a moderate scrim + the translation
-and its NATIVE DISCLAIMER — the disclaimer always travels with the
-translation, whichever face (rule 8), and fonts stay script-verified
-(rule 9; no Latin override on the back). Reviewer's two-image intro updated
-(back face is no longer promised "unobstructed"; legibility covers both
-faces). LayoutEditor gained a "Translation" dropdown (Antigravity, guarded
-on backend support). Rule-9 verified by eye: long card front (big, roomy
-English) + back (Spanish + disclaimer over the artwork) + short card
-(unchanged bilingual front) all viewed; sanitize accepts/falls-back
-correctly; tsc clean; backend restarted; 44ab19cb re-rendered + persisted
-via the layout endpoint (English front / Spanish back). Uncommitted — owner
-decides.
-
-### 2026-07-12 — Antigravity (Gemini 3.5 Flash) — LayoutEditor "Translation" placement control
-Added a new dropdown selector for quote cards to determine translation placement (Auto / Front / Back). The selector only displays for quote cards when `translation_placements` options are supplied by the backend. The state round-trips correctly through preview and save payloads, updates dirty status, and is restored to its default ("auto") on reset.
-Files: [LayoutEditor.tsx](file:///C:/Users/Sheraj/Documents/bahAI-workforce/dashboard/src/components/LayoutEditor.tsx), [types.ts](file:///C:/Users/Sheraj/Documents/bahAI-workforce/dashboard/src/lib/types.ts).
-
-### 2026-07-12 — Claude Code (Fable 5), orchestrating Grok + Antigravity —
-WhatsApp guest tier: allowlisted contacts reach a TOOL-LESS Abigail
-Sheraj asked for his friend Garrett's messages to actually reach Abigail and
-be visible in his chat. Design preserves rule 27's intent: the webhook is now
-three tiers — owner → full `secretary.chat` (unchanged); ALLOWLISTED contact
-→ new `secretary.guest_chat` (plain `call_claude`, structurally no tools, no
-memory notes/tasks/calendar in context, history limited to that guest's own
-thread via new `messages.sender` column, title-only notification to Sheraj);
-anyone else → canned reply (unchanged). Sheraj's own chat context now filters
-`thread="owner"` so guest rows can never leak into it. Dashboard: guest
-bubbles labeled "Garrett · WhatsApp" / "Abigail → Garrett" with a distinct
-tint (Antigravity). AGENTS.md rule 27 rewritten to record the owner decision.
-Verified by Claude: diffs read, AST check that guest_chat calls only
-{add_message, add_notification, call_claude, get_recent_messages}, migration
-+ thread-isolation tests green, tsc clean, backend restarted, then a LIVE
-signed-webhook test (real HMAC, fake allowlisted contact, probing question
-about Sheraj's calendar): Abigail replied warmly, REFUSED the personal-data
-request, offered to pass a message; rows stored sender-tagged; owner thread
-clean; all test artifacts deleted. ALSO FIXED THE ACTUAL BLOCKER: Garrett's
-contact row existed but `allowlisted` was FALSE (dashboard toggle never
-flipped) — set true via the owner endpoint at Sheraj's request. Note:
-Sheraj must also keep Garrett's number in Meta's test-number recipient list
-(done, per Sheraj) or her replies can't deliver. Uncommitted — owner decides.
-In the Secretary chat, added support to label and visually distinguish messages from allowlisted guest WhatsApp contacts. Guest user messages are styled with a distinct violet border and slate background (subtly different from Sheraj's golden user bubbles) and labeled with the sender's name (e.g. "Garrett · WhatsApp"). Assistant responses to guests are labeled "Abigail → Garrett". Declared the `SecretaryMessage` type locally in the panel component to add the `sender` field cleanly without modifying out-of-scope files.
-Files: `dashboard/src/components/SecretaryPanel.tsx`.
-
-### 2026-07-11 (late) — Claude Code (Fable 5) — WhatsApp outage: tunnel was
-down (fixed + hardened); template fallback found never-created
-Sheraj reported WhatsApp dead. Diagnosis: exactly one healthy API listener on
-:8765 (no double-server), but NO cloudflared process — the Cloudflare Tunnel
-(only inbound path for Meta webhooks) had died silently; its scheduled task
-only fires at logon and its err-log gets truncated on start, so time/cause of
-death are unknown. Fixed: `Start-ScheduledTask "bahAI Secretary Tunnel"`,
-verified 4 registered QUIC connections, then probed the PUBLIC url end-to-end:
-GET/unsigned-POST to /whatsapp/webhook return OUR 403s (fail-closed sig check,
-rule 26, through the tunnel) and /products is 404 (ingress still restricted).
-Outbound verified with a real send (accepted by Meta, free-form text).
-Hardened: tunnel task now has RestartCount=5 / RestartInterval=2min so a
-crashed cloudflared self-heals instead of dying silently. SEPARATE finding:
-`WHATSAPP_UPDATE_TEMPLATE` ("secretary_update") does not exist in Meta's
-system (132001 in every language; hello_world sends fine) — so the outside-
-24h-window fallback (`send_best_effort` → `send_template`, used by scheduler
-reminders) has been broken since Phase 3 and just never surfaced. Needs
-Sheraj to create/approve a UTILITY template named `secretary_update`, body
-exactly "{{1}}", English (US), in WhatsApp Manager — no code change needed.
-Also noted: the "her own number" is still Meta's sandbox TEST number
-(+1 555-156-8050, 5-recipient limit) — fine for now, a real number is a
-future decision. Token confirmed permanent + valid. No code changed.
-
-### 2026-07-11 — Claude Code (Fable 5), direct fix — card text render quality
-(supersampling + size-scaled shadows)
-Sheraj zoomed into a card's small Spanish text and the glyphs wore a blocky
-black halo. Two causes in `card_compositor.py`: the text shadow is four
-hard-offset near-opaque stamps at a FIXED 2px (huge relative to ~18px
-translation glyphs), and faces were composed at final resolution with no
-supersampling. Fix, contained to that file: `_SS = 2` — both faces compose at
-2100×1200 and LANCZOS-downscale to the same 1050×600 @ 300dpi on save (art
-round-trips unchanged; text/shadows get true anti-aliasing), absolute pixel
-constants (font size ranges/floors, disclaimer size, rule width) scaled by
-_SS so printed sizes are identical, and shadow offsets now scale with glyph
-size (~size/26 — matches the old look on large text, proportionally thinner
-on small). Verified by eye (rule 9): before/after 4× zoom crops of the same
-Spanish line — old render shows the ragged stamp halo, new one is clean;
-full face layout unchanged (minor word-wrap shift from 2× font hinting).
-Backend restarted; test card 231eb62c re-rendered+persisted via the normal
-layout endpoint so it carries the new quality. Every future card render
-(pipeline, layout saves, requote/repaint, redo) picks it up automatically.
-Bookmarks still render the old way (their text is much larger; offered as a
-follow-up). Uncommitted — owner decides.
-
-### 2026-07-11 — Claude Code (Fable 5), direct fix — pause preview restored on
-pinned runs; redo-repin proven live
-Sheraj reported the Reviewer's mid-run pause no longer showed the front-face
-preview image. Root cause: a regression from the pinned-consult change — the
-Librarian's deterministic confirmation turns emit no verified_quote, so
-`run_consultation`'s `preview_quote` came back empty and the preview render
-was silently skipped (guard `if render_preview and preview_quote`). Fix in
-`consultation.py`: when `fixed_quote` is set, preview with the pinned text
-directly (it IS the printed quote); non-pinned runs untouched. Verified live
-via "redo everything" on test card 231eb62c (job d62977c2), which also
-exercised the redo-repin path end-to-end for the first time: pause turn
-carried the preview image + "as it would print" note, redone card's quote is
-SHA256-identical to the original pin, quote_pinned persisted, and the stale
-mis-scored 6.4 review was replaced by an honest 7.8/ship (artwork_fit 8,
-two-image Reviewer). Backend restarted. Uncommitted — owner decides.
-
-### 2026-07-11 — Claude Code (Fable 5), orchestrating Grok — the card Reviewer
-now SEES the artwork it judges (front + clean back face)
-Sheraj flagged a real mis-score on product 231eb62c: artwork_fit 3/10 with
-"lotus artwork diverges from the settled agreement" — but the saved artwork IS
-the agreed hand-withdrawing-from-valuables scene; the card's front-face
-vignette + printed quote simply cover it, and the Reviewer only ever saw the
-front. Fix (Grok, diff fully re-verified): `router.call_grok_vision` now
-accepts an ordered list of images (backward compatible — every single-image
-caller unchanged); `reviewer.score_quote_card` and the revision-consult
-Artist turn (`run_card_revision_consultation`) take `back_image_path` and,
-when it exists, attach the clean back face as a SECOND image — legibility is
-judged from the front, the artwork itself from the unobstructed back; all
-four api.py call sites (pipeline score, revision consult, manual requote,
-manual repaint) pass `rendered["back_path"]`. Verified by Claude: full diffs
-read (no mojibake), offline monkeypatched block test (2 imgs → image,image,
-text; 1 img → image,text), and a LIVE re-score of the same product through
-the new path: artwork_fit 3→7 ("reaching hand … evokes temptation and
-restraint"), newcomer 4→8, overall 7.6 ship — the score now describes the
-real artwork. Backend restarted. Note: 231eb62c's STORED review still holds
-the old wrong 6.4 (test card; delete or redo it from the dashboard).
-Also this session, prior entry's Part A/B: redo-repin + pinned-consult
-coherence. Uncommitted — owner decides.
-
-### 2026-07-11 — Grok (dispatched by Claude/Fable 5) — pinned-quote consultation coherence
-Live bug: with an owner-pinned quote the three-round consult still proposed/
-critiqued/swapped quotes and the Reviewer scored 5.6 with "requote" for
-"diverging from the agreed quote" even though the pipeline correctly printed
-the pin. Additive, gated changes only: `consultation.run_consultation` /
-`_run_round` / `_synthesize_brief` take `fixed_quote`; when set, Scribe frames
-artwork/tone only, Reviewer challenges art not quote, Librarian skips the
-LLM and emits a deterministic confirmation, Artist/synth get a fixed-quote
-note. `reviewer.score_quote_card(..., quote_pinned=)` drops requote from the
-action list and rewrites quote_citation / newcomer criteria for presentation
-only. `_run_card_pipeline` wires both from the resolved pin (not the mid-run
-pause note). Non-pinned paths and the VERDICT parser left unchanged.
-Files: `agents/consultation.py`, `agents/reviewer.py`, `agents/api.py` (two
-call sites). Acceptance checks (import/signature/parser/ast) all ok.
-Claude also added directly (Part A of the same ask): "redo everything" on a
-pinned card now re-supplies the stored quote as `pinned_quote`, so a redo
-re-verifies and re-locks it (`_redo_card`) — a redo changes artwork/framing,
-never the owner's chosen words. Verified by Claude beyond Grok's self-report:
-full diffs of all three files read (in scope, no mojibake/BOM), non-pinned
-reviewer branches byte-identical, earlier exactness suite still green, backend
-restarted, and a REAL pinned run end-to-end (job 90ee99c0 → product 231eb62c,
-tabernacle quote + Spanish): transcript now reads sensibly — Scribe does
-"framing & tone", Reviewer challenges the ARTWORK (soft lotus vs. the quote's
-hard refusal), Librarian confirms provenance, revision chose REPAINT not
-requote; printed quote SHA256-identical to the pin, front face human-viewed
-(regular English, italic Spanish, full quote, disclaimer). Score 6.4 now
-reflects a genuine art-fit note, not the old self-inflicted "diverged from the
-agreed quote" penalty.
-
-### 2026-07-11 — Claude Code (Fable 5), orchestrating Grok + Antigravity —
-quote-card exactness: pinned quotes, honest elision marks, quote lock, non-italic English
-Sheraj's ask after a real run overrode his mid-run "use the full quote please"
-guidance (product 7131d403 shipped a different quote than he pinned at the
-pause). Backend (Grok, diff fully re-verified by Claude): (1) new
-`pinned_quote` on the card pipeline — an owner-supplied quote is resolved
-against the 67-entry verified Ruhi corpus (lenient matching for apostrophe/
-spacing paste differences, but the PRINTED text is always the corpus's exact
-characters), SHA256-checked against the frozen manifest on input AND re-hashed
-against the saved quote before the product writes, failing loudly before any
-paid call if it can't verify; (2) quote LOCK — a pinned run, or any run where
-Sheraj gave pause guidance, makes the revision loop's "requote" structurally
-impossible (consult prompt drops the option AND api.py hard-gates it with a
-visible transcript note); (3) shortened quotes now carry the book's own
-" . . ." elision marks and `_assert_ruhi_verbatim` was tightened from
-any-prefix to exact-full-match OR marked sentence-boundary elision — unmarked
-prefixes, mid-sentence cuts, and missing punctuation all now hard-fail;
-(4) manual requote endpoint gained the same gate (was ungated — found by
-Claude in review); (5) card English default font is now Palatino REGULAR
-(layout.py CARD_DEFAULTS; bookmarks unchanged; translations keep their
-script-verified stacks — Spanish stays italic). Frontend (Antigravity):
-optional "Exact quote" textarea on the card form → `pinned_quote`.
-Verified by Claude: full diffs read, offline suite (gate accepts exact/
-elided, rejects prefixes/mid-sentence/dropped-punctuation; resolver handles
-messy pastes + rejects garbage), tsc clean, backend restarted, then a REAL
-pinned run end-to-end (job 47f2b82b → product 05582ef5, the tabernacle quote
-+ Spanish): printed quote SHA256-identical to the pinned input, the revision
-team tried to swap it again and the lock forced ship-as-is, front face
-human-viewed (regular English, italic Spanish, full quote fits, disclaimer
-on). One earlier attempt failed honestly on a transient xAI connection reset
-mid-translation (~$0.07 spent, no product). Known minor gap: "redo
-everything" on a pinned card doesn't re-pin (noted, not built). Uncommitted —
-owner decides.
-
-### 2026-07-10 — Claude Code (Fable 5), orchestrating Grok ×3 + Antigravity —
-audit plan executed: safety, honesty, and the deeds-first reorientation (Phases 1–2)
-Sheraj greenlit the audit plan. Four sequential edit waves, each diff-reviewed
-and re-verified by Claude before the next: **W1 Grok (Secretary safety)** —
-rule-24 Drive move now queues for approval like rename/trash (+ approval-time
-executor), all-day events get Google's exclusive end date, WhatsApp webhook
-dedupes on message_id (`wa_seen` in private DB, ids only), quiet-hours
-calendar reminders persist via the reminders table instead of dropping.
-**W2 Grok (honesty+hygiene)** — X disclosure is now " · AI-assisted art",
-never silently dropped (over-budget drafts fail visibly; no auto-truncation
-of quotes), `get_spend_summary` returns an `error` field instead of fake $0,
-Canva autofill parked behind `CANVA_AUTOFILL_ENABLED` (default OFF, visible
-skip note, relabeled steward), rule-14 `log_run` alignment (mechanical steps
-→ None; reviewer/grounding/translator judgments kept), dead code removed
-(`compositor.render_bookmark`, `"copy"` task type, reviewer "round 2" label).
-Note: W2's first dispatch made zero edits — Grok stopped at the uncommitted
-tree per the multi-coder norm; re-dispatched with explicit authorization.
-**W3 Grok (deeds backend)** — `distributions` table + `add_distribution`/
-`get_deeds_summary` in state.py; `POST/GET /deeds`; Steward report now leads
-with a `deeds` key; `print_sheet` accepts multiple products per sheet
-(cycled grid) + `duplex` column-mirroring for long-edge flip; new
-`POST /print-sheet {product_ids, duplex}` (PDF response, 422s on mixed
-types/missing faces). **W4 Antigravity (dashboard)** — Steward panel shows
-"Deeds for the Betterment of the World" ABOVE the Financial Ledger (+ recent
-deeds, red note on ledger error), "Record a gift" in the product drawer,
-multi-select + "Print gathering sheet" with duplex toggle, ErrorNotes on
-SecretaryPanel/XPostsPanel queries, Canva skip reason visible in
-PipelinePanel, Nav uses RosterAvatar. All verified: imports, offline ledger
-test, TestClient (deeds 200/422, mixed sheet PDFs 1.5MB real renders, 422
-paths), `tsc --noEmit` clean, backend restarted, live /deeds + steward-with-
-deeds + /products 200. Remaining from the audit plan (deliberately deferred,
-need their own sessions): devotional-gathering KIT pipeline (N new cards +
-program page), Abigail Phase 4 recovery rhythms, grounding-bar tightening
-for bookmarks, retrieval enrichment, free share-image exports, multilingual
-packs. Nothing committed yet — owner decides.
-
-### 2026-07-10 — Claude Code (Fable 5), orchestrating all four coders — full
-read-only codebase audit against the mission (deeds first, money as byproduct)
-Sheraj set the direction explicitly: the workforce prioritizes pure and goodly
-deeds for the betterment of the world; money is a byproduct. Four parallel
-read-only investigations (Grok: pipelines; Codex: Secretary+integrations;
-Antigravity: dashboard; a Claude subagent: output/economy/docs). Full reports
-in the session scratchpad; synthesis + plan delivered to Sheraj in chat.
-**Two claims verified by Claude as REAL, both unfixed as of this entry:**
-(1) **rule-24 violation** — `secretary_tools.py` `organize_drive_file`'s
-`move_to_mine` calls `gdrive.move_file` with NO `is_in_her_folder` gate
-(rename/trash gate correctly), and `move_file` strips all old parents — an
-LLM tool call can relocate ANY Drive file without approval; (2) the X post's
-AI-art disclosure is a lone " 🤖" emoji, silently omitted when the tweet is
-long (`x_post.py::_with_disclosure`) — weakest disclosure on the only live
-public channel. Other headline themes: Canva autofill is 10/10 broken and
-still runs every pipeline; Steward returns $0 on DB error; several dashboard
-panels swallow query errors; quiet-hours can permanently drop calendar
-reminders; all-day events get an invalid end date; WhatsApp webhook has no
-message_id dedupe; Steward/dashboard speak P&L while the working deed-path
-(print sheets, giveaways, feedback) has no headline metrics. No code changed
-this session (audit only).
-
-### 2026-07-10 — Claude Code (Fable 5), orchestrating Grok + Antigravity —
-avatar face-crops, small-fix batch, Operator/Producer retirement (integration note)
-Sheraj approved all three pending decision items in one go. Claude scoped
-everything against the real code first, then split: avatars done directly
-(cropping needs eyes — all six re-cropped ~55% tighter on the faces with
-per-face centers, before/after viewed, originals kept in
-`roster/originals/`); backend batch dispatched to Grok and frontend batch
-to Antigravity (their entries below). Both dispatches came back clean
-(no repeat of Codex's 2026-07-10 encoding corruption) and every claim was
-re-verified independently: full diffs read, imports + sanitize edge cases
-re-run, `tsc --noEmit` clean, backend restarted, live `/agents` confirms
-the operator/producer trust rows are deleted. **One real regression caught
-in review and fixed by Claude:** Antigravity's LayoutEditor rework re-seeds
-the controls from the cached layout query on reopen, but a save never
-updated that cache — save→close→reopen would have shown pre-save knobs.
-Fixed in `save.onSuccess` via `queryClient.setQueryData` (keeps the cached
-`current` honest). Dashboard-visible: tighter avatar faces everywhere,
-honest Saved badge, discard/reset confirms, Trust tab shows only the six
-named personas + Abigail.
-
-### 2026-07-10 — Antigravity — LayoutEditor UX fixes + TrustPanel persona filtering
-Implemented four owner-approved dashboard fixes: (1) LayoutEditor "Saved." badge now resets via `save.reset()` on control change (`set()`) or default `reset()`; (2) added a `dirty` state that prompts via `window.confirm` if trying to close the LayoutEditor with unsaved changes; (3) added `window.confirm` before resetting LayoutEditor controls; (4) filtered the TrustPanel agent roster to show only real personas (`rosterFor(a.name)` is truthy and `total_runs > 0`), aligning both the grid rows and the empty state check.
-Files: [LayoutEditor.tsx](file:///C:/Users/Sheraj/Documents/bahAI-workforce/dashboard/src/components/LayoutEditor.tsx), [TrustPanel.tsx](file:///C:/Users/Sheraj/Documents/bahAI-workforce/dashboard/src/components/TrustPanel.tsx).
-
-### 2026-07-10 — Grok — three small backend audit fixes
-Closed three audited items: (1) `layout.sanitize` now treats any non-dict
-`layout_json` as `{}` so `GET /products/{id}/layout` no longer crashes on
-corrupted data; (2) `etsy_publish` docstring corrected to match rule 13
-(price from `etsy.BOOKMARK_PRICE`, not LLM prose); (3) retired vestigial
-operator/producer labels — task assignee is `pipeline`, Etsy publish
-`log_run` is under `steward`, both names removed from `AGENT_NAMES` with
-a one-time `DELETE` on init, and unused persona/`plan`/`produce` entries
-dropped from `system_prompt_builder.py` after confirming no callers.
-Files: `agents/layout.py`, `agents/api.py`, `agents/state.py`,
-`agents/system_prompt_builder.py`. No git commit; orchestrator restarts.
-
-### 2026-07-10 — Claude Code (Fable 5), orchestrating (Codex dispatch rejected) —
-card quotes now machine-verified character-exact against the official Ruhi Book 1 PDF
-Sheraj supplied the official PDF (edition 4.1.2.PE, Downloads folder — kept
-out of the repo, copyrighted) and asked for exact-match assurance on card
-quotes. Claude verified all 67 `agents/ruhi_book1_source.py` entries against
-the PDF: 61 already exact, 2 pure extraction artifacts, 2 honestly-marked
-elisions — and **2 real silent splices fixed** (entries "world of the womb"
-and "bird which soareth" now carry the book's own ". . ." elision marks;
-ChromaDB re-ingested afterwards). New: `scripts/verify_ruhi_book1.py`
-(repeatable PDF verification + freezes a SHA256 manifest,
-`agents/ruhi_book1_manifest.json`) and `api._assert_ruhi_verbatim` — a
-render-time gate at BOTH quote-pick sites (initial + requote) that fails the
-job loudly if the about-to-print quote isn't a verbatim prefix of a
-manifest-verified corpus entry (catches stale index / unverified corpus
-edits). Prompt honesty tightened: the card frame's "adapted at most lightly"
-became word-for-word (`consultation.py` source_scope + quote_spec), and the
-Reviewer's quote_citation criterion now says the text is machine-verified —
-judge selection, never propose rewording. Verified by Claude: 67/67 both
-script modes, imports clean, gate positive/prefix/tampered/empty/stale tests
-all correct, live retrieval→trim→gate pass, backend restarted + health 200.
-**Dispatch note:** the Codex worker completed this task logically but
-re-wrote `agents/api.py`/`requirements.txt` with a BOM + cp1252 mojibake
-(every em dash/arrow corrupted) — its output was reverted wholesale and
-re-implemented by Claude directly, reusing its gate logic. Watch for this on
-any future Codex dispatch that edits files on Windows; `git diff` caught it.
-
-### 2026-07-10 — Claude Code (Fable 5) — Codex now defaults to GPT-5.5
-Sheraj reported Codex still using `gemma4` and asked for GPT-5 as an
-option. Edited `~/.codex/config.toml` directly (backup first:
-`~/.codex/config.toml.backup-2026-07-10`): `model = "gpt-5.5"`,
-`model_provider = "openai"`, `model_catalog_json` → `merged-models.json`.
-Nothing else in the file touched (desktop-app sections, plugins, MCP
-intact). Verified with a no-override `codex exec` — answered on gpt-5.5,
-and the old "model metadata not found" warning is gone. Caveat recorded in
-AGENTS.md: the Codex desktop app also rewrites this file; if it reverts,
-re-apply or use the per-invocation overrides (which always win).
-
-### 2026-07-09 — Claude Code (Fable 5), orchestrating Codex + Antigravity —
-consultation transcripts now read as natural speech
-Per Sheraj's ask ("the consultation conversations are bullet points that
-don't really make sense to me"), Claude first mapped the machine-parsed
-anchors in `agents/consultation.py` itself (only two exist: the
-Librarian's VERDICT/VERIFIED QUOTE block, and the revision-consult
-decision JSON — everything else is read only by other LLMs), then
-dispatched in parallel: **Codex** rewrote every turn instruction from
-"exactly N bullet points" to 2-4 natural first-person sentences (same
-content requirements, honesty cautions, scripture references, and word
-caps +≤15; max_tokens/temperatures untouched; the Scribe's quote now
-arrives on a cued "My proposal:" line) and rebuilt the code-built "final
-call" turns as sentences ("My call: find a different quote — ..."), for
-the 3-round consultation AND both card/x-post revision consults;
-**Antigravity** (accept-edits mode, first agy write dispatch) taught
-`ConsultationTranscript.tsx` to render Ruth's rigid VERDICT block as a
-friendly verification card (verdict chip, styled quote, source, reasoning
-as a sentence; non-matching turns render exactly as before). Verified by
-Claude: both diffs read in full (only the two intended files), parsers
-asserted unchanged, `tsc --noEmit` clean, backend restarted, then a REAL
-card pipeline run end-to-end (theme "the healing power of prayer", job
-9bdf69ec → product 8b7517a9): turns read as genuine conversation, the
-Reviewer held twice with reasons, the human pause worked, the revision
-consult requoted to a verbatim 'Abdu'l-Bahá passage, and the final card is
-quote_grounded=True, 6.2/10 best-effort (kept in the DB — Sheraj can
-delete it from the dashboard if unwanted; ~$0.15 metered spend). AGENTS.md
-hard rule 10 rewritten to record the owner-approved restyle and the two
-surviving machine contracts. Uncommitted, awaiting Sheraj's review.
-
-### 2026-07-09 — Claude Code (Fable 5), orchestrating ALL THREE workers —
-full app scan + honest README rewrite
-Per Sheraj's ask ("update the README so it reflects the actual app right
-now — no Etsy integration, you download a file and take it to a printer"),
-Claude first verified the central claim itself (no `etsy_token.json`
-exists; 0 of 84 products have an `etsy_listing_id` — Etsy publishing has
-NEVER run), then dispatched three parallel read-only scans: Codex on
-principles-as-code + architecture + grounded future directions; Grok on a
-reality audit (what actually works vs built-but-dormant, with DB/file
-evidence); Antigravity on a tab-by-tab dashboard walkthrough. Load-bearing
-claims were re-verified by Claude against the DB before use: Canva
-autofill has failed ALL 10 attempts ever made (same 400, last 2026-07-05)
-despite an authorised token; the X giveaway is real (2 live posts on
-@peaceAntz); no product has ever hit the 9.0 target (median bookmark
-score 7.6); total metered+legacy spend ≈ $13.72, revenue $0. `README.md`
-was fully rewritten from these findings: leads with what the app actually
-produces today (300 DPI faces + cut-tolerant print-sheet PDF → print
-shop), an "Honest status: what's real, what's not" table (Etsy built but
-never connected; Canva built but broken; pipelines/editor/Secretary/X all
-real), why-this-exists (principles enforced as code, with the concrete
-mechanisms), the named roster, the user-facing workflow, corrected run
-instructions (backend runs as a Scheduled Task — the old README's
-`python agents/api.py` advice reintroduced the double-server bug), an
-updated file map, and code-grounded future directions. Grok also surfaced
-one tiny docs bug (see Snapshot). No code changed — README.md and this
-file only.
-
-### 2026-07-09 - Codex - committed and pushed current work
-Sheraj asked Codex to push the latest changes to GitHub, then explicitly
-approved committing the current working tree. Codex updated this handoff note
-so it no longer describes the work as waiting for commit approval, then
-packaged the accumulated layout editor, roster/dashboard, Secretary honesty,
-multi-coder docs, architecture, and requirements changes into one commit for
-push to `origin/master`.
-
-### 2026-07-09 — Claude Code (Fable 5), orchestrating Grok — first WRITE
-dispatch: fixed the Secretary rule-4 gap
-Sheraj approved fixing the gap found earlier today. Claude scoped the fix
-itself first (read `api.py::edit_product` 2358-2432 as the reference
-implementation), then dispatched a precisely-specified edit to Grok
-(foreground, `--permission-mode acceptEdits`, Edit/Write allowed, all
-git-mutating commands denied). Grok's diff was exactly in scope: only
-`agents/secretary_tools.py`'s `edit_product` branch, now mirroring the
-dashboard path — `_sanitize_claims` on every edit, `quote_verified=false`
-+ face re-render (degrading to a note on failure) on a real quote change,
-and the post-scrub title persisted instead of the raw edit value. Claude
-verified independently: full diff read, `import agents.secretary_tools` +
-`import agents.api` clean (no circular imports from the new lazy imports),
-and a live behavioral test through the REAL tool executor on a throwaway
-product — scrub fired ("handcrafted" → "made-to-order"), demotion + reply
-wording correct, missing-artwork re-render degraded to a note without
-blocking, test row deleted after. Backend restarted per the documented
-procedure (killed PID on :8765, `Start-ScheduledTask`, `/products` → 200)
-so the LIVE Abigail process carries the fix. Note: Grok's handoff text
-didn't come back through the pipe this time (output ended after its
-progress lines) — didn't matter, since verification never trusts the
-handoff anyway.
-
-### 2026-07-09 — Claude Code (Fable 5), orchestrating ALL THREE workers —
-full three-agent orchestration confirmed working
-Per Sheraj's ask to "get them all working and confirm they work": unblocked
-Codex without touching his config file (per-invocation `-c
-model_provider=openai -m gpt-5.5` overrides — the only cloud slugs his
-ChatGPT account accepts are `gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini`; the
-`gpt-*-codex` names are rejected), then dispatched three independent
-READ-ONLY tasks in parallel (chosen read-only deliberately — the tree is
-full of uncommitted work, so no dispatch could collide with it or with each
-other). Grok audited hard rule 4 across every listing write path; Codex
-reviewed `layout.py::sanitize()` (it live-probed the function with real
-Python calls, not just reading); Antigravity UX-reviewed `LayoutEditor.tsx`.
-Antigravity's FIRST dispatch misfired instructively: `--print` takes the
-prompt as its own flag value, so `--print --mode plan "<prompt>"` fed it the
-literal string `--mode` as the prompt, and it ran in its own scratch dir
-instead of the repo — both fixed (`-p "<prompt>"` last + `--add-dir`),
-documented in `AGENTS.md`. Every worker claim was independently re-verified
-by Claude reading the actual code before being accepted. Results: **one
-real rule-4 violation found** (Abigail's `edit_product` tool skips the
-honesty scrub — see Snapshot), one low-severity crash edge, five UX
-recommendations (top one verified). No repo code was changed by any worker
-(verified via `git status` — only Claude's own doc edits to AGENTS.md +
-STATUS.md this session). Fixes not yet applied; recommended as next step.
-
-### 2026-07-09 — Claude Code (Sonnet), orchestrating Grok — first real
-multi-agent dispatch test
-Per Sheraj's request to have Claude act as an orchestration layer for
-Grok/Codex/Antigravity ("give them grunt work while you monitor them and
-make sure the goal is achieved"), and his answers to 3 follow-up questions
-(Moderate autonomy — agents may edit + run safe local commands without
-asking, never git push/destructive ops; install Codex now; test it for real
-today): installed the Codex CLI (`npm install -g @openai/codex`) — its
-ChatGPT auth actually works (confirmed via its own log), but local dispatch
-is currently blocked by a pre-existing config pointing at a never-pulled
-Ollama model (`gemma4`) — not something Claude created, left for Sheraj to
-decide. Confirmed Grok and Antigravity (`agy`) are both already installed
-and authenticated on this machine.
-
-Dispatched a real, precisely-scoped task to Grok: remove the dead
-`framing_contribution` entry from `consultation.py`'s `CONSULTATION_SCRIPTURE`
-and the three genuinely-unused entries from `router.py`'s `GROK_TASK_TYPES`
-(Claude first re-verified the original claim with a proper multiline grep
-across every `call_llm()` call site — the real dead set turned out to be
-`{"copywriting", "review", "complex_analysis"}`, not the slightly-wrong set
-noted in an earlier session's audit; `"copy"` stayed because it's used by
-`router.py`'s own manual self-test). First dispatch attempt (backgrounded,
-`--permission-mode acceptEdits`) was correctly blocked by Claude Code's own
-safety classifier for running unsupervised with edit permissions — re-ran in
-the **foreground** instead so a human (Claude, actively) was watching it
-complete. Grok's result was independently re-verified (not just trusted):
-`git diff` read in full, a fresh import check, and a repo-wide grep for the
-removed strings — all confirmed exactly the intended two-file, two-change
-diff, nothing else touched, and Claude's own earlier uncommitted edit to
-`router.py` (the docstring fix, see below) survived untouched.
-
-**Real finding, not assumed going in**: Grok's `--worktree <name>` flag did
-NOT actually isolate the session when combined with headless `--prompt-file`
-mode — `git worktree list` showed no new worktree was created; Grok edited
-the main working tree directly. Isolation can't be assumed and must be
-checked with `git status`/`git diff` after every dispatch — documented as a
-hard caveat in `AGENTS.md`'s new "Dispatching grunt work" section, along
-with the exact working command pattern for future sessions (any tool) to
-reuse rather than rediscover.
-
-### 2026-07-09 — Claude Code (Sonnet)
-Set up multi-coder infrastructure per Sheraj's request (he now has Claude
-Code, Codex, Antigravity, and Grok all working on this repo). Created
-`AGENTS.md` as the single canonical, tool-agnostic instructions file
-(previously `CLAUDE.md`'s content, which was already written generically);
-reduced `CLAUDE.md` to an `@AGENTS.md` import so Claude Code keeps
-auto-loading full context without a second copy to drift. Created this file
-(`STATUS.md`) as the living snapshot + hand-off log, seeded with reconstructed
-history from `git log` and this session's own findings. Audited
-`requirements.txt` against actual imports in `agents/`/`scripts/` and found
-three real gaps (`chromadb`, `chonkie`, `beautifulsoup4` are imported but
-were never listed) — fixed. No application code changed.
-
-### 2026-07-09 — Claude Code (Sonnet) — Part 2 of the editor/roster plan
-Per Sheraj's answers to 4 clarifying questions: (1) manual quote edits stay
-allowed but now flag `quote_verified: false` and re-render + always run the
-honesty scrub (`agents/api.py::edit_product`); (2) named the roster with
-everyday names (Ruth/Theo/Clara/Amos/Nora/Sofia) alongside Abigail; (3)
-generated six avatar portraits via the Artist's own xAI image pipeline in a
-consistent Persian-miniature style (~$0.30 metered spend) — sent to Sheraj
-as a montage for approval, **response still pending**; (4) avatars kept
-private/gitignored like Abigail's photo. Wired the roster into
-`TrustPanel.tsx` and `ConsultationTranscript.tsx` via a new `RosterAvatar`
-component (falls back to an initial if the image is missing) and a
-`ROSTER`/`rosterFor()` registry in `dashboard/src/lib/utils.ts` — display
-layer only, backend trust/log keys unchanged. Also fixed two small stale-
-docs issues found during the earlier audit: `router.py`'s docstring falsely
-claiming the Secretary's tool-calling path is read-only, and Reviewer
-prompts saying "the team consulted in two rounds" when it's actually three.
-Verified live: dashboard typecheck clean, `edit_product` tested end-to-end
-against a real product (no-op edit, quote-change flag + re-render, then
-fully restored to original state).
-
-### 2026-07-08 ~20:00–20:03 — Grok (discovered via DB inspection, not
-observed live)
-While unattended, Grok exercised the newly-built layout editor on a real
-quote card (`0eaf3ea5`, "The betterment of the world…") — saved a custom
-layout (Palatino regular, 75% text size, stronger vignette) that rendered
-correctly, including the Chinese translation correctly keeping its own
-script-verified font untouched by the English-side font/colour change (rule
-9 held). Also ran a fresh card pipeline end-to-end, producing a new card
-(`ccfbf8f4`, "Beware, O people of Bahá…", Spanish translation, requoted once
-during revision). Both actions went through the running app cleanly with no
-code changes — this was live validation that the layout editor works in
-production, found by a later Claude Code session reviewing `workforce.db`
-timestamps and `task_runs` after the fact.
-
-### 2026-07-08 — Claude Code (Fable 5 / Sonnet) — visual layout editor
-(Part 1) + full roster/consultation audit (Part 2, written up as a plan)
-Researched Canva's Connect API capabilities (autofill, editor return-
-navigation, import/export — confirmed no server-side design-editing API
-exists for partner integrations) and wrote
-`docs/improvement-plan-2026-07-08.md` covering: a proposed editor
-architecture, a full audit of every real agent (Librarian/Artist/Scribe/
-Reviewer/Translator/Abigail, plus debunking "Operator"/"Producer"/"Steward"
-as non-agents), and a consultation-logic health check (all 6 scripture
-citations verified authentic and correctly attributed; rules 11/12's Ruhi
-Book 1 restriction and grounding re-check confirmed airtight). Sheraj's
-response: skip the Canva round-trip entirely, "build it out yourself." Built
-the native editor: `agents/layout.py` (font registry, defaults, the
-`sanitize()` boundary that clamps untrusted input and never carries text),
-threaded `layout`/`dest_stem` params through `compositor.py` and
-`card_compositor.py` (defaults reproduce the pre-editor render byte-for-
-byte — verified), added `layout_json` column + 3 API endpoints, and built
-`LayoutEditor.tsx`. Verified offline (render tests both product types) and
-live (real HTTP calls against the running server, save + persistence + a
-visual read-back of the rendered PNGs).
-
-### 2026-07-07 — commit `bada6fc`
-"Migrate Secretary to real tool-calling, add WhatsApp + Google Workspace,
-and give her a Products-tab presence." Replaced the earlier custom
-`<remember>`/`<task>`/`<event>`/`<remind>` text-tag design with real Claude
-tool-calling (`router.call_claude_agentic` + `agents/secretary_tools.py`) —
-the text-tag approach was unreliable in long sessions (Abigail would narrate
-an action with no tag behind it). Added WhatsApp (Meta Cloud API, her own
-number) and the full Google Workspace suite (Gmail, Drive, Docs, Sheets,
-Slides) behind one shared OAuth module.
-
-### 2026-07-06 — commits `dcbf5af`, `a0430d9`
-Print sheet generation (`agents/print_sheet.py`, cut-tolerant multi-up PDF).
-Secretary Phases 1–2 (calendar, badí dates, scheduler) plus hardening of
-Etsy honesty/pricing rules and the deterministic quote-grounding re-check.
-
-### 2026-07-05 — commit `b692419`
-Added the Quote Cards giveaway product line (Ruhi Book 1 restricted
-sourcing, multi-script rendering, translation) and improved the multi-agent
-consultation to its current 3-round-with-human-pause structure.
-
-*(Earlier history — n8n retirement, the original async pipeline, Etsy
-integration, initial Phases 1–4 — is in `git log`; not reproduced here to
-keep this file readable. Run `git log --oneline` for the full list.)*
