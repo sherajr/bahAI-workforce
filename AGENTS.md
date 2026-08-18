@@ -22,6 +22,7 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 55–57 | Cancelling a run |
 | 59–64 | The Material World (nuclei) |
 | 65–68 | The Bahá'í Workforce on the Material World map |
+| 69 | Junior youth groups |
 
 ## Working norms
 
@@ -58,7 +59,7 @@ python scripts/test_secretary_colony.py    # Abigail <-> the teams: 92 checks
 python scripts/test_job_cancel.py          # Cancelling a run: 24 checks
 python scripts/test_wallet.py              # Wallet: 90 checks, no network/keys
 python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
-python scripts/test_nuclei.py              # Material World (nuclei): 257 checks
+python scripts/test_nuclei.py              # Material World (nuclei): 281 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -1083,6 +1084,10 @@ from it to a friend or to a nucleus's group. Added 2026-08-17 (owner ask).
       the fold has finished. The opacity fade is deliberately DELAYED behind
       the scale so the bodies are seen travelling rather than winking out, and
       the whole thing is stilled under `prefers-reduced-motion`.
+
+## Rule 69 — junior youth groups
+
+69. **A junior youth group's people are the youth and the animators, recorded as facets.** (Owner ask 2026-08-18.) The grouping used to list families; the group itself is the junior youth in it and who animates it. Those parts are exclusive `group_role` facet kinds (`jy_youth`, `primary_animator`, `sub_animator`) — data, like every other facet (rule 63), not a JY-only column. They may only be set on a live membership of a `junior_youth` grouping, and only on a person: a household is not a junior youth or an animator. Marking an animator also sets the existing `animating` service facet on that same membership (and taking them off the animator role ends it), so the two lists stay honest and they sit closer the same way any animator does. The drawer lists the kids and the animators from those facets; it never grades them (rule 61). A person already inside a family that sits at this group does not get a second light for being marked as in it — they stay in the family light (rule 62). Ticking them in the family box records the membership and the role; it does not copy them onto the sky.
 
 ## Gotchas
 

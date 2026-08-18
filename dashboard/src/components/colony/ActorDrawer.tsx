@@ -26,6 +26,7 @@ export function ActorDrawer({ actorId, snapshot, onClose, onChanged, onSelectAct
   const participation = facets.filter((f) => f.axis_slug === "participation");
   const service = facets.filter((f) =>
     f.axis_slug === "service" && f.slug !== "being_accompanied" && f.slug !== "accompanying");
+  const groupRoles = facets.filter((f) => f.axis_slug === "group_role");
 
   const sat = useMutation({
     mutationFn: () => api.satTogether(actorId),
@@ -143,6 +144,23 @@ export function ActorDrawer({ actorId, snapshot, onClose, onChanged, onSelectAct
             <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
               {m.grouping_name}
             </div>
+            {m.grouping_kind === "junior_youth" && actor.kind === "person" && (
+              <>
+                <p className="mb-1.5 text-[11px] uppercase tracking-wider text-slate-600">
+                  Their part in this group
+                </p>
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {groupRoles.map((f) => (
+                    <Chip
+                      key={f.slug}
+                      label={f.label}
+                      on={live.some((x) => x.slug === f.slug)}
+                      onClick={() => addFacet.mutate({ membership_id: m.id, slug: f.slug })}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
             <p className="mb-1.5 text-[11px] uppercase tracking-wider text-slate-600">How they gather</p>
             <div className="mb-2 flex flex-wrap gap-1.5">
               {participation.map((f) => (

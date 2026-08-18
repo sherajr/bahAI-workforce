@@ -6446,6 +6446,7 @@ class NucleiActorIn(BaseModel):
     how_we_met: Optional[str] = None
     grouping_id: Optional[int] = None
     introduced_as: Optional[str] = None
+    role_slug: Optional[str] = None
 
 
 class NucleiActorPatch(BaseModel):
@@ -6458,6 +6459,7 @@ class NucleiMembershipIn(BaseModel):
     grouping_id: int
     introduced_as: Optional[str] = None
     introduced_by_actor_id: Optional[int] = None
+    role_slug: Optional[str] = None
 
 
 class NucleiFacetIn(BaseModel):
@@ -6565,6 +6567,7 @@ def nuclei_create_actor(req: NucleiActorIn):
             mem = ns.add_membership(
                 actor["id"], req.grouping_id,
                 introduced_as=req.introduced_as,
+                role_slug=req.role_slug,
             )
             ns.add_facet(mem["id"], "connected")
         return ns.actor_detail(actor["id"])
@@ -6602,11 +6605,14 @@ def nuclei_archive_actor(actor_id: int):
 @app.post("/nuclei/memberships")
 def nuclei_add_membership(req: NucleiMembershipIn):
     try:
-        return _nuclei().add_membership(
+        mem = _nuclei().add_membership(
             req.actor_id, req.grouping_id,
             introduced_as=req.introduced_as,
             introduced_by_actor_id=req.introduced_by_actor_id,
+            role_slug=req.role_slug,
         )
+        facets = _nuclei().live_facets(int(mem["id"]))
+        return {**mem, "facets": facets}
     except Exception as e:
         _nuclei_err(e)
 

@@ -1173,12 +1173,12 @@ export interface TeamConsultResult {
 }
 
 // ── Per-agent model selection ───────────────────────────────────────────────
-// Mirrors agents/models.py. The provider boundary (workforce = ollama|xai,
+// Mirrors agents/models.py. The provider boundary (workforce = ollama|xai|openai,
 // Abigail = anthropic only) is enforced on the BACKEND — this is display.
 
 export interface ModelOption {
   id: string;
-  provider: "ollama" | "xai" | "anthropic";
+  provider: "ollama" | "xai" | "openai" | "anthropic";
   label: string;
   paid: boolean;
   note: string;
@@ -1481,6 +1481,8 @@ export interface NucleiGroupingDetail {
     actor: NucleiActor;
     facets: NucleiFacet[];
     family_members?: NucleiHouseholdMember[];
+    jy_role?: string | null;
+    jy_role_label?: string | null;
   })[];
   recent_activities: { id: number; kind_label: string; happened_at: string; title: string | null }[];
   accompaniments?: NucleiTie[];

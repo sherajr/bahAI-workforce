@@ -796,6 +796,128 @@ no_work = client.post("/nuclei/ties", json={
 check("walking with needs a particular work",
       no_work.status_code == 400, str(no_work.status_code))
 
+
+section("Junior youth and animators")
+kinds_jy = store.list_kinds(TEST_DB)
+check("group_role axis exists and is exclusive",
+      any(a["slug"] == "group_role" and a["exclusive"] for a in kinds_jy["axes"]))
+role_slugs = {f["slug"] for f in kinds_jy["facet_kinds"] if f["axis_slug"] == "group_role"}
+check("junior youth roles are data",
+      role_slugs == {"jy_youth", "primary_animator", "sub_animator"})
+jy_kind = next(k for k in kinds_jy["grouping_kinds"] if k["slug"] == "junior_youth")
+check("the kind is a junior youth group, not only families",
+      jy_kind["label"] == "Junior youth group")
+check("a primary animator sits as close as other core service",
+      layout.engagement_from_facets([{"slug": "primary_animator"}]) == 4)
+check("being junior youth is not a score",
+      layout.engagement_from_facets([{"slug": "jy_youth"}]) == 0)
+
+jy_group = store.create_grouping("junior_youth", "Tuesday JY", TEST_DB)
+kid = store.create_actor("person", "Sam Vale", db_path=TEST_DB)
+anim = store.create_actor("person", "Leila Okonkwo", db_path=TEST_DB)
+kid_m = store.add_membership(kid["id"], jy_group["id"], db_path=TEST_DB)
+anim_m = store.add_membership(anim["id"], jy_group["id"], db_path=TEST_DB)
+store.add_facet(kid_m["id"], "jy_youth", TEST_DB)
+store.add_facet(anim_m["id"], "primary_animator", TEST_DB)
+check("a junior youth keeps that part",
+      any(f["slug"] == "jy_youth" for f in store.live_facets(kid_m["id"], TEST_DB)))
+check("a primary animator also carries the animating service",
+      {f["slug"] for f in store.live_facets(anim_m["id"], TEST_DB)}
+      >= {"primary_animator", "animating"})
+store.add_facet(anim_m["id"], "sub_animator", TEST_DB)
+check("switching animator role is exclusive",
+      {f["slug"] for f in store.live_facets(anim_m["id"], TEST_DB)
+       if f["axis_slug"] == "group_role"} == {"sub_animator"})
+check("switching between animator roles keeps animating",
+      any(f["slug"] == "animating" for f in store.live_facets(anim_m["id"], TEST_DB)))
+store.add_facet(anim_m["id"], "jy_youth", TEST_DB)
+check("becoming junior youth ends the animator service on this group",
+      not any(f["slug"] == "animating" for f in store.live_facets(anim_m["id"], TEST_DB)))
+
+refused_role = False
+try:
+    store.add_facet(amara_mem["id"], "primary_animator", TEST_DB)
+except ValueError:
+    refused_role = True
+check("animator is not a part of a regular nucleus", refused_role)
+
+hale_on_jy = next(m for m in store.live_memberships(TEST_DB)
+                  if int(m["actor_id"]) == hale["id"]
+                  and int(m["grouping_id"]) == jy["id"])
+refused_house_role = False
+try:
+    store.add_facet(hale_on_jy["id"], "jy_youth", TEST_DB)
+except ValueError:
+    refused_house_role = True
+check("a family cannot be a junior youth", refused_house_role)
+
+role_via_join = store.add_membership(
+    priya["id"], jy_group["id"], role_slug="sub_animator", db_path=TEST_DB,
+)
+check("add_membership can set the part",
+      any(f["slug"] == "sub_animator"
+          for f in store.live_facets(role_via_join["id"], TEST_DB)))
+
+fam_jy = store.create_grouping("junior_youth", "Friday JY", TEST_DB)
+sen_house = store.create_actor("household", "The Sen household", db_path=TEST_DB)
+store.add_membership(sen_house["id"], fam_jy["id"], db_path=TEST_DB)
+mina = store.create_actor("person", "Mina Sen", db_path=TEST_DB)
+store.add_household_member(sen_house["id"], mina["id"], TEST_DB)
+mina_before = store.snapshot(TEST_DB)
+check("a child in a JY family has no light of their own yet",
+      mina["id"] not in {a["id"] for a in mina_before["layout"]["actors"]})
+store.add_membership(mina["id"], fam_jy["id"], role_slug="jy_youth", db_path=TEST_DB)
+mina_in = store.snapshot(TEST_DB)
+check("being in the JY group does not mint a second light when the family already sits there",
+      mina["id"] not in {a["id"] for a in mina_in["layout"]["actors"]})
+check("the family light is still there",
+      sen_house["id"] in {a["id"] for a in mina_in["layout"]["actors"]})
+mina_detail = store.grouping_detail(fam_jy["id"], TEST_DB)
+check("the child is listed as junior youth without a second light",
+      any(int(m["actor"]["id"]) == mina["id"] and m.get("jy_role") == "jy_youth"
+          for m in mina_detail["members"]))
+store.add_membership(mina["id"], lsa["id"], db_path=TEST_DB)
+mina_both = store.snapshot(TEST_DB)
+check("a seat elsewhere still gives them their own light",
+      mina["id"] in {a["id"] for a in mina_both["layout"]["actors"]})
+
+http_kid = client.post("/nuclei/actors", json={
+    "kind": "person", "display_name": "HTTP JY Kid",
+    "grouping_id": jy_group["id"], "role_slug": "jy_youth",
+})
+check("POST actor onto JY with a role is 200", http_kid.status_code == 200, http_kid.text)
+http_kid_roles = {
+    f["slug"]
+    for m in http_kid.json().get("memberships") or []
+    if int(m["grouping_id"]) == int(jy_group["id"])
+    for f in m.get("facets") or []
+}
+check("created junior youth is marked on the membership",
+      "jy_youth" in http_kid_roles)
+
+http_join = client.post("/nuclei/memberships", json={
+    "actor_id": dario["id"], "grouping_id": jy_group["id"],
+    "role_slug": "primary_animator",
+})
+check("POST membership with primary animator is 200",
+      http_join.status_code == 200, http_join.text)
+check("HTTP primary animator carries animating",
+      "animating" in {f["slug"] for f in (http_join.json() or {}).get("facets") or []})
+
+gd = client.get(f"/nuclei/groupings/{jy_group['id']}").json()
+roles = {m["actor"]["display_name"]: m.get("jy_role") for m in gd["members"]}
+check("JY grouping lists the youth and the animators",
+      roles.get("Sam Vale") == "jy_youth"
+      and roles.get("HTTP JY Kid") == "jy_youth"
+      and roles.get("Priya Sen") == "sub_animator"
+      and roles.get("Dario Chen") == "primary_animator")
+
+bad_role = client.post("/nuclei/facets", json={
+    "membership_id": amara_mem["id"], "slug": "primary_animator",
+})
+check("HTTP refuses an animator role off a JY group",
+      bad_role.status_code == 400, str(bad_role.status_code))
+
 # -- The Bahai Workforce as a place (rules 65-68) -----------------------------
 
 section("The workforce is a place, not a decoration")

@@ -154,11 +154,14 @@ export function RealWorldGraph({
     return { ...p, x: p.x + (o.cx - home.cx), y: p.y + (o.cy - home.cy) };
   });
 
-  const seatedIds = useMemo(() => {
+  // Who has their own light — derived from the layout, not from memberships.
+  // A family member can be in a group (rule 69) and still live inside the
+  // family light (rule 62), so membership alone is not a seat.
+  const litIds = useMemo(() => {
     const s = new Set<number>();
-    for (const m of snapshot.memberships) s.add(m.actor_id);
+    for (const p of snapshot.layout.actors) s.add(p.id);
     return s;
-  }, [snapshot.memberships]);
+  }, [snapshot.layout.actors]);
   const familyMembers = snapshot.household_members ?? [];
   const selectedKind = selectedActor != null ? actorsById[selectedActor]?.kind : undefined;
   const groupingFamilyIds = useMemo(() => {
@@ -216,11 +219,11 @@ export function RealWorldGraph({
     const ids: number[] = [];
     for (const pid of consider) {
       const fam = familyMembers.find((m) => m.person_id === pid);
-      if (fam && !seatedIds.has(pid)) ids.push(fam.household_id);
+      if (fam && !litIds.has(pid)) ids.push(fam.household_id);
     }
     return [...new Set(ids)];
   }, [selectedGrouping, selectedActor, snapshot.ties, snapshot.memberships,
-    familyMembers, seatedIds, expandFromMembers, actorsById,
+    familyMembers, litIds, expandFromMembers, actorsById,
     snapshot.owner_actor_id, selectedGroupingMeta]);
   const wantedBloom = selectedKind === "household" && selectedActor != null
     ? [selectedActor]
@@ -288,12 +291,24 @@ export function RealWorldGraph({
   // by a thread — never redrawn as a second dot (rule 62), exactly as a family
   // member who already sits at a table is.
   const wfSeated = new Set(
-    wfPeople.filter((p) => seatedIds.has(p.actor_id)).map((p) => p.actor_id),
+    wfPeople.filter((p) => litIds.has(p.actor_id)).map((p) => p.actor_id),
   );
   const wfRing = wfPetals.filter((p) => !(p.actorId != null && wfSeated.has(p.actorId)));
 
   const insideOf = (houseId: number) =>
-    familyMembers.filter((m) => m.household_id === houseId && !seatedIds.has(m.person_id));
+    familyMembers.filter((m) => m.household_id === houseId && !litIds.has(m.person_id));
+
+  // A family-only person has no light of their own (rule 62). Selecting them
+  // closes the family bloom — keep their petal so the selection, and the line
+  // that already points at it, have something to land on.
+  const pinnedFamily = selectedActor != null
+      && !litIds.has(selectedActor)
+      && !lights.some((p) => p.id === selectedActor)
+    ? familyMembers.find((m) => m.person_id === selectedActor)
+    : undefined;
+  const petalHouseIds = pinnedFamily && !bloomIds.includes(pinnedFamily.household_id)
+    ? [...bloomIds, pinnedFamily.household_id]
+    : bloomIds;
 
   const petalOf = (houseId: number, personId: number): { x: number; y: number } | null => {
     const house = lights.find((p) => p.id === houseId);
@@ -815,7 +830,7 @@ export function RealWorldGraph({
           const collective = actor.kind === "collective";
           const household = actor.kind === "household";
           const insideHere = household
-            ? familyMembers.some((m) => m.household_id === p.id && !seatedIds.has(m.person_id))
+            ? familyMembers.some((m) => m.household_id === p.id && !litIds.has(m.person_id))
             : false;
           const r = collective ? 9 : household ? (insideHere ? 7.4 : 6.2) : actor.display_name === "You" ? 5 : 4.2;
           const focus = hover?.kind === "actor" && hover.id === p.id;
@@ -868,38 +883,43 @@ export function RealWorldGraph({
           );
         })}
 
-        {bloomIds.map((houseId) => {
+        {petalHouseIds.map((houseId) => {
           const house = lights.find((p) => p.id === houseId);
           if (!house) return null;
           const inside = insideOf(houseId);
+          const blooming = bloomIds.includes(houseId);
           const rPetal = 34 + inside.length * 4;
           return inside.map((m, i) => {
             const actor = actorsById[m.person_id];
             if (!actor) return null;
+            const pinned = selectedActor === actor.id;
+            if (!blooming && !pinned) return null;
             const n = inside.length;
             const ang = -Math.PI / 2 + (i / n) * Math.PI * 2;
             const px = house.x + rPetal * Math.cos(ang);
             const py = house.y + rPetal * TILT * Math.sin(ang);
             const hex = accentFor(house.accent).hex;
             const r = 4.2;
+            const showPetal = bloomOpen || pinned;
+            const focus = hover?.kind === "actor" && hover.id === actor.id;
             return (
               <g key={`petal-${m.id}`}>
                 <line
                   x1={house.x} y1={house.y} x2={px} y2={py}
                   stroke="#e8d48b" strokeWidth={1.1}
                   className="rw-family-link"
-                  opacity={bloomOpen ? 0.45 : 0}
+                  opacity={bloomOpen && blooming ? 0.45 : 0}
                 />
                 <g
                   className="rw-petal cursor-pointer"
                   transform={`translate(${px} ${py})`}
-                  opacity={bloomOpen ? 1 : 0}
+                  opacity={showPetal ? 1 : 0}
                   onMouseEnter={() => setHover({ kind: "actor", id: actor.id })}
                   onMouseLeave={() => setHover(null)}
                   onClick={(e) => { e.stopPropagation(); onSelectActor(actor.id); }}
                 >
                   <g style={{
-                    transform: bloomOpen ? "scale(1)" : "scale(0.15)",
+                    transform: showPetal ? "scale(1)" : "scale(0.15)",
                     transformOrigin: "0px 0px",
                     transition: "transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)",
                   }}>
@@ -907,6 +927,9 @@ export function RealWorldGraph({
                     <circle r={r * 1.8} fill={hex} opacity={0.28} />
                     <circle r={r} fill="#fff7ed" />
                     <circle r={r * 0.45} fill="#ffffff" />
+                    {(focus || pinned) && (
+                      <circle r={r + 7} fill="none" stroke="#f8fafc" strokeWidth={1.3} opacity={0.85} />
+                    )}
                     <text
                       y={r + 13}
                       textAnchor="middle"

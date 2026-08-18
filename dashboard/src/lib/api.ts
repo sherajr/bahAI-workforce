@@ -950,15 +950,17 @@ export const api = {
     post<NucleiSnapshot>("/nuclei/layout/optimize"),
   createNucleiActor: (body: {
     kind?: string; display_name: string; how_we_met?: string;
-    grouping_id?: number; introduced_as?: string;
+    grouping_id?: number; introduced_as?: string; role_slug?: string;
   }) => post<NucleiActorDetail>("/nuclei/actors", body),
   patchNucleiActor: (id: number, body: { display_name?: string; how_we_met?: string }) =>
     request<NucleiActorDetail>("PATCH", `/nuclei/actors/${id}`, body),
   getNucleiActor: (id: number) => get<NucleiActorDetail>(`/nuclei/actors/${id}`),
   archiveNucleiActor: (id: number) =>
     post<NucleiSnapshot["actors"][number]>(`/nuclei/actors/${id}/archive`),
-  addNucleiMembership: (actor_id: number, grouping_id: number) =>
-    post<Record<string, unknown>>("/nuclei/memberships", { actor_id, grouping_id }),
+  addNucleiMembership: (actor_id: number, grouping_id: number, role_slug?: string) =>
+    post<Record<string, unknown>>("/nuclei/memberships", {
+      actor_id, grouping_id, ...(role_slug ? { role_slug } : {}),
+    }),
   endNucleiMembership: (id: number) =>
     post<{ result: string }>(`/nuclei/memberships/${id}/end`),
   addHouseholdMember: (householdId: number, body: { person_id?: number; display_name?: string }) =>

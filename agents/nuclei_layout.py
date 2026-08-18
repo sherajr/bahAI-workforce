@@ -102,7 +102,8 @@ def _hash_unit(seed: str) -> float:
 def engagement_from_facets(facets: list[dict]) -> int:
     """0 everyone else .. 4 core service. Per membership, not a score."""
     slugs = {f.get("slug") for f in (facets or [])}
-    if slugs & {"tutoring", "animating", "hosting", "childrens_classes"}:
+    if slugs & {"tutoring", "animating", "hosting", "childrens_classes",
+                "primary_animator", "sub_animator"}:
         return 4
     if "protagonist" in slugs or "accompanying" in slugs:
         return 3
@@ -492,17 +493,21 @@ def layout_real_world(
     for m in memberships:
         mems_by_actor.setdefault(int(m["actor_id"]), []).append(m)
 
-    peers_by_g: dict[int, list[int]] = {}
-    for m in memberships:
-        g = by_g.get(int(m["grouping_id"]))
-        if g and is_institution_row(g):
-            peers_by_g.setdefault(int(m["grouping_id"]), []).append(int(m["actor_id"]))
-    for gid in peers_by_g:
-        peers_by_g[gid] = sorted(set(peers_by_g[gid]))
-
     house_of: dict[int, int] = {}
     for h in household_members or []:
         house_of[int(h["person_id"])] = int(h["household_id"])
+    house_groupings = household_groupings(house_of, mems_by_actor)
+    peers_by_g: dict[int, list[int]] = {}
+    for m in memberships:
+        g = by_g.get(int(m["grouping_id"]))
+        if not g or not is_institution_row(g):
+            continue
+        aid = int(m["actor_id"])
+        if covered_by_household(aid, int(m["grouping_id"]), house_of, house_groupings):
+            continue
+        peers_by_g.setdefault(int(m["grouping_id"]), []).append(aid)
+    for gid in peers_by_g:
+        peers_by_g[gid] = sorted(set(peers_by_g[gid]))
     kind_rank = {"household": 0, "collective": 1}
     ordered_actors = sorted(
         actors, key=lambda a: (kind_rank.get(a.get("kind"), 2), int(a["id"]))
@@ -513,7 +518,7 @@ def layout_real_world(
         placed = _place_actor(
             actor, mems_by_actor.get(aid, []), by_g, facets_by_mem,
             activity_counts, peers_by_g,
-            house_of=house_of, ties=ties,
+            house_of=house_of, house_groupings=house_groupings, ties=ties,
         )
         if placed:
             lights.append(placed)
@@ -543,9 +548,37 @@ def institution_seat_r(orbital_r: float) -> float:
     return float(orbital_r) * 0.82
 
 
+def household_groupings(
+    house_of: dict[int, int],
+    mems_by_actor: dict[int, list],
+) -> dict[int, set[int]]:
+    """grouping ids each household sits at."""
+    out: dict[int, set[int]] = {}
+    for hid in set(house_of.values()):
+        out[int(hid)] = {
+            int(m["grouping_id"]) for m in mems_by_actor.get(int(hid), [])
+        }
+    return out
+
+
+def covered_by_household(
+    person_id: int,
+    grouping_id: int,
+    house_of: dict[int, int],
+    house_groupings: dict[int, set[int]],
+) -> bool:
+    """True when the family already sits at this table, so the person
+    should stay inside that light rather than mint a second one."""
+    hid = house_of.get(int(person_id))
+    if hid is None:
+        return False
+    return int(grouping_id) in house_groupings.get(int(hid), set())
+
+
 def _place_actor(actor, mems, by_g, facets_by_mem, activity_counts,
                  peers_by_g: dict | None = None,
                  house_of: dict | None = None,
+                 house_groupings: dict | None = None,
                  ties: list[dict] | None = None) -> dict | None:
     aid = int(actor["id"])
     if actor.get("kind") == "collective":
@@ -573,6 +606,9 @@ def _place_actor(actor, mems, by_g, facets_by_mem, activity_counts,
         gid = int(m["grouping_id"])
         g = by_g.get(gid)
         if not g:
+            continue
+        # The family already sits here — stay inside that light (rule 62 / 69).
+        if covered_by_household(aid, gid, house_of or {}, house_groupings or {}):
             continue
         facets = facets_by_mem.get(m["id"]) or facets_by_mem.get(str(m["id"])) or []
         institution = is_institution_row(g)

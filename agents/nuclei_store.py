@@ -42,6 +42,12 @@ SERVICE_SLUGS = CORE_SERVICE_SLUGS + (
 )
 POSTURE_SLUGS = ("protagonist",)
 
+# A junior youth group's people are the youth and the animators (rule 69).
+# Exclusive axis `group_role`; only valid on a junior_youth membership.
+JY_KIND = "junior_youth"
+JY_ROLE_SLUGS = ("jy_youth", "primary_animator", "sub_animator")
+JY_ANIMATOR_SLUGS = ("primary_animator", "sub_animator")
+
 ACTOR_KINDS = ("person", "household", "collective")
 
 # The Bahá'í Workforce is a real place on this map, not a decoration: a
@@ -277,6 +283,7 @@ def init_db(db_path: Path | str | None = None):
         _migrate_groupings(conn)
         _retire_worldwide_institutions(conn)
         _restack_institutions(conn)
+        _relabel_jy_kind(conn)
         _ensure_workforce_row(conn)
         conn.commit()
 
@@ -399,12 +406,31 @@ def _restack_institutions(conn: sqlite3.Connection):
     )
 
 
+def _relabel_jy_kind(conn: sqlite3.Connection):
+    """One-time: the kind is a junior youth group, not a table of families.
+
+    Only rewrites the default label. An owner rename is left alone.
+    """
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'jy_kind_label_v2'"
+    ).fetchone()
+    if row:
+        return
+    conn.execute(
+        "UPDATE grouping_kinds SET label = 'Junior youth group' "
+        "WHERE slug = 'junior_youth' AND label = 'Junior youth families'"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('jy_kind_label_v2', '1')"
+    )
+
+
 def _seed_kinds(conn: sqlite3.Connection):
     groupings = [
         ("nucleus", "Nucleus", 1, "sky", 0),
         ("neighborhood", "Neighbourhood", 0, "emerald", 1),
         ("network", "Network", 0, "rose", 2),
-        ("junior_youth", "Junior youth families", 0, "rose", 3),
+        ("junior_youth", "Junior youth group", 0, "rose", 3),
         ("other", "Other grouping", 0, "amber", 4),
         ("institution", "Institution of the Faith", 0, "gold", 5),
         ("workforce", "The Bahá'í Workforce", 0, "amber", 6),
@@ -419,6 +445,7 @@ def _seed_kinds(conn: sqlite3.Connection):
         ("participation", "How they gather", 1, 0),
         ("service", "How they serve", 0, 1),
         ("posture", "Taking initiative", 0, 2),
+        ("group_role", "Their part in this group", 1, 3),
     ]
     for slug, label, exclusive, order in axes:
         conn.execute(
@@ -438,6 +465,9 @@ def _seed_kinds(conn: sqlite3.Connection):
         ("accompanying", "service", "Walking with a friend", 0, 4),
         ("being_accompanied", "service", "Being walked with", 0, 5),
         ("protagonist", "posture", "Taking initiative", 0, 0),
+        ("jy_youth", "group_role", "Junior youth", 0, 0),
+        ("primary_animator", "group_role", "Primary animator", 0, 1),
+        ("sub_animator", "group_role", "Sub-animator", 0, 2),
     ]
     for slug, axis, label, is_core, order in facets:
         conn.execute(
@@ -902,6 +932,7 @@ def next_orbit_index(grouping_id: int, db_path: Path | str | None = None) -> int
 def add_membership(actor_id: int, grouping_id: int,
                    introduced_as: str | None = None,
                    introduced_by_actor_id: int | None = None,
+                   role_slug: str | None = None,
                    db_path: Path | str | None = None) -> dict:
     actor = get_actor(actor_id, db_path)
     if not actor:
@@ -920,7 +951,23 @@ def add_membership(actor_id: int, grouping_id: int,
             (actor_id, grouping_id),
         ).fetchone()
     if live:
-        return get_membership(int(live["id"]), db_path)
+        mem = get_membership(int(live["id"]), db_path)
+        if role_slug and mem:
+            add_facet(int(mem["id"]), role_slug, db_path)
+            mem = get_membership(int(mem["id"]), db_path)
+        return mem
+    if role_slug:
+        if role_slug not in JY_ROLE_SLUGS:
+            raise ValueError(
+                "A junior youth group has junior youth, a primary animator, "
+                "or a sub-animator"
+            )
+        if actor.get("kind") != "person":
+            raise ValueError("A family is not a junior youth or an animator")
+        if grouping.get("kind_slug") != JY_KIND:
+            raise ValueError(
+                "Junior youth and animator are parts of a junior youth group"
+            )
     idx = next_orbit_index(grouping_id, db_path)
     intro = (introduced_as or "").strip() or None
     with _connect(db_path) as conn:
@@ -932,6 +979,8 @@ def add_membership(actor_id: int, grouping_id: int,
         )
         conn.commit()
         mid = cur.lastrowid
+    if role_slug:
+        add_facet(int(mid), role_slug, db_path)
     return get_membership(mid, db_path)
 
 
@@ -992,9 +1041,13 @@ def add_facet(membership_id: int, slug: str,
     if not mem or mem.get("ended_at"):
         raise ValueError("No live membership")
     kind = _facet_kind(slug, db_path)
+    if slug in JY_ROLE_SLUGS:
+        _assert_jy_role(mem, db_path)
     existing = live_facets(membership_id, db_path)
     for f in existing:
         if f["slug"] == slug:
+            if slug in JY_ANIMATOR_SLUGS:
+                add_facet(membership_id, "animating", db_path)
             return f
     if kind["axis_exclusive"]:
         for f in existing:
@@ -1007,6 +1060,10 @@ def add_facet(membership_id: int, slug: str,
         )
         conn.commit()
         fid = cur.lastrowid
+    if slug in JY_ANIMATOR_SLUGS:
+        add_facet(membership_id, "animating", db_path)
+    elif slug == "jy_youth":
+        _end_live_slug(membership_id, "animating", db_path)
     with _connect(db_path) as conn:
         row = conn.execute(
             "SELECT mf.*, fk.slug, fk.label, fk.is_core, a.slug AS axis_slug "
@@ -1016,6 +1073,32 @@ def add_facet(membership_id: int, slug: str,
             (fid,),
         ).fetchone()
     return dict(row)
+
+
+def _assert_jy_role(mem: dict, db_path: Path | str | None = None):
+    grouping = get_grouping(int(mem["grouping_id"]), db_path)
+    if not grouping or grouping.get("kind_slug") != JY_KIND:
+        raise ValueError(
+            "Junior youth and animator are parts of a junior youth group"
+        )
+    actor = get_actor(int(mem["actor_id"]), db_path)
+    if not actor or actor.get("kind") != "person":
+        raise ValueError("A family is not a junior youth or an animator")
+
+
+def _end_live_slug(membership_id: int, slug: str,
+                   db_path: Path | str | None = None):
+    for f in live_facets(membership_id, db_path):
+        if f.get("slug") == slug:
+            end_facet(int(f["id"]), db_path)
+
+
+def jy_role_of(facets: list[dict] | None) -> dict | None:
+    """The live junior-youth / animator part, if any."""
+    for f in facets or []:
+        if f.get("slug") in JY_ROLE_SLUGS:
+            return f
+    return None
 
 
 def end_facet(facet_id: int, db_path: Path | str | None = None):
@@ -1579,10 +1662,14 @@ def grouping_detail(grouping_id: int, db_path: Path | str | None = None) -> dict
         extra = {}
         if a.get("kind") == "household":
             extra["family_members"] = members_of_household(int(a["id"]), db_path)
+        facets = live_facets(m["id"], db_path)
+        role = jy_role_of(facets)
         members.append({
             **m,
             "actor": a,
-            "facets": live_facets(m["id"], db_path),
+            "facets": facets,
+            "jy_role": role["slug"] if role else None,
+            "jy_role_label": role["label"] if role else None,
             **extra,
         })
     with _connect(db_path) as conn:
