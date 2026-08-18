@@ -19,7 +19,7 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-08-17)
+## Snapshot (as of 2026-08-18)
 
 **Live and working** (committed, in production):
 - **Bookmark pipeline** (Librarian → Artist → consultation → Scribe → Reviewer
@@ -50,18 +50,13 @@ Also committed in `5ee4044` (2026-08-16): the **Material World view** of the Col
 `/nuclei/*` endpoints, the Colony tab's Digital/Material World toggle, rules 59–64.
 Design lives in `private/nuclei/` (git-ignored). Not reviewed by hand yet.
 
-**Uncommitted in the working tree**: the **Bahá'í Workforce light on the
-Material World map** (rules 65–68, owner ask 2026-08-17). Clicking it fans the agents
-out the way a family opens; real people can be put on the workforce and appear
-in the Digital World too (derived, never a `workforce.db` row); a nucleus can
-carry the WhatsApp group it already talks in; and a message can be drafted from
-the drawer and either sent to one trusted contact or copied for a group. Files:
-`agents/nuclei_bridge.py` (new — the one bridge), `nuclei_store.py`
-(workforce grouping + `grouping_channels`), `nuclei_layout.py`
-(`is_workforce_row`), `router.call_local` (new), `/nuclei/workforce*` +
-`/nuclei/groupings/{id}/channel` endpoints, `WorkforceDrawer.tsx` (new),
-`RealWorldGraph.tsx`, `ColonyGraph.tsx`, `ColonyPanel.tsx`, `GroupingDrawer.tsx`.
-`scripts/test_nuclei.py` is now 225 checks. Not committed.
+Also committed in `d2b4609` (2026-08-17): the **Bahá'í Workforce light** on the
+Material World map (rules 65–68).
+
+**Uncommitted in the working tree**: nothing. The two chunks that sat here --
+the GPT-5.6/OpenAI provider option and the rule 69 junior youth work -- were
+committed and pushed to `origin/master` on 2026-08-18; see the Activity Log.
+Neither has been reviewed by hand yet: "committed" is not "reviewed".
 
 **Deferred / proposed, not started** (nobody should re-discover these from
 scratch):
@@ -94,6 +89,77 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-08-18 -- Claude Code (Opus 5) -- model picker 500, then committed the tree
+Owner report: the per-agent Model dropdown showed "Could not load the model
+list: 500". Not a bug in the picker -- the API had been running since before
+this session's edits to `agents/router.py` / `agents/models.py`, so it held the
+OLD router in `sys.modules`. `/colony/models` lazy-imports `models.py` at
+request time, which asked that cached old router for `OPENAI_BASE` and got
+`ImportError`. The traceback was in `logs/api.err.log`, not the browser.
+
+Fix was a restart, done the documented way (kill the process on :8765, then
+`Start-ScheduledTask "bahAI Secretary API"`) after checking it was safe to:
+`import agents.api` clean, `test_colony.py` 135/135. Endpoint now returns 200
+with 102 models and all four providers reachable. Worth knowing: `gpt-5.6`,
+`-sol`, `-terra` and `-luna` ARE discovered live from the OpenAI key, so the
+hardcoded `_OPENAI_DOCUMENTED_ALIASES` fallback may now be redundant -- and
+that fallback is a deliberate softening of rule 41a's "discovered, never
+hardcoded", which deserves a look before anyone leans on it.
+
+Then committed and pushed both pending chunks at Sheraj's request. Verified
+first: `test_nuclei.py` 281/281, `test_colony.py` 135/135, dashboard
+`tsc --noEmit` clean, no BOM/mojibake in the diff, `private/` still ignored.
+Nothing in the push was my own code -- it is Grok 4.6's and Codex's work.
+
+### 2026-08-18 — Codex (GPT-5) — GPT-5.6 in Colony model choices
+Owner ask: make `gpt-5.6` another `/models` option. OpenAI is now a paid
+workforce provider in `agents/models.py`, with live `/models` discovery when
+`OPENAI_API_KEY` is set and a short documented `gpt-5.6` fallback alias. The
+router can actually run a saved OpenAI choice through Chat Completions and meters
+it as `openai_chat`; the dashboard picker and chat cost note know about OpenAI.
+Rule 16 still holds: Abigail remains Claude-only and workforce agents still
+cannot use Claude. Verified `python -c "import agents.api"`,
+`python scripts/test_colony.py` (135/135), and dashboard `npx tsc --noEmit`.
+
+### 2026-08-18 — Grok 4.6 — tick a family member into the JY group
+Owner ask: a checkbox next to each name in a JY family box, and no extra
+dot because they are already in the family light. Checking them now adds
+them as junior youth (the role can be changed beside the tick); unchecking
+takes them out. Layout skips a membership at a table the family already
+sits at, so they stay inside the household light and bloom as a petal when
+the family opens (rules 62 / 69). A seat somewhere else still gives them
+their own light. `scripts/test_nuclei.py` 276 -> 281.
+
+### 2026-08-18 — Grok 4.6 — JY lists the youth and the animators
+Owner ask: the junior youth group should name the people who are actually in
+it — the junior youth, and the animators (primary or sub) — instead of only
+listing families. Rule 69. Those parts are exclusive `group_role` facets
+(`jy_youth`, `primary_animator`, `sub_animator`), only on a person in a
+junior youth grouping; a household cannot be a youth or an animator.
+Marking an animator also sets the existing `animating` service on that
+membership, so they sit closer the same way any animator does.
+
+The JY drawer now has two lists (Junior youth / Animators), a role when
+adding someone new or already on the map, and "Add as…" on people inside a
+family that sits with the group. You can change the part later from the
+group or from the person's own drawer. `scripts/test_nuclei.py` 257 -> 276.
+Dashboard typecheck is clean. The API must be restarted for the new kinds to
+appear on the live map.
+
+### 2026-08-18 — Grok 4.6 — selected family member stays on the map
+Owner report: open a family on the Material World map, click a member, the
+family closes (wanted) but the member's dot vanished while the line to them
+stayed. Family-only people have no light of their own (rule 62) — they only
+exist as petals while the family is open — so selecting one tore the petal
+down and left the selection line pointing at empty sky.
+
+`RealWorldGraph.tsx` now pins that one petal after the bloom folds: the rest
+of the family still closes, the selected person stays at the same seat with
+the same line, and a person picked from the family drawer (never opened on
+the map) appears the same way. Dashboard typecheck is clean. Could not click
+through it in a browser from this session — please try opening a family and
+tapping one of the people inside.
 
 ### 2026-08-18 — Claude Code (Opus 5) — the Real World is now the Material World
 Owner ask, and a better name: the Digital World is real too, so the contrast

@@ -9,7 +9,15 @@ import { Button, ErrorNote } from "../ui";
 const PROVIDER_LABELS: Record<string, string> = {
   ollama: "On this computer — free",
   xai: "Grok (xAI) — paid",
+  openai: "OpenAI — paid",
   anthropic: "Claude (Anthropic) — paid",
+};
+
+const PROVIDER_NAMES: Record<string, string> = {
+  ollama: "Ollama on this computer",
+  xai: "xAI",
+  openai: "OpenAI",
+  anthropic: "Anthropic",
 };
 
 /**
@@ -111,8 +119,8 @@ export function ModelPicker({ agent, onSaved }: { agent: string; onSaved: () => 
           unexplained empty dropdown. */}
       {unreachable.length > 0 && (
         <p className="mt-1.5 text-[11px] text-amber-300/80">
-          Couldn't reach {unreachable.map((p) => (p === "ollama" ? "Ollama on this computer" : p)).join(" or ")},
-          so its models aren't listed. Anything already chosen keeps working.
+          Couldn't reach {unreachable.map((p) => PROVIDER_NAMES[p] ?? p).join(" or ")},
+          so the live model list may be incomplete. Anything already chosen keeps working.
         </p>
       )}
 

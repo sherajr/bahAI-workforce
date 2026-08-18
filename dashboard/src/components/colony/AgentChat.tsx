@@ -8,22 +8,35 @@ import { Button, ErrorNote, RosterAvatar } from "../ui";
 /**
  * One-to-one chat with a workforce agent.
  *
- * These agents answer on THEIR OWN models — Grok for Theo and Amos (paid,
- * metered), the free local model for everyone else. That is hard rule 16:
- * Claude belongs to Abigail alone, which is also why she isn't chatted with
- * here at all. The cost note under the composer says which is which, because
+ * These agents answer on THEIR OWN models. By default that means Grok for Theo
+ * and Amos, and the free local model for everyone else; a saved model choice
+ * can move them onto another allowed provider such as OpenAI. Hard rule 16
+ * still holds: Claude belongs to Abigail alone, which is also why she isn't
+ * chatted with here at all. The cost note under the composer says which is which, because
  * "is this message going to cost me?" is a fair question to be able to answer
  * before pressing send.
  */
 
-const PAID_AGENTS = new Set(["artist", "reviewer"]);
+const PAID_DEFAULT_AGENTS = new Set(["artist", "reviewer"]);
+
+function paidOverrideProvider(model?: string): "Grok" | "OpenAI" | null {
+  const id = (model ?? "").toLowerCase();
+  if (!id) return null;
+  if (id.startsWith("grok")) return "Grok";
+  if (id.startsWith("gpt-") || id.startsWith("chatgpt-") ||
+      id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")) {
+    return "OpenAI";
+  }
+  return null;
+}
 
 export function AgentChat({
-  agent, initialMessages, onActed,
+  agent, initialMessages, onActed, model,
 }: {
   agent: string;
   initialMessages: ColonyAgentMessage[];
   onActed: () => void;
+  model?: string;
 }) {
   const [messages, setMessages] = useState<ColonyAgentMessage[]>(initialMessages);
   const [draft, setDraft] = useState("");
@@ -67,7 +80,8 @@ export function AgentChat({
   };
 
   const roster = rosterFor(agent);
-  const paid = PAID_AGENTS.has(agent);
+  const paidProvider = paidOverrideProvider(model);
+  const paid = model ? !!paidProvider : PAID_DEFAULT_AGENTS.has(agent);
 
   return (
     <div className="flex h-full flex-col">
@@ -139,9 +153,13 @@ export function AgentChat({
           </div>
         </div>
         <p className="text-[11px] leading-relaxed text-slate-500">
-          {paid
-            ? `${agentLabel(agent)} runs on the paid Grok API, so each message costs a little — it shows in the Steward's report.`
-            : `${agentLabel(agent)} runs on the free local model.`}
+          {model
+            ? (paidProvider
+                ? `${agentLabel(agent)} is set to ${model} on the paid ${paidProvider} API, so each message costs a little — it shows in the Steward's report.`
+                : `${agentLabel(agent)} is set to ${model} on this computer, so messages are free.`)
+            : (paid
+                ? `${agentLabel(agent)} runs on the paid Grok API by default, so each message costs a little — it shows in the Steward's report.`
+                : `${agentLabel(agent)} runs on the free local model by default.`)}
           {" "}Anything that spends money or changes a saved product waits for your approval.
         </p>
       </div>

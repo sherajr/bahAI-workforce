@@ -26,6 +26,8 @@ XAI_KEY = os.getenv("XAI_API_KEY", "")
 XAI_BASE = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-2-1212")
 XAI_VISION_MODEL = os.getenv("XAI_VISION_MODEL", XAI_MODEL)
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 # Anthropic (Claude Sonnet) — the Secretary's model and hers alone. The
 # existing Artist/Scribe/Reviewer/Librarian routing stays on Ollama/Grok;
@@ -51,7 +53,7 @@ if os.getenv("VIDEO_DIRECTOR_MODEL", "local").strip().lower() == "grok":
 # consistent — refine against real xAI invoices; the point is that repaint-heavy
 # runs cost visibly more than clean ones (Moderation, principle 5).
 EST_COST_USD = {"grok_chat": 0.005, "grok_vision": 0.01, "image_gen": 0.05,
-                "claude_chat": 0.01}
+                "claude_chat": 0.01, "openai_chat": 0.02}
 
 # Appended verbatim to a call_claude_agentic reply that hit the max_tokens
 # ceiling mid-generation, so a cut-off never masquerades as a complete answer
@@ -63,6 +65,14 @@ TRUNCATION_NOTICE = ("\n\n(I ran out of room mid-reply there, so part of what I 
 def record_api_spend(kind: str):
     """Meter one paid API call into the spend table. Never raises."""
     record_spend(kind, EST_COST_USD.get(kind, 0.0))
+
+
+def _route_name(provider: str) -> str:
+    if provider == "xai":
+        return "grok"
+    if provider == "openai":
+        return "openai"
+    return "ollama"
 
 
 def _resolve_route(task_type: str, agent: str | None) -> tuple[str, str]:
@@ -83,7 +93,7 @@ def _resolve_route(task_type: str, agent: str | None) -> tuple[str, str]:
         provider, model, note = resolve(task_type, agent)
         if note:
             print(f"[router] {note}")
-        return ("grok" if provider == "xai" else "ollama"), model
+        return _route_name(provider), model
     except Exception:
         return ("grok" if task_type in GROK_TASK_TYPES else "ollama",
                 XAI_MODEL if task_type in GROK_TASK_TYPES else OLLAMA_MODEL)
@@ -114,6 +124,9 @@ def call_llm(task_type: str, messages: list[dict], temperature: float = 0.7, max
     if provider == "grok":
         return _call_grok(messages, temperature, max_tokens, json_mode=json_mode,
                           timeout=timeout, model=model)
+    if provider == "openai":
+        return _call_openai(messages, temperature, max_tokens, json_mode=json_mode,
+                            timeout=timeout, model=model)
     return _call_ollama(messages, temperature, max_tokens, json_mode=json_mode,
                         timeout=timeout, model=model)
 
@@ -183,6 +196,52 @@ def _call_grok(messages: list[dict], temperature: float, max_tokens: int, _attem
             time.sleep(3 * (_attempt + 1))
             return _call_grok(messages, temperature, max_tokens, _attempt + 1, model=model,
                               json_mode=json_mode, kind=kind, timeout=timeout)
+        raise
+
+
+def _chat_content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or ""))
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return "" if content is None else str(content)
+
+
+def _call_openai(messages: list[dict], temperature: float, max_tokens: int, _attempt: int = 0,
+                 model: str = None, json_mode: bool = False,
+                 timeout: int | None = None) -> str:
+    if not OPENAI_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set - add it to .env to use OpenAI models")
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": model or "gpt-5.6",
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_tokens,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    try:
+        resp = requests.post(f"{OPENAI_BASE}/chat/completions", headers=headers, json=payload,
+                             timeout=timeout or 210)
+        resp.raise_for_status()
+        record_api_spend("openai_chat")
+        return _chat_content_text(resp.json()["choices"][0]["message"].get("content"))
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 400 and json_mode:
+            # Model/endpoint doesn't accept response_format - retry unconstrained.
+            return _call_openai(messages, temperature, max_tokens, _attempt, model=model,
+                                json_mode=False, timeout=timeout)
+        if _attempt < 2 and e.response is not None and e.response.status_code in (429, 500, 502, 503):
+            time.sleep(3 * (_attempt + 1))
+            return _call_openai(messages, temperature, max_tokens, _attempt + 1, model=model,
+                                json_mode=json_mode, timeout=timeout)
         raise
 
 
@@ -414,6 +473,41 @@ def _grok_tool_round(messages: list[dict], tools: list[dict], temperature: float
     return resp.json()["choices"][0]["message"]
 
 
+def _openai_tool_round(messages: list[dict], tools: list[dict], temperature: float,
+                       max_tokens: int, force_text: bool = False, _attempt: int = 0,
+                       model: str | None = None) -> dict:
+    """
+    One metered OpenAI chat-completions call that may return tool calls.
+    Returns the raw assistant message dict.
+    """
+    if not OPENAI_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not set - add it to .env to use OpenAI models")
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": model or "gpt-5.6",
+        "messages": messages,
+        "temperature": temperature,
+        "max_completion_tokens": max_tokens,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "none" if force_text else "auto"
+    try:
+        resp = requests.post(f"{OPENAI_BASE}/chat/completions", headers=headers, json=payload,
+                             timeout=210)
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        if _attempt < 2 and e.response is not None and \
+                e.response.status_code in (429, 500, 502, 503):
+            time.sleep(3 * (_attempt + 1))
+            return _openai_tool_round(messages, tools, temperature, max_tokens,
+                                      force_text=force_text, _attempt=_attempt + 1,
+                                      model=model)
+        raise
+    record_api_spend("openai_chat")
+    return resp.json()["choices"][0]["message"]
+
+
 def _ollama_tool_round(messages: list[dict], tools: list[dict], temperature: float,
                        max_tokens: int, force_text: bool = False,
                        timeout: int | None = None, model: str | None = None) -> dict:
@@ -498,6 +592,7 @@ def call_llm_agentic(task_type: str, messages: list[dict], system: str, tools: l
     # must run on the model it was assigned, not on the task-type default.
     provider, model = _resolve_route(task_type, agent)
     use_grok = provider == "grok"
+    use_openai = provider == "openai"
     working = [{"role": "system", "content": system}] + list(messages)
     collected: list[str] = []
 
@@ -506,12 +601,15 @@ def call_llm_agentic(task_type: str, messages: list[dict], system: str, tools: l
         if use_grok:
             reply = _grok_tool_round(working, tools, temperature, max_tokens,
                                      force_text=forcing_final, model=model)
+        elif use_openai:
+            reply = _openai_tool_round(working, tools, temperature, max_tokens,
+                                       force_text=forcing_final, model=model)
         else:
             reply = _ollama_tool_round(working, tools, temperature, max_tokens,
                                        force_text=forcing_final, timeout=timeout,
                                        model=model)
 
-        text = (reply.get("content") or "").strip()
+        text = _chat_content_text(reply.get("content")).strip()
         if text:
             collected.append(text)
         calls = _normalize_tool_calls(reply)
@@ -527,8 +625,8 @@ def call_llm_agentic(task_type: str, messages: list[dict], system: str, tools: l
             except Exception as e:  # an executor that raises must not kill the turn
                 result_text = f"Tool error ({type(e).__name__}): {e}"
             result_msg = {"role": "tool", "content": str(result_text)}
-            if use_grok:
-                # xAI matches results to calls by id; Ollama matches by order.
+            if use_grok or use_openai:
+                # OpenAI-compatible APIs match results to calls by id; Ollama matches by order.
                 result_msg["tool_call_id"] = call["id"]
             result_msg["name"] = call["name"]
             working.append(result_msg)

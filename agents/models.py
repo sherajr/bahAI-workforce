@@ -16,8 +16,9 @@ Two things here are load-bearing rather than convenient:
     with no override returns exactly what the router would have picked on its
     own, so this feature is inert until Sheraj actually uses it.
 
-Model lists are DISCOVERED from each provider rather than hardcoded, because a
-hardcoded list goes stale silently and then offers models that no longer exist.
+Model lists are DISCOVERED from each provider where possible, with short
+provider-documented fallbacks only for known aliases/defaults. A broad hardcoded
+list goes stale silently and then offers models that no longer exist.
 """
 
 import os
@@ -27,16 +28,17 @@ import requests
 
 from agents.router import (
     ANTHROPIC_KEY, GROK_TASK_TYPES, OLLAMA_BASE, OLLAMA_MODEL,
-    XAI_BASE, XAI_KEY, XAI_MODEL,
+    OPENAI_BASE, OPENAI_KEY, XAI_BASE, XAI_KEY, XAI_MODEL,
 )
 
 OLLAMA = "ollama"
 XAI = "xai"
+OPENAI = "openai"
 ANTHROPIC = "anthropic"
 
 # Which providers each agent may use. The Secretary is Claude-only and the
 # workforce is Claude-never — rule 16, in code (see module docstring).
-WORKFORCE_PROVIDERS = (OLLAMA, XAI)
+WORKFORCE_PROVIDERS = (OLLAMA, XAI, OPENAI)
 SECRETARY_PROVIDERS = (ANTHROPIC,)
 
 
@@ -53,6 +55,22 @@ _EMBEDDING_HINTS = ("embed", "bge-", "e5-", "gte-")
 # image and video generation; artist.generate_image reaches those through its
 # own path and they would 404 a /chat/completions call.
 _NON_CHAT_XAI = ("imagine",)
+
+# OpenAI's models endpoint includes non-chat families too. Keep the selector to
+# text/chat-capable ids; image/audio/embedding endpoints have their own call
+# paths and would fail through router.call_llm.
+_NON_CHAT_OPENAI = (
+    "audio", "dall-e", "embed", "image", "moderation", "realtime",
+    "speech", "transcribe", "tts", "whisper",
+)
+_OPENAI_CHAT_PREFIXES = ("gpt-", "chatgpt-", "o1", "o3", "o4")
+_OPENAI_LABELS = {
+    "gpt-5.6": "GPT-5.6 Sol",
+    "gpt-5.6-sol": "GPT-5.6 Sol",
+    "gpt-5.6-terra": "GPT-5.6 Terra",
+    "gpt-5.6-luna": "GPT-5.6 Luna",
+}
+_OPENAI_DOCUMENTED_ALIASES = [("gpt-5.6", "GPT-5.6 Sol")]
 
 # Fallback Claude list, used only when the Anthropic models endpoint can't be
 # reached. Kept short and current rather than exhaustive.
@@ -134,6 +152,53 @@ def _list_xai() -> tuple[list[dict], bool]:
     return models, ok
 
 
+def _is_openai_chat_model(model_id: str) -> bool:
+    mid = model_id.lower()
+    if any(bad in mid for bad in _NON_CHAT_OPENAI):
+        return False
+    return mid.startswith(_OPENAI_CHAT_PREFIXES)
+
+
+def _list_openai() -> tuple[list[dict], bool]:
+    hit = _cached(OPENAI)
+    if hit:
+        return hit
+    models: list[dict] = []
+    ok = False
+    if OPENAI_KEY:
+        try:
+            resp = requests.get(f"{OPENAI_BASE}/models",
+                                headers={"Authorization": f"Bearer {OPENAI_KEY}"}, timeout=12)
+            resp.raise_for_status()
+            for m in resp.json().get("data", []):
+                mid = m.get("id") or ""
+                if not mid or not _is_openai_chat_model(mid):
+                    continue
+                models.append({
+                    "id": mid,
+                    "provider": OPENAI,
+                    "label": _OPENAI_LABELS.get(mid, mid),
+                    "paid": True,
+                    "note": "paid API",
+                })
+            ok = True
+        except Exception:
+            ok = False
+    seen = {m["id"] for m in models}
+    for mid, label in _OPENAI_DOCUMENTED_ALIASES:
+        if mid not in seen:
+            models.append({
+                "id": mid,
+                "provider": OPENAI,
+                "label": label,
+                "paid": True,
+                "note": "paid API; documented alias",
+            })
+    models.sort(key=lambda m: m["id"])
+    _store(OPENAI, models, ok)
+    return models, ok
+
+
 def _list_anthropic() -> tuple[list[dict], bool]:
     hit = _cached(ANTHROPIC)
     if hit:
@@ -161,7 +226,12 @@ def _list_anthropic() -> tuple[list[dict], bool]:
     return models, ok
 
 
-_LISTERS = {OLLAMA: _list_ollama, XAI: _list_xai, ANTHROPIC: _list_anthropic}
+_LISTERS = {
+    OLLAMA: _list_ollama,
+    XAI: _list_xai,
+    OPENAI: _list_openai,
+    ANTHROPIC: _list_anthropic,
+}
 
 
 def list_models(agent: str | None = None) -> dict:
@@ -172,7 +242,7 @@ def list_models(agent: str | None = None) -> dict:
     different fact from an empty list because nothing is installed, and
     resolve() depends on the difference (see _is_known_missing).
     """
-    providers = allowed_providers(agent) if agent else (OLLAMA, XAI, ANTHROPIC)
+    providers = allowed_providers(agent) if agent else (OLLAMA, XAI, OPENAI, ANTHROPIC)
     out: list[dict] = []
     reachable: dict[str, bool] = {}
     for p in providers:
@@ -238,6 +308,16 @@ def _is_known_missing(model_id: str, provider_hint: str | None = None) -> bool:
     return any_reachable
 
 
+def _infer_provider_from_model_id(model_id: str) -> str:
+    """Best effort for a saved id when discovery is temporarily unavailable."""
+    mid = model_id.lower()
+    if mid.startswith("grok"):
+        return XAI
+    if _is_openai_chat_model(mid):
+        return OPENAI
+    return OLLAMA
+
+
 def default_for(task_type: str) -> tuple[str, str]:
     """Exactly what the router would pick with no override — today's behaviour."""
     if task_type in GROK_TASK_TYPES:
@@ -284,7 +364,7 @@ def resolve(task_type: str, agent: str | None = None) -> tuple[str, str, str]:
         provider, model = default_for(task_type)
         return provider, model, ""
 
-    if _is_known_missing(chosen):
+    if _is_known_missing(chosen, _infer_provider_from_model_id(chosen)):
         provider, model = default_for(task_type)
         return provider, model, (
             f"{agent}'s chosen model '{chosen}' is no longer available, so this ran on "
@@ -294,7 +374,7 @@ def resolve(task_type: str, agent: str | None = None) -> tuple[str, str, str]:
     if provider is None:
         # Unreachable providers: trust the stored id rather than overriding it.
         # Infer the provider from the id so the call still goes somewhere sane.
-        provider = XAI if chosen.startswith("grok") else OLLAMA
+        provider = _infer_provider_from_model_id(chosen)
     if provider not in allowed_providers(agent or ""):
         provider, model = default_for(task_type)
         return provider, model, (

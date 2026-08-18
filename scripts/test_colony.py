@@ -485,18 +485,21 @@ _FAKE_OLLAMA = [
 ]
 _FAKE_XAI = [{"id": "grok-4.6", "provider": "xai", "label": "grok-4.6",
               "paid": True, "note": "paid API"}]
+_FAKE_OPENAI = [{"id": "gpt-5.6", "provider": "openai", "label": "GPT-5.6 Sol",
+                 "paid": True, "note": "paid API; documented alias"}]
 _FAKE_CLAUDE = [{"id": "claude-opus-5", "provider": "anthropic", "label": "Claude Opus 5",
                  "paid": True, "note": "paid API"}]
 
-_reachable = {"ollama": True, "xai": True, "anthropic": True}
+_reachable = {"ollama": True, "xai": True, "openai": True, "anthropic": True}
 models._LISTERS = {
     "ollama": lambda: (_FAKE_OLLAMA, _reachable["ollama"]),
     "xai": lambda: (_FAKE_XAI, _reachable["xai"]),
+    "openai": lambda: (_FAKE_OPENAI, _reachable["openai"]),
     "anthropic": lambda: (_FAKE_CLAUDE, _reachable["anthropic"]),
 }
 
-check("a workforce agent is offered local and Grok models, never Claude",
-      {m["provider"] for m in models.list_models("scribe")["models"]} == {"ollama", "xai"})
+check("a workforce agent is offered local, Grok and OpenAI models, never Claude",
+      {m["provider"] for m in models.list_models("scribe")["models"]} == {"ollama", "xai", "openai"})
 check("Abigail is offered Claude models and nothing else",
       {m["provider"] for m in models.list_models("secretary")["models"]} == {"anthropic"})
 
@@ -517,7 +520,8 @@ try:
 except ValueError:
     check("an unknown model id is refused", True)
 check("a valid choice returns its provider",
-      models.validate_choice("scribe", "llama3.1:8b") == "ollama")
+      models.validate_choice("scribe", "llama3.1:8b") == "ollama"
+      and models.validate_choice("scribe", "gpt-5.6") == "openai")
 
 # The whole feature must be inert until it is used.
 colony.set_agent_settings("scribe", model="")
@@ -552,11 +556,12 @@ check("the fallback is REPORTED, never silent", "no longer available" in note, n
 # onto a different model the moment the service blipped.
 _reachable["ollama"] = False
 _reachable["xai"] = False
+_reachable["openai"] = False
 _reachable["anthropic"] = False
 provider, model, note = models.resolve("scribe", "scribe")
 check("an unreachable provider does NOT trigger a fallback",
       model == "qwen3-16k:latest" and note == "", f"{model!r} {note!r}")
-_reachable.update({"ollama": True, "xai": True, "anthropic": True})
+_reachable.update({"ollama": True, "xai": True, "openai": True, "anthropic": True})
 _FAKE_OLLAMA.insert(0, {"id": "qwen3-16k:latest", "provider": "ollama",
                         "label": "qwen3-16k:latest", "paid": False, "note": "5.2GB local"})
 
@@ -567,9 +572,10 @@ check("a workforce agent's default still comes from its task type",
 
 # The router must actually SEND the resolved model, not just compute it.
 sent: dict = {}
-_real_ollama, _real_grok = router._call_ollama, router._call_grok
+_real_ollama, _real_grok, _real_openai = router._call_ollama, router._call_grok, router._call_openai
 router._call_ollama = lambda *a, **k: (sent.update(k | {"provider": "ollama"}), "ok")[1]
 router._call_grok = lambda *a, **k: (sent.update(k | {"provider": "xai"}), "ok")[1]
+router._call_openai = lambda *a, **k: (sent.update(k | {"provider": "openai"}), "ok")[1]
 colony.set_agent_settings("librarian", model="llama3.1:8b")
 router.call_llm("librarian", [{"role": "user", "content": "x"}], agent="librarian")
 check("the chosen local model reaches the Ollama call",
@@ -577,13 +583,17 @@ check("the chosen local model reaches the Ollama call",
 sent.clear()
 colony.set_agent_settings("librarian", model="grok-4.6")
 router.call_llm("librarian", [{"role": "user", "content": "x"}], agent="librarian")
-check("choosing a Grok model switches PROVIDER, not just the model name",
-      sent.get("model") == "grok-4.6" and sent.get("provider") == "xai", str(sent))
+grok_ok = sent.get("model") == "grok-4.6" and sent.get("provider") == "xai"
+sent.clear()
+colony.set_agent_settings("librarian", model="gpt-5.6")
+router.call_llm("librarian", [{"role": "user", "content": "x"}], agent="librarian")
+check("choosing a paid cloud model switches PROVIDER, not just the model name",
+      grok_ok and sent.get("model") == "gpt-5.6" and sent.get("provider") == "openai", str(sent))
 sent.clear()
 router.call_llm("librarian", [{"role": "user", "content": "x"}])
 check("a call with no agent is unaffected by anyone's override",
       sent.get("model") == router.OLLAMA_MODEL, str(sent))
-router._call_ollama, router._call_grok = _real_ollama, _real_grok
+router._call_ollama, router._call_grok, router._call_openai = _real_ollama, _real_grok, _real_openai
 colony.set_agent_settings("librarian", model="")
 colony.set_agent_settings("scribe", model="")
 

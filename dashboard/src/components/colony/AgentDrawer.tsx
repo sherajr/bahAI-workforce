@@ -128,7 +128,7 @@ export function AgentDrawer({
                 {pane === "chat" && (
                   <div className="h-full">
                     <AgentChat agent={agent} initialMessages={d.messages}
-                               onActed={onActed} />
+                               model={d.settings.model} onActed={onActed} />
                   </div>
                 )}
                 {pane === "settings" && (
