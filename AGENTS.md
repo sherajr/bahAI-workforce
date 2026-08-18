@@ -20,8 +20,8 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 42–49 | The project wallet |
 | 50–54 | Abigail and the teams |
 | 55–57 | Cancelling a run |
-| 59–64 | The Real World (nuclei) |
-| 65–68 | The Bahá'í Workforce on the Real World map |
+| 59–64 | The Material World (nuclei) |
+| 65–68 | The Bahá'í Workforce on the Material World map |
 
 ## Working norms
 
@@ -58,7 +58,7 @@ python scripts/test_secretary_colony.py    # Abigail <-> the teams: 92 checks
 python scripts/test_job_cancel.py          # Cancelling a run: 24 checks
 python scripts/test_wallet.py              # Wallet: 90 checks, no network/keys
 python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
-python scripts/test_nuclei.py              # Real World (nuclei): 257 checks
+python scripts/test_nuclei.py              # Material World (nuclei): 257 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -929,11 +929,23 @@ Verify with `scripts/test_job_cancel.py` (real worker threads, fake runners).
     random 8-char uuids, never a sequence, so a cancelled run can never collide
     with or renumber a later one.
 
-## Rules 59–64 — the Real World (nuclei)
+## Rules 59–64 — the Material World (nuclei)
 
 The Colony tab's other sky: Sheraj's nuclei and friends. Design in
 `private/nuclei/`. Data in `private/nuclei.db`. Verify with
 `scripts/test_nuclei.py`.
+
+**It was called "the Real World" until 2026-08-18** (owner decision: the
+Digital World is real too — the contrast that was meant is material against
+digital). Everything a person READS now says Material World. The IDENTIFIERS
+were deliberately left alone — `RealWorldGraph.tsx`, `layout_real_world()`,
+the `rw*` state and the `world: "real"` value in localStorage — because
+nothing keys on the words and renaming them buys nothing while
+`rwScale`/`rwPanX`/`rwPanY` are already written into Sheraj's browser and the
+git history says "Real World" throughout. Do not "tidy" that up; a stored
+camera and a saved view preference would be silently lost for a wording
+change. If it ever is renamed, migrate the stored keys rather than dropping
+them.
 
 59. **Community data lives in `private/nuclei.db` via `nuclei_store.py` and only there.** Follows `secretary_store.py`: one git-ignored SQLite file. Nothing personal in `workforce.db`, `log_run` summaries, job progress strings, stdout, or any committed file — including seeds, fixtures, tests and screenshots. Tests build invented people in a temp directory and must refuse to open `private/nuclei.db`. `assert_test_db(path)` is the gate.
 
@@ -962,9 +974,9 @@ The Colony tab's other sky: Sheraj's nuclei and friends. Design in
 
 64. **A workforce gift stores a `product_id` and a theme, never a friend's name, and `workforce.db` never learns who a gathering is for.** Job progress strings stay mechanical.
 
-## Rules 65–68 — the Bahá'í Workforce on the Real World map
+## Rules 65–68 — the Bahá'í Workforce on the Material World map
 
-The workforce light on the Real World sky opens like a family opens: the agents
+The workforce light on the Material World sky opens like a family opens: the agents
 fan out, real people can be put on it, and a WhatsApp message can be written
 from it to a friend or to a nucleus's group. Added 2026-08-17 (owner ask).
 `agents/nuclei_bridge.py` is the one module where the two worlds touch;
@@ -1013,7 +1025,7 @@ from it to a friend or to a nucleus's group. Added 2026-08-17 (owner ask).
     provider from the task type *and* from the per-agent model saved in the
     Colony tab (rule 41a), so anything going through it can be moved onto a paid
     cloud API by a dropdown. That is right for product work and wrong for a
-    prompt containing one of Sheraj's friends' names — the Real World lives in
+    prompt containing one of Sheraj's friends' names — the Material World lives in
     `private/` precisely so those names stay on this machine. `call_local` takes
     no `agent=` parameter, so there is nothing to override; the suite asserts
     the routed call is never reached. Claude is not an option here either
@@ -1051,15 +1063,15 @@ from it to a friend or to a nucleus's group. Added 2026-08-17 (owner ask).
     1440x720 space and both draw that light, so it is the only body that
     survives the swap and is therefore the anchor. Four things are
     load-bearing:
-    - **The map is the FIRST child in both worlds.** The Real World's "add a
+    - **The map is the FIRST child in both worlds.** The Material World's "add a
       nucleus" rows were moved BELOW its map for this: a control row above it
       sat the workforce light ~110px lower in one world than in the other, and
       the dot visibly jumped at the swap. Do not move them back on top.
-    - **The Digital World is handed the Real World's SCREEN anchor**
+    - **The Digital World is handed the Material World's SCREEN anchor**
       (`workforceScreenAnchor` — the light's fixed position pushed through that
-      view's saved camera), because the Real World pans and zooms and the
+      view's saved camera), because the Material World pans and zooms and the
       Digital World has no camera of its own. The hinge dot is drawn OUTSIDE
-      the camera in both, so it is the same size however far the Real World is
+      the camera in both, so it is the same size however far the Material World is
       zoomed.
     - **The incoming sky opens itself one PAINTED frame after mount**
       (`mounted` + `requestAnimationFrame`), the same pattern as the family

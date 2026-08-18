@@ -934,7 +934,7 @@ export const api = {
   exportVideoMetadata: (projectId: string) =>
     get<Record<string, unknown>>(`/video/projects/${projectId}/export`),
 
-  // Real World (nuclei) — private/nuclei.db only (rules 15 / 59)
+  // Material World (nuclei) — private/nuclei.db only (rules 15 / 59)
   getNucleiSnapshot: () =>
     request<NucleiSnapshot>("GET", "/nuclei/snapshot", undefined, { silent: true }),
   createNucleiGrouping: (kind_slug: string, name: string) =>
@@ -981,7 +981,7 @@ export const api = {
   }) => post<Record<string, unknown>>("/nuclei/activities", body),
   getQuietLights: () => get<NucleiQuietLights>("/nuclei/quiet-lights"),
 
-  // The Bahá'í Workforce as a place on the Real World map (rules 65-68).
+  // The Bahá'í Workforce as a place on the Material World map (rules 65-68).
   getWorkforcePicture: () => get<WorkforcePicture>("/nuclei/workforce"),
   addWorkforcePerson: (body: { display_name?: string; actor_id?: number; role?: string }) =>
     post<{ actor_id: number; membership_id: number; snapshot: NucleiSnapshot }>(

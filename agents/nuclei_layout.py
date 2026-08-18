@@ -1,5 +1,5 @@
 """
-Where every Real World light sits.
+Where every Material World light sits.
 
 Rule 62: one light per person. Each nucleus is its own point of light.
 Distance to each nucleus is about *that* nucleus (core service close,

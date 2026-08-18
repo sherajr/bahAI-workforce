@@ -143,7 +143,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
                   world === "real" ? "bg-amber-400/10 text-amber-300" : "text-slate-400 hover:text-slate-200",
                 )}
               >
-                Real World
+                Material World
               </button>
             </div>
           )}
@@ -238,7 +238,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
                 />
               )}
               {nuclei.isError && (
-                <ErrorNote>Could not load the Real World: {(nuclei.error as Error).message}</ErrorNote>
+                <ErrorNote>Could not load the Material World: {(nuclei.error as Error).message}</ErrorNote>
               )}
               <div className="flex flex-wrap items-end gap-2">
                 <label className="min-w-[16rem] flex-1 text-xs text-slate-500">

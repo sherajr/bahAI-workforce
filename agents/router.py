@@ -125,7 +125,7 @@ def call_local(messages: list[dict], temperature: float = 0.7, max_tokens: int =
     call_llm picks a provider from the task type and from the per-agent model
     saved in the Colony tab, so any call made through it can be moved onto a
     paid cloud API by a dropdown. That is right for product work and wrong for
-    a prompt that names one of Sheraj's friends: the Real World lives in
+    a prompt that names one of Sheraj's friends: the Material World lives in
     private/ precisely so those names stay on this machine. This entry has no
     agent= parameter for that reason — there is nothing to override.
     """

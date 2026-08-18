@@ -45,13 +45,13 @@ claiming otherwise: **the Colony** (rules 35–41a), **the project wallet** (42�
 **finished-video shelf** (58). Sheraj has still not reviewed that pile by hand —
 "committed" is not "reviewed".
 
-Also committed in `5ee4044` (2026-08-16): the **Real World view** of the Colony
+Also committed in `5ee4044` (2026-08-16): the **Material World view** of the Colony
 (nuclei and friends) — `agents/nuclei_store.py`, `agents/nuclei_layout.py`,
-`/nuclei/*` endpoints, the Colony tab's Digital/Real World toggle, rules 59–64.
+`/nuclei/*` endpoints, the Colony tab's Digital/Material World toggle, rules 59–64.
 Design lives in `private/nuclei/` (git-ignored). Not reviewed by hand yet.
 
-**Uncommitted in the working tree**: the **Bahá'í Workforce light on the Real
-World map** (rules 65–68, owner ask 2026-08-17). Clicking it fans the agents
+**Uncommitted in the working tree**: the **Bahá'í Workforce light on the
+Material World map** (rules 65–68, owner ask 2026-08-17). Clicking it fans the agents
 out the way a family opens; real people can be put on the workforce and appear
 in the Digital World too (derived, never a `workforce.db` row); a nucleus can
 carry the WhatsApp group it already talks in; and a message can be drafted from
@@ -95,11 +95,25 @@ scratch):
 
 ## Activity Log (newest first)
 
+### 2026-08-18 — Claude Code (Opus 5) — the Real World is now the Material World
+Owner ask, and a better name: the Digital World is real too, so the contrast
+that was meant is material against digital. Every string a person reads now
+says Material World — the toggle, the map's screen-reader label, the error
+note, and all the prose in AGENTS.md and STATUS.md.
+
+The IDENTIFIERS were deliberately left as they were: `RealWorldGraph.tsx`,
+`layout_real_world()`, the `rw*` state and the `world: "real"` value in
+localStorage. Nothing keys on the words, and renaming them would lose the
+camera position and view preference already stored in Sheraj's browser
+(`rwScale`/`rwPanX`/`rwPanY`) for no gain, while making the git history
+harder to follow. There is a note under rules 59-64 saying so, since the
+mismatch is otherwise the kind of thing a later session would "tidy up".
+
 ### 2026-08-17 — Claude Code (Opus 5) — names can be edited
 Owner ask: the option to edit the names of people, nuclei and institutions.
 Both store functions and both PATCH endpoints already existed and validated
 empty names — what was missing was any way to reach them. `patchNucleiActor`
-had been in the API client since the Real World shipped and was called from
+had been in the API client since the Material World shipped and was called from
 nowhere; groupings had no client method at all. So this is mostly UI:
 `RenameField.tsx` (new) is a pencil beside the drawer heading that turns it
 into a field, shared by `ActorDrawer` and `GroupingDrawer`, with Enter to
@@ -121,7 +135,7 @@ is covered on a temp database, and exercising it against the real map would
 have meant renaming Sheraj's actual nuclei.
 
 ### 2026-08-17 — Claude Code (Opus 5) — the Workforce light opens
-Owner ask: make the Bahá'í Workforce atom on the Real World map clickable —
+Owner ask: make the Bahá'í Workforce atom on the Material World map clickable —
 agents fanning out like a family's petals, real people addable to the
 workforce and visible in the Digital World too, a list of the agents and
 what they are doing, and a way to write a WhatsApp message to a contact or a
@@ -154,11 +168,11 @@ message asserts that was not supplied, and the drawer shows it above the Send
 button. It flags rather than edits: there is no safe mechanical rewrite of
 free prose.
 
-Then, second owner ask the same day: switching between Digital and Real World
+Then, second owner ask the same day: switching between Digital and Material World
 now folds the sky on screen into the Bahá'í Workforce light and grows the other
 one back out of it (rule 68b). The two views already share one 1440x720 space
 and both draw that light, so it is the only body that survives the swap — it is
-the hinge. One layout change was needed for it: the Real World's "add a nucleus"
+the hinge. One layout change was needed for it: the Material World's "add a nucleus"
 and "add an institution" rows moved BELOW the map, because a control row above
 it sat the workforce light ~110px lower in that world and the dot jumped at the
 swap. Say so if you would rather have them back on top.
@@ -258,8 +272,8 @@ an even ring outside the light (wider as more friends arrive). After
 seats are chosen, lights are separated so first-name labels do not
 cover each other, not only the dots. `scripts/test_nuclei.py` 94/94.
 
-### 2026-08-17 — Grok (grok-4.6), direct — Real World zoom and pan
-Owner asked to zoom and move the map. Real World: scroll / pinch-as-wheel
+### 2026-08-17 — Grok (grok-4.6), direct — Material World zoom and pan
+Owner asked to zoom and move the map. Material World: scroll / pinch-as-wheel
 zooms toward the cursor; drag empty sky to pan; + − and Show all in the
 corner. Table-drag still places a nucleus. Camera remembered in
 colony UI localStorage so switching tabs does not reset it.
@@ -268,12 +282,12 @@ colony UI localStorage so switching tabs does not reset it.
 Owner: House of Justice, National Assembly and Counsellors do not
 belong on this map. Those seeded rows are archived on startup.
 Local bodies (LSA, Regional Institute, Auxiliary Board, Area Teaching
-Committee, or any name) are added from the Real World bar and rarely
+Committee, or any name) are added from the Material World bar and rarely
 removed like a nucleus. They sit in a column left of the Workforce.
 `scripts/test_nuclei.py` 91/91.
 
 ### 2026-08-16 — Grok (grok-4.6), direct — institutions of the Faith
-Owner asked for the institutions on the Real World map, left of the
+Owner asked for the institutions on the Material World map, left of the
 Workforce light. Four seeded lights (House of Justice, National
 Assembly, Counsellors, Local Assembly) sit in a fixed constellation —
 not dragged, not archived, not in the table grid. Click one to note
@@ -308,7 +322,7 @@ seat at every nucleus cannot clump the map). Rule 62 updated.
 Verified in the live dashboard: 7 distinct tables, button present, a
 drag does not open the drawer.
 
-### 2026-08-16 — Grok (grok-4.6), direct — Real World view of the Colony
+### 2026-08-16 — Grok (grok-4.6), direct — Material World view of the Colony
 Owner asked to implement the nuclei map after living with the
 `private/nuclei/` sketch. Grammar A: each nucleus is a point of light
 (the Vision in that place); people are smaller lights, once each;
@@ -316,7 +330,7 @@ distance to each nucleus is how they walk with *that* table.
 
 `agents/nuclei_store.py` writes only to `private/nuclei.db` (rules 15/59).
 No intimate-note column (rule 60). Layout in `nuclei_layout.py` (rule 62).
-Colony tab: Digital World / Real World. Add a nucleus (you sit there);
+Colony tab: Digital World / Material World. Add a nucleus (you sit there);
 click it to add a friend; click the friend to mark gathering / service
 and "we sat together today." `scripts/test_nuclei.py` 45/45 (includes archive). API
 restarted on :8765 without --reload. Dashboard HMR has the UI.

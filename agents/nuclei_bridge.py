@@ -1,10 +1,10 @@
 """
-Where the Real World and the Bahá'í Workforce meet.
+Where the Material World and the Bahá'í Workforce meet.
 
-The Colony tab has two skies. The Digital World is the agents; the Real
-World is Sheraj's nuclei and friends. This module is the ONE place the two
+The Colony tab has two skies. The Digital World is the agents; the
+Material World is Sheraj's nuclei and friends. This module is the ONE place the two
 touch, for the same reason `secretary_colony.py` is the one place Abigail
-touches the teams (rule 50): everything on the Real World side is personal
+touches the teams (rule 50): everything on the Material World side is personal
 and lives in private/nuclei.db (rules 15 / 59), and everything on the
 workforce side lives in workforce.db, which the Steward's ledger reads.
 
@@ -59,7 +59,7 @@ def assert_no_personal_leak(payload: dict):
     for key, value in (payload or {}).items():
         if any(bad in str(key).lower() for bad in _FORBIDDEN_OUT):
             raise BridgeError(
-                f"'{key}' belongs to the Real World and cannot cross into the workforce"
+                f"'{key}' belongs to the Material World and cannot cross into the workforce"
             )
         if isinstance(value, str) and re.search(r"chat\.whatsapp\.com|wa\.me/", value):
             raise BridgeError("a WhatsApp link cannot cross into the workforce")

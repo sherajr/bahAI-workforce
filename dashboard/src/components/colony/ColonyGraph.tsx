@@ -20,10 +20,10 @@ interface Props {
    */
   expanded?: boolean;
   /**
-   * Where the workforce light actually sits ON SCREEN in the Real World right
+   * Where the workforce light actually sits ON SCREEN in the Material World right
    * now — its fixed position pushed through that view's saved camera. Passing
    * it keeps the fold anchored on the same pixel in both skies even when the
-   * Real World has been panned or zoomed.
+   * Material World has been panned or zoomed.
    */
   anchor?: { cx: number; cy: number };
 }
@@ -402,7 +402,7 @@ export function ColonyGraph({
         </g>
 
         {/* The hinge: the one body that belongs to both skies. It fades up as
-            this world folds away, and the Real World's own workforce light
+            this world folds away, and the Material World's own workforce light
             takes over from it at the same pixel. */}
         <g
           className="colony-world-morph"

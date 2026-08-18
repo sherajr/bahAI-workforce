@@ -92,7 +92,7 @@ function loadCam(): Cam {
  * Where the workforce light sits in VIEWBOX units right now — its fixed world
  * position pushed through this sky's saved camera. The Digital World has no
  * camera of its own, so it is handed this number to fold onto; without it a
- * panned or zoomed Real World would hand back a dot in the wrong place.
+ * panned or zoomed Material World would hand back a dot in the wrong place.
  */
 export function workforceScreenAnchor(
   wf: { cx: number; cy: number },
@@ -645,7 +645,7 @@ export function RealWorldGraph({
         className={`block h-full w-full ${panning ? "cursor-grabbing" : "cursor-grab"}`}
         style={{ touchAction: "none" }}
         role="img"
-        aria-label="The Real World: nuclei as points of light, friends as smaller lights. Scroll to zoom. Drag the sky to move. Drag a table to place it."
+        aria-label="The Material World: nuclei as points of light, friends as smaller lights. Scroll to zoom. Drag the sky to move. Drag a table to place it."
       >
         <defs>
           <radialGradient id="rw-vignette" cx="50%" cy="45%" r="75%">

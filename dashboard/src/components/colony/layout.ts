@@ -22,7 +22,7 @@ export const TILT = 0.42;
  * use — mirrors `nuclei_layout.WORKFORCE`. It is the one thing that exists in
  * both worlds, which is what lets the two views fold into each other: switching
  * collapses everything on screen into this point and the other world grows back
- * out of it. The live value comes off the Real World snapshot; this is the
+ * out of it. The live value comes off the Material World snapshot; this is the
  * fallback for the Digital World, which has no snapshot of its own.
  */
 export const WORKFORCE_ANCHOR = { cx: 278, cy: 318 };

@@ -126,7 +126,7 @@ export interface ColonyUiState {
   team: string | null;      // selected team id
   consultJobId: string | null;
   world: string | null;     // "digital" | "real"
-  rwScale: number | null;   // Real World camera
+  rwScale: number | null;   // Material World camera
   rwPanX: number | null;
   rwPanY: number | null;
 }

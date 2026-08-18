@@ -1,5 +1,5 @@
 """
-Offline checks for the Real World (nuclei) store and layout.
+Offline checks for the Material World (nuclei) store and layout.
 
     python scripts/test_nuclei.py
 
@@ -1334,7 +1334,7 @@ for mod in (colony_tools_mod, sec_tools_mod):
                     tool_names.add(str(item["function"].get("name")))
 banned = [t for t in tool_names
           if "nucleus" in t.lower() or "nuclei" in t.lower() or "workforce_person" in t.lower()]
-check("no tool exposes the Real World to a model", banned == [], str(banned))
+check("no tool exposes the Material World to a model", banned == [], str(banned))
 
 print(f"\n{PASS} passed, {FAIL} failed")
 if FAILURES:

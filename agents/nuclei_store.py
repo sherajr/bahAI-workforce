@@ -1,5 +1,5 @@
 """
-The Real World store — nuclei, friends, gatherings.
+The Material World store — nuclei, friends, gatherings.
 
 Rule 15 / 59: the ONLY module that touches community data at rest.
 Writes to private/nuclei.db (git-ignored). Nothing personal may enter
@@ -1445,7 +1445,7 @@ FORBIDDEN_SNAPSHOT_KEYS = (
 
 
 def snapshot(db_path: Path | str | None = None) -> dict:
-    """Shareable picture of the Real World. Rule 60."""
+    """Shareable picture of the Material World. Rule 60."""
     init_db(db_path)
     owner = ensure_owner(db_path)
     kinds = list_kinds(db_path)

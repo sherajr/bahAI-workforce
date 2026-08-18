@@ -73,7 +73,7 @@ def _web_image_path(local_path: str) -> str:
 @app.on_event("startup")
 def on_startup():
     init_db()
-    # Real World store — its own private file, never workforce.db (rule 59).
+    # Material World store — its own private file, never workforce.db (rule 59).
     from agents import nuclei_store
     nuclei_store.init_db()
     # Secretary's reminder scheduler — all state in private/secretary.db, so a
@@ -4702,7 +4702,7 @@ def colony_overview():
     The real PEOPLE on the workforce are merged in here at read time from the
     private store — derived on every read, never a row in workforce.db, the
     same shape as the finished-video shelf (rules 58 / 68). That is what lets
-    someone Sheraj adds in the Real World show up in the Digital World too
+    someone Sheraj adds in the Material World show up in the Digital World too
     without a name ever being written on the workforce side.
     """
     from agents import colony
@@ -6408,7 +6408,7 @@ def video_subtitles(project_id: str):
                              media_type="text/plain; charset=utf-8")
 
 
-# --- Real World (nuclei) -------------------------------------------------------
+# --- Material World (nuclei) -------------------------------------------------------
 # Rules 15 / 59 / 60 / 61. Personal community data lives in private/nuclei.db
 # via nuclei_store.py only. These endpoints never write a name into
 # workforce.db. Nothing here is a score on a soul.
@@ -6714,7 +6714,7 @@ def nuclei_quiet_lights():
     return {"items": _nuclei().quiet_lights()}
 
 
-# --- The Bahá'í Workforce on the Real World map (rules 65-68) ------------------
+# --- The Bahá'í Workforce on the Material World map (rules 65-68) ------------------
 # The workforce light opens like a family opens: agents and the real people who
 # work alongside them. Everything personal still lives in private/nuclei.db;
 # agents.nuclei_bridge is the ONE module where the two sides touch.

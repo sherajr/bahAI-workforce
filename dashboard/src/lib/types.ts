@@ -1294,7 +1294,7 @@ export interface WalletSendResult {
   explorer_url: string;
 }
 
-// Real World (nuclei). Names live only in private/nuclei.db.
+// Material World (nuclei). Names live only in private/nuclei.db.
 export interface NucleiKind {
   id: number;
   slug: string;
