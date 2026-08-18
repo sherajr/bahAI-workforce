@@ -118,6 +118,21 @@ def call_llm(task_type: str, messages: list[dict], temperature: float = 0.7, max
                         timeout=timeout, model=model)
 
 
+def call_local(messages: list[dict], temperature: float = 0.7, max_tokens: int = 900,
+               json_mode: bool = False, timeout: int | None = None) -> str:
+    """Run a prompt on the LOCAL model, with no route and no override (rule 67).
+
+    call_llm picks a provider from the task type and from the per-agent model
+    saved in the Colony tab, so any call made through it can be moved onto a
+    paid cloud API by a dropdown. That is right for product work and wrong for
+    a prompt that names one of Sheraj's friends: the Real World lives in
+    private/ precisely so those names stay on this machine. This entry has no
+    agent= parameter for that reason — there is nothing to override.
+    """
+    return _call_ollama(messages, temperature, max_tokens, json_mode=json_mode,
+                        timeout=timeout)
+
+
 def _call_ollama(messages: list[dict], temperature: float, max_tokens: int,
                  json_mode: bool = False, timeout: int | None = None,
                  model: str | None = None) -> str:

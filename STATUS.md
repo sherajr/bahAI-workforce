@@ -45,16 +45,23 @@ claiming otherwise: **the Colony** (rules 35–41a), **the project wallet** (42�
 **finished-video shelf** (58). Sheraj has still not reviewed that pile by hand —
 "committed" is not "reviewed".
 
-**Uncommitted in the working tree**: the **Real World view** of the Colony
-(nuclei and friends). Design lived in `private/nuclei/` (git-ignored);
-implementation is in the tree: `agents/nuclei_store.py`,
-`agents/nuclei_layout.py`, `/nuclei/*` endpoints, Colony tab
-Digital/Real World toggle (drag tables + Optimize locations;
-remove a friend from a table or the map; people-dots squeeze
-and never cover; local institutions sit left of the Workforce
-and can be added or rarely removed; the map zooms and pans),
-`scripts/test_nuclei.py` (130 checks), rules 59–64 in AGENTS.md.
-Not committed. Re-derive with `git status`.
+Also committed in `5ee4044` (2026-08-16): the **Real World view** of the Colony
+(nuclei and friends) — `agents/nuclei_store.py`, `agents/nuclei_layout.py`,
+`/nuclei/*` endpoints, the Colony tab's Digital/Real World toggle, rules 59–64.
+Design lives in `private/nuclei/` (git-ignored). Not reviewed by hand yet.
+
+**Uncommitted in the working tree**: the **Bahá'í Workforce light on the Real
+World map** (rules 65–68, owner ask 2026-08-17). Clicking it fans the agents
+out the way a family opens; real people can be put on the workforce and appear
+in the Digital World too (derived, never a `workforce.db` row); a nucleus can
+carry the WhatsApp group it already talks in; and a message can be drafted from
+the drawer and either sent to one trusted contact or copied for a group. Files:
+`agents/nuclei_bridge.py` (new — the one bridge), `nuclei_store.py`
+(workforce grouping + `grouping_channels`), `nuclei_layout.py`
+(`is_workforce_row`), `router.call_local` (new), `/nuclei/workforce*` +
+`/nuclei/groupings/{id}/channel` endpoints, `WorkforceDrawer.tsx` (new),
+`RealWorldGraph.tsx`, `ColonyGraph.tsx`, `ColonyPanel.tsx`, `GroupingDrawer.tsx`.
+`scripts/test_nuclei.py` is now 225 checks. Not committed.
 
 **Deferred / proposed, not started** (nobody should re-discover these from
 scratch):
@@ -77,11 +84,65 @@ scratch):
   been re-checked. `GET /whatsapp/setup` has the walkthrough.
 - Whether to move Abigail off Meta's sandbox test number (5-recipient limit,
   so every allowlisted guest must also sit in Meta's test-recipient list).
+- **WhatsApp groups cannot be posted to by any software** — Meta's Cloud API
+  has no group endpoint, so the workforce drafts a group message and Sheraj
+  pastes it in. If automatic posting into nucleus groups ever matters more than
+  staying on the official API, that is a decision about a different (unofficial,
+  ban-risking) transport, not a code gap to fix.
 - Reviewing and committing the pile above.
 
 ---
 
 ## Activity Log (newest first)
+
+### 2026-08-17 — Claude Code (Opus 5) — the Workforce light opens
+Owner ask: make the Bahá'í Workforce atom on the Real World map clickable —
+agents fanning out like a family's petals, real people addable to the
+workforce and visible in the Digital World too, a list of the agents and
+what they are doing, and a way to write a WhatsApp message to a contact or a
+nucleus's group. All of that is in, as rules 65–68.
+
+The design decision worth knowing: the workforce is now a real *grouping* row
+in `private/nuclei.db` of its own kind, so putting a person on it is an
+ordinary membership and every existing drawer and query works unchanged — but
+`nuclei_layout.is_workforce_row` keeps it off the table chairs entirely, so it
+still draws at its own fixed light and a new nucleus cannot slide onto it. A
+workforce-only person gets no second dot on the sky (rule 62); someone who
+already gathers somewhere keeps the light they have and is reached by a thread.
+The Digital World's people are merged into `GET /colony` at read time and are
+never rows in `workforce.db` — `scripts/test_nuclei.py` proves it by reading
+that database as raw bytes and requiring an added name to be absent.
+
+**The honest limitation Sheraj needs to know:** Meta's WhatsApp Cloud API,
+which the whole Secretary runs on, has no way to send into a group — only to
+one person. So a group message ends in Copy plus a link that opens the group,
+and the drawer says so on screen rather than showing a Send button that would
+do nothing. Sending to one contact is real and reuses rule 28's tiers exactly:
+an allowlisted contact goes out directly, anyone else queues for approval.
+Drafting runs on the local Ollama model through the new `router.call_local`,
+never a cloud one, because the prompt names a friend.
+
+Drafting was exercised for real against local Qwen, not only stubbed, and the
+first draft immediately invented a time ("around 7") from a brief that gave
+none — so `invented_specifics()` now flags any time, day, date or amount the
+message asserts that was not supplied, and the drawer shows it above the Send
+button. It flags rather than edits: there is no safe mechanical rewrite of
+free prose.
+
+Then, second owner ask the same day: switching between Digital and Real World
+now folds the sky on screen into the Bahá'í Workforce light and grows the other
+one back out of it (rule 68b). The two views already share one 1440x720 space
+and both draw that light, so it is the only body that survives the swap — it is
+the hinge. One layout change was needed for it: the Real World's "add a nucleus"
+and "add an institution" rows moved BELOW the map, because a control row above
+it sat the workforce light ~110px lower in that world and the dot jumped at the
+swap. Say so if you would rather have them back on top.
+
+Left to do: Sheraj has not looked at any of this on screen yet — the fold in
+particular is the kind of thing that has to be watched rather than reasoned
+about — and the message tone is worth judging over a few more real drafts.
+225/225 nuclei checks; colony/secretary/cancel/wallet/video suites all still
+green; `npx tsc --noEmit` and a production `vite build` both clean.
 
 ### 2026-08-17 — Grok (grok-4.6), direct — Assembly people reach their family
 Owner: clicking the Local Spiritual Assembly should line a friend to

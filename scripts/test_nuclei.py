@@ -796,6 +796,413 @@ no_work = client.post("/nuclei/ties", json={
 check("walking with needs a particular work",
       no_work.status_code == 400, str(no_work.status_code))
 
+# -- The Bahai Workforce as a place (rules 65-68) -----------------------------
+
+section("The workforce is a place, not a decoration")
+wf = store.workforce_grouping(TEST_DB)
+check("the workforce grouping exists after init_db", bool(wf and wf["id"]))
+check("it is its own grouping kind", wf["kind_slug"] == "workforce")
+check("it carries the stable slug", wf["slug"] == store.WORKFORCE_SLUG)
+store.init_db(TEST_DB)
+wf_again = store.workforce_grouping(TEST_DB)
+check("re-initialising does not make a second workforce",
+      int(wf_again["id"]) == int(wf["id"]))
+check("only one workforce row exists",
+      len([g for g in store.list_groupings(TEST_DB, include_archived=True)
+           if g["kind_slug"] == "workforce"]) == 1)
+try:
+    store.create_grouping("workforce", "Another Workforce", TEST_DB)
+    check("create_grouping refuses a second workforce", False, "it was created")
+except ValueError:
+    check("create_grouping refuses a second workforce", True)
+
+wf_snap = store.snapshot(TEST_DB)
+check("the snapshot names the workforce grouping",
+      wf_snap["workforce_grouping_id"] == int(wf["id"]))
+check("the workforce never takes a table chair",
+      int(wf["id"]) not in {int(g["id"]) for g in wf_snap["layout"]["groupings"]})
+check("the workforce light keeps its own fixed position",
+      wf_snap["layout"]["workforce"] == dict(layout.WORKFORCE))
+check("assign_slots skips the workforce row",
+      not any(layout.is_workforce_row(g) for g in layout.assign_slots(
+          store.list_groupings(TEST_DB, include_archived=True),
+          store.live_memberships(TEST_DB))))
+# The workforce must not spend one of the six table chairs: every table still
+# sits on a real chair from the grid.
+chairs = [(g["cx"], g["cy"]) for g in wf_snap["layout"]["groupings"]
+          if not g["is_institution"]]
+known = [(c["cx"], c["cy"]) for c in layout.SLOTS + layout.EXTRA_SLOTS]
+moved = {int(g["id"]) for g in store.list_groupings(TEST_DB) if g.get("pos_x") is not None}
+default_chairs = [(g["cx"], g["cy"]) for g in wf_snap["layout"]["groupings"]
+                  if not g["is_institution"] and int(g["id"]) not in moved]
+check("the workforce does not spend a table chair",
+      all(any(abs(cx - kx) < 1e-6 and abs(cy - ky) < 1e-6 for kx, ky in known)
+          for cx, cy in default_chairs),
+      str(default_chairs))
+check("at least one table is still drawn", len(chairs) >= 1)
+
+section("Putting real people on the workforce")
+added = store.add_workforce_person(display_name="Test Colleague", role="prints the cards",
+                                   db_path=TEST_DB)
+people = store.workforce_members(TEST_DB)
+check("a new person joins the workforce", len(people) == 1)
+check("their role is kept", people[0]["role"] == "prints the cards")
+check("the membership id comes back", people[0]["membership_id"] == added["membership_id"])
+check("no phone or email field was invented for them",
+      not ({"phone", "email", "address"} & set(people[0].keys())))
+
+lights_now = store.snapshot(TEST_DB)["layout"]["actors"]
+check("a workforce-only person gets no light on the sky (rule 62)",
+      added["actor_id"] not in {int(a["id"]) for a in lights_now})
+
+# Someone who already gathers somewhere keeps the ONE light they have.
+seated = store.create_actor("person", "Test Seated Friend", db_path=TEST_DB)
+store.add_membership(int(seated["id"]), int(dawn["id"]), db_path=TEST_DB)
+before = store.snapshot(TEST_DB)["layout"]["actors"]
+before_n = len([a for a in before if int(a["id"]) == int(seated["id"])])
+store.add_workforce_person(actor_id=int(seated["id"]), role="hosts", db_path=TEST_DB)
+after = store.snapshot(TEST_DB)["layout"]["actors"]
+after_n = len([a for a in after if int(a["id"]) == int(seated["id"])])
+check("joining the workforce never draws a second light",
+      before_n == 1 and after_n == 1, f"{before_n} -> {after_n}")
+before_xy = next(a for a in before if int(a["id"]) == int(seated["id"]))
+after_xy = next(a for a in after if int(a["id"]) == int(seated["id"]))
+check("their existing seat does not move",
+      abs(before_xy["x"] - after_xy["x"]) < 1e-6
+      and abs(before_xy["y"] - after_xy["y"]) < 1e-6)
+
+house = store.create_actor("household", "Test Family", db_path=TEST_DB)
+try:
+    store.add_workforce_person(actor_id=int(house["id"]), db_path=TEST_DB)
+    check("only a person can join the workforce", False, "a household joined")
+except ValueError:
+    check("only a person can join the workforce", True)
+try:
+    store.add_workforce_person(display_name="   ", db_path=TEST_DB)
+    check("a nameless person is refused", False, "it was created")
+except ValueError:
+    check("a nameless person is refused", True)
+
+store.remove_workforce_person(added["membership_id"], TEST_DB)
+check("removing takes them off the workforce",
+      added["actor_id"] not in {p["actor_id"] for p in store.workforce_members(TEST_DB)})
+check("removing them does NOT take them off the map",
+      store.get_actor(added["actor_id"], TEST_DB) is not None)
+_other = next((m for m in store.live_memberships(TEST_DB)
+               if int(m["grouping_id"]) != int(wf["id"])), None)
+if _other is None:
+    check("a non-workforce membership cannot be ended through this door", False,
+          "no other membership to try")
+else:
+    try:
+        store.remove_workforce_person(int(_other["id"]), TEST_DB)
+        check("a non-workforce membership cannot be ended through this door", False,
+              "it was ended")
+    except ValueError:
+        check("a non-workforce membership cannot be ended through this door", True)
+
+store.optimize_layout(TEST_DB)
+wf_after_arrange = store.workforce_grouping(TEST_DB)
+check("Optimize locations never moves the workforce",
+      wf_after_arrange["pos_x"] is None and wf_after_arrange["pos_y"] is None)
+
+section("The WhatsApp group a nucleus already talks in")
+ch = store.set_grouping_channel(int(dawn["id"]), label="Dawn group",
+                               link="https://chat.whatsapp.com/TESTINVITE",
+                               db_path=TEST_DB)
+check("a group can be noted on a nucleus", ch["label"] == "Dawn group")
+check("its link is kept", ch["link"] == "https://chat.whatsapp.com/TESTINVITE")
+with store._connect(TEST_DB) as conn:
+    chan_cols = {r[1] for r in conn.execute("PRAGMA table_info(grouping_channels)")}
+check("no phone column exists on a channel (rule 60)",
+      not ({"phone", "number", "email", "address"} & chan_cols), str(sorted(chan_cols)))
+try:
+    store.set_grouping_channel(int(dawn["id"]), label="Bad", link="http://example.com/x",
+                               db_path=TEST_DB)
+    check("a link that is not a WhatsApp group is refused", False, "it was saved")
+except ValueError:
+    check("a link that is not a WhatsApp group is refused", True)
+try:
+    store.set_grouping_channel(int(dawn["id"]), db_path=TEST_DB)
+    check("an empty channel is refused", False, "it was saved")
+except ValueError:
+    check("an empty channel is refused", True)
+try:
+    store.set_grouping_channel(int(dawn["id"]), label="X", kind="sms", db_path=TEST_DB)
+    check("only a WhatsApp group can be noted", False, "sms was saved")
+except ValueError:
+    check("only a WhatsApp group can be noted", True)
+store.set_grouping_channel(int(dawn["id"]), label="Dawn group renamed",
+                           db_path=TEST_DB)
+live_ch = store.list_grouping_channels(int(dawn["id"]), TEST_DB)
+check("noting it again supersedes rather than piling up", len(live_ch) == 1)
+check("the newest label wins", live_ch[0]["label"] == "Dawn group renamed")
+store.remove_grouping_channel(int(live_ch[0]["id"]), TEST_DB)
+check("a group can be forgotten",
+      store.list_grouping_channels(int(dawn["id"]), TEST_DB) == [])
+store.set_grouping_channel(int(dawn["id"]), label="Dawn group",
+                           link="https://chat.whatsapp.com/TESTINVITE", db_path=TEST_DB)
+check("the snapshot carries live channels only",
+      len(store.snapshot(TEST_DB)["channels"]) == 1)
+
+section("The bridge between the two worlds (rules 67-68)")
+from agents import nuclei_bridge as bridge  # noqa: E402
+
+for bad in ({"phone": "555"}, {"contact_email": "a@b.c"}, {"group_link": "x"},
+            {"recipient_name": "Someone"}):
+    try:
+        bridge.assert_no_personal_leak(bad)
+        check(f"a {list(bad)[0]} key cannot cross into the workforce", False, "it crossed")
+    except bridge.BridgeError:
+        check(f"a {list(bad)[0]} key cannot cross into the workforce", True)
+try:
+    bridge.assert_no_personal_leak({"note": "join https://chat.whatsapp.com/AAA"})
+    check("a WhatsApp link cannot cross into the workforce", False, "it crossed")
+except bridge.BridgeError:
+    check("a WhatsApp link cannot cross into the workforce", True)
+bridge.assert_no_personal_leak({"kind": "quote_card", "count": 3})
+check("an ordinary workforce payload still crosses", True)
+
+check("a fenced draft is unwrapped",
+      bridge._clean("```\nHello there\n```") == "Hello there")
+check("a 'here is the draft' preamble is stripped",
+      bridge._clean("Here is the draft: Hello there") == "Hello there")
+check("surrounding quotes are stripped",
+      bridge._clean('"Hello there"') == "Hello there")
+check("a draft is capped",
+      len(bridge._clean("x" * 5000)) == bridge.MESSAGE_MAX_CHARS)
+
+# A small local model supplies a plausible time when it is not given one --
+# real, first draft ever run (2026-08-17): "around 7" out of an "invite them
+# on Friday" brief. Flagged, never silently edited.
+_about = "invite them to the devotional on Friday at my place"
+check("an invented time is flagged",
+      any("around 7" in w for w in
+          bridge.invented_specifics("Come on Friday, around 7.", _about)))
+check("a supplied day is NOT flagged",
+      bridge.invented_specifics("Come on Friday to my place.", _about) == [])
+check("an invented day, time and price are all flagged",
+      len(bridge.invented_specifics("Tuesday, 7:30pm, $20.", _about)) == 3)
+check("a bracketed blank is not a false claim",
+      bridge.invented_specifics("Come at [time] on Friday.", _about) == [])
+
+# Rule 67: the draft names a friend, so it must run on the LOCAL model and
+# must never reach the routed call a Colony dropdown could move to a paid
+# cloud API.
+import agents.router as router_mod  # noqa: E402
+_local_calls = []
+_routed_calls = []
+_real_local, _real_llm = router_mod.call_local, router_mod.call_llm
+router_mod.call_local = lambda messages, **kw: (
+    _local_calls.append(messages) or "Come and sit with us on Friday."
+)
+router_mod.call_llm = lambda *a, **kw: (
+    _routed_calls.append(a) or "should never happen"
+)
+try:
+    drafted = bridge.draft_message(about="invite them on Friday", to_name="Amara")
+    check("Clara returns a draft", drafted["message"].startswith("Come and sit"))
+    check("the draft runs on the local model", drafted["model"] == "local")
+    check("a draft always carries its warnings list", drafted["warnings"] == [])
+    check("exactly one local call was made", len(_local_calls) == 1)
+    check("the routed (overridable) call is never used", _routed_calls == [])
+    check("the prompt tells the model who it is for",
+          "Amara" in _local_calls[0][1]["content"])
+    try:
+        bridge.draft_message(about="   ")
+        check("an empty subject is refused", False, "it drafted anyway")
+    except bridge.BridgeError:
+        check("an empty subject is refused", True)
+    _local_calls.clear()
+    bridge.draft_message(about="say hello", to_name="Dawn group", to_kind="group",
+                         nucleus_name="Dawn")
+    check("a group draft says it is for the whole group",
+          "whole group" in _local_calls[0][1]["content"])
+finally:
+    router_mod.call_local, router_mod.call_llm = _real_local, _real_llm
+
+section("Sending stays inside rule 28's tiers")
+import agents.secretary_store as sec_store  # noqa: E402
+import agents.whatsapp as wa  # noqa: E402
+
+_sent = []
+_queued = []
+_real_fns = {
+    "init_db": sec_store.init_db, "list_contacts": sec_store.list_contacts,
+    "is_allowlisted": sec_store.is_allowlisted,
+    "add_pending_action": sec_store.add_pending_action,
+    "configured": wa.is_configured, "is_owner": wa.is_owner,
+    "window": wa.within_24h_window, "send": wa.send_best_effort,
+}
+sec_store.init_db = lambda: None
+sec_store.list_contacts = lambda: [
+    {"id": 1, "name": "Trusted Friend", "phone": "15550001", "allowlisted": 1},
+    {"id": 2, "name": "Unknown Friend", "phone": "15550002", "allowlisted": 0},
+    {"id": 3, "name": "No Number", "phone": "", "allowlisted": 1},
+]
+sec_store.is_allowlisted = lambda phone: phone == "15550001"
+sec_store.add_pending_action = lambda kind, desc, payload: (
+    _queued.append((kind, desc, payload)) or 77
+)
+wa.is_configured = lambda: True
+wa.is_owner = lambda phone: False
+wa.within_24h_window = lambda phone, store=None: True
+wa.send_best_effort = lambda to, body: (_sent.append((to, body)) or {"ok": True})
+try:
+    out = bridge.send_to_contact(1, "Peace be with you.")
+    check("an allowlisted contact is sent to directly", out["status"] == "sent")
+    check("the message really went out", _sent == [("15550001", "Peace be with you.")])
+
+    out = bridge.send_to_contact(2, "Peace be with you.")
+    check("an un-allowlisted contact queues instead", out["status"] == "queued")
+    check("queuing does not send", len(_sent) == 1)
+    check("it queues on the existing whatsapp_send kind",
+          bool(_queued) and _queued[0][0] == "whatsapp_send")
+    check("the queued action names the person for Sheraj, not the number",
+          "Unknown Friend" in _queued[0][1] and "15550002" not in _queued[0][1])
+    check("the approval id comes back so he can act on it", out["action_id"] == 77)
+
+    for bad_args, label in (
+        ((1, "   "), "an empty message is refused"),
+        ((1, "x" * 2000), "an over-long message is refused"),
+        ((99, "hello"), "an unknown contact is refused"),
+        ((3, "hello"), "a contact with no number is refused"),
+    ):
+        try:
+            bridge.send_to_contact(*bad_args)
+            check(label, False, "it went through")
+        except bridge.BridgeError:
+            check(label, True)
+    check("nothing more was sent while refusing", len(_sent) == 1)
+
+    wa.is_configured = lambda: False
+    try:
+        bridge.send_to_contact(1, "hello")
+        check("an unconfigured WhatsApp is reported, not silently skipped", False,
+              "it claimed to send")
+    except bridge.BridgeError:
+        check("an unconfigured WhatsApp is reported, not silently skipped", True)
+finally:
+    sec_store.init_db = _real_fns["init_db"]
+    sec_store.list_contacts = _real_fns["list_contacts"]
+    sec_store.is_allowlisted = _real_fns["is_allowlisted"]
+    sec_store.add_pending_action = _real_fns["add_pending_action"]
+    wa.is_configured = _real_fns["configured"]
+    wa.is_owner = _real_fns["is_owner"]
+    wa.within_24h_window = _real_fns["window"]
+    wa.send_best_effort = _real_fns["send"]
+
+section("The workforce over HTTP")
+# The workforce picture reads workforce.db too, so point that at a throwaway
+# file as well -- this suite must never write to the owner's real databases.
+import agents.state as state_mod  # noqa: E402
+import agents.colony as colony_mod  # noqa: E402
+state_mod.DB_PATH = Path(_TMP) / "workforce.db"
+colony_mod.DB_PATH = state_mod.DB_PATH
+state_mod.init_db()
+
+wfr = client.get("/nuclei/workforce")
+check("GET /nuclei/workforce is 200", wfr.status_code == 200, wfr.text)
+wfb = wfr.json()
+check("it lists the agents", any(a["name"] == "librarian" for a in wfb["agents"]))
+check("instruments are kept separate from the people",
+      all(not a["is_instrument"] for a in wfb["agents"]))
+check("it names the workforce grouping", wfb["grouping_id"] == int(wf["id"]))
+
+http_person = client.post("/nuclei/workforce/people",
+                          json={"display_name": "Test HTTP Colleague",
+                                "role": "delivers"})
+check("POST a workforce person is 200", http_person.status_code == 200, http_person.text)
+check("the response carries the fresh snapshot",
+      "workforce_members" in (http_person.json().get("snapshot") or {}))
+check("the new person is on it",
+      any(p["display_name"] == "Test HTTP Colleague"
+          for p in http_person.json()["snapshot"]["workforce_members"]))
+
+colony_http = client.get("/colony")
+check("GET /colony is 200", colony_http.status_code == 200, str(colony_http.status_code))
+check("the Digital World sees the same people",
+      any(h["display_name"] == "Test HTTP Colleague"
+          for h in (colony_http.json().get("humans") or [])))
+check("no workforce-side agent row was invented for a person",
+      not any(a["name"] == "Test HTTP Colleague"
+              for a in colony_http.json()["agents"]))
+
+ended_wf = client.post(
+    f"/nuclei/workforce/people/{http_person.json()['membership_id']}/end")
+check("POST end a workforce person is 200", ended_wf.status_code == 200, ended_wf.text)
+check("they are off the workforce",
+      not any(p["display_name"] == "Test HTTP Colleague"
+              for p in ended_wf.json()["snapshot"]["workforce_members"]))
+check("and off the Digital World with them",
+      not any(h["display_name"] == "Test HTTP Colleague"
+              for h in (client.get("/colony").json().get("humans") or [])))
+
+chan_http = client.post(f"/nuclei/groupings/{dawn['id']}/channel",
+                        json={"label": "Dawn HTTP group",
+                              "link": "https://chat.whatsapp.com/HTTPTEST"})
+check("POST a nucleus channel is 200", chan_http.status_code == 200, chan_http.text)
+check("the snapshot carries it",
+      any(c["label"] == "Dawn HTTP group"
+          for c in chan_http.json()["snapshot"]["channels"]))
+bad_chan = client.post(f"/nuclei/groupings/{dawn['id']}/channel",
+                       json={"label": "Nope", "link": "https://example.com/x"})
+check("a non-WhatsApp link is a 400, not a 500", bad_chan.status_code == 400,
+      str(bad_chan.status_code))
+gone_chan = client.delete(f"/nuclei/channels/{chan_http.json()['channel']['id']}")
+check("DELETE a channel is 200", gone_chan.status_code == 200, gone_chan.text)
+check("it is off the snapshot", gone_chan.json()["snapshot"]["channels"] == [])
+
+draft_http = client.post("/nuclei/workforce/message/draft",
+                         json={"about": "hello", "to_kind": "contact"})
+check("drafting without a recipient is a 400", draft_http.status_code == 400,
+      str(draft_http.status_code))
+draft_group = client.post("/nuclei/workforce/message/draft",
+                          json={"about": "hello", "to_kind": "group",
+                                "channel_id": 999999})
+check("drafting to a group that is not there is a 400",
+      draft_group.status_code == 400, str(draft_group.status_code))
+
+section("Nothing personal reaches the workforce side (rule 68)")
+# The strongest form of the check: a real person is put on the workforce over
+# HTTP, then the workforce database is read as BYTES and must not contain the
+# name anywhere -- not in a products row, not in task_runs, not in a spend
+# label. Reads cross this bridge; writes do not.
+leak_name = "Zenobia Quillfeather"
+leak = client.post("/nuclei/workforce/people",
+                   json={"display_name": leak_name, "role": "prints"})
+check("the leak-probe person was added", leak.status_code == 200, leak.text)
+client.get("/colony")
+client.get("/nuclei/workforce")
+raw = Path(state_mod.DB_PATH).read_bytes()
+check("the name is nowhere in workforce.db",
+      leak_name.encode("utf-8") not in raw and leak_name.encode("utf-16-le") not in raw)
+check("nor is the WhatsApp group link",
+      b"chat.whatsapp.com" not in raw)
+check("but the private store does know them",
+      any(p["display_name"] == leak_name for p in store.workforce_members(TEST_DB)))
+client.post(f"/nuclei/workforce/people/{leak.json()['membership_id']}/end")
+
+# No model is given a door to any of this. Same discipline as the wallet's
+# allowlist (rule 42) and Abigail's contacts (rule 28).
+import agents.colony_tools as colony_tools_mod  # noqa: E402
+import agents.secretary_tools as sec_tools_mod  # noqa: E402
+tool_names = set()
+for mod in (colony_tools_mod, sec_tools_mod):
+    for attr in dir(mod):
+        value = getattr(mod, attr)
+        if isinstance(value, dict):
+            tool_names |= {str(k) for k in value.keys()}
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                if isinstance(item, dict) and "name" in item:
+                    tool_names.add(str(item["name"]))
+                elif isinstance(item, dict) and isinstance(item.get("function"), dict):
+                    tool_names.add(str(item["function"].get("name")))
+banned = [t for t in tool_names
+          if "nucleus" in t.lower() or "nuclei" in t.lower() or "workforce_person" in t.lower()]
+check("no tool exposes the Real World to a model", banned == [], str(banned))
+
 print(f"\n{PASS} passed, {FAIL} failed")
 if FAILURES:
     print("Failures:")

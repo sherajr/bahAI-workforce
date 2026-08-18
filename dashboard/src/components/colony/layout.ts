@@ -5,6 +5,7 @@
 // cursor and settles differently on every visit. Sheraj should be able to
 // learn where Ruth lives and find her there tomorrow.
 
+import type { CSSProperties } from "react";
 import type { ColonyAgent, ColonySnapshot, ColonyTeam } from "../../lib/types";
 
 // Roughly 2:1 — close to the real proportions of the panel. A narrower canvas
@@ -15,6 +16,30 @@ export const VIEW_H = 720;
 
 /** Orbits are drawn as tilted disks — this is the foreshortening of the y axis. */
 export const TILT = 0.42;
+
+/**
+ * The Bahá'í Workforce light, in the SAME 1440x720 coordinate space both skies
+ * use — mirrors `nuclei_layout.WORKFORCE`. It is the one thing that exists in
+ * both worlds, which is what lets the two views fold into each other: switching
+ * collapses everything on screen into this point and the other world grows back
+ * out of it. The live value comes off the Real World snapshot; this is the
+ * fallback for the Digital World, which has no snapshot of its own.
+ */
+export const WORKFORCE_ANCHOR = { cx: 278, cy: 318 };
+
+/** How long one half of the world-swap takes. Kept in step with index.css. */
+export const WORLD_MORPH_MS = 380;
+
+/** The collapse/expand transform, anchored on the workforce light. */
+export function morphStyle(
+  open: boolean, anchor: { cx: number; cy: number },
+): CSSProperties {
+  return {
+    transformOrigin: `${anchor.cx}px ${anchor.cy}px`,
+    transform: open ? "scale(1)" : "scale(0.02)",
+    opacity: open ? 1 : 0,
+  };
+}
 
 /**
  * Fixed slots, largest first. Teams are assigned to them in descending size

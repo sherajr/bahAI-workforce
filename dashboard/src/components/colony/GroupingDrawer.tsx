@@ -23,6 +23,8 @@ export function GroupingDrawer({ groupingId, snapshot, onClose, onChanged, onSel
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [walkFrom, setWalkFrom] = useState("");
   const [walkTo, setWalkTo] = useState("");
+  const [groupLabel, setGroupLabel] = useState("");
+  const [groupLink, setGroupLink] = useState("");
   useEffect(() => {
     const slug = q.data?.grouping?.kind_slug;
     if (slug === "junior_youth") setKind("household");
@@ -94,10 +96,36 @@ export function GroupingDrawer({ groupingId, snapshot, onClose, onChanged, onSel
       q.refetch();
     },
   });
+  const channel = (snapshot.channels ?? []).find(
+    (c) => c.grouping_id === groupingId && c.kind === "whatsapp_group",
+  );
+  const saveChannel = useMutation({
+    mutationFn: () => api.setNucleiChannel(groupingId, {
+      label: groupLabel.trim() || undefined,
+      link: groupLink.trim() || undefined,
+    }),
+    onSuccess: (r) => {
+      qc.setQueryData(["nuclei"], r.snapshot);
+      onChanged();
+    },
+  });
+  const clearChannel = useMutation({
+    mutationFn: (id: number) => api.removeNucleiChannel(id),
+    onSuccess: (r) => {
+      setGroupLabel("");
+      setGroupLink("");
+      qc.setQueryData(["nuclei"], r.snapshot);
+      onChanged();
+    },
+  });
   useEffect(() => {
     setWalkFrom("");
     setWalkTo("");
   }, [groupingId]);
+  useEffect(() => {
+    setGroupLabel(channel?.label ?? "");
+    setGroupLink(channel?.link ?? "");
+  }, [groupingId, channel?.id, channel?.label, channel?.link]);
 
   const g = q.data?.grouping;
   const isInstitution = g?.kind_slug === "institution";
@@ -167,6 +195,56 @@ export function GroupingDrawer({ groupingId, snapshot, onClose, onChanged, onSel
             )}
           </div>
         ))}
+      </div>
+
+      <div className="mt-5 border-t border-slate-800 pt-3">
+        <p className="mb-1.5 text-[11px] uppercase tracking-wider text-slate-600">
+          Its WhatsApp group
+        </p>
+        <p className="mb-2 text-[11px] text-slate-500">
+          Most nuclei already talk in a group. Note it here and the Bahá'í Workforce
+          can write a message for it. Nothing is ever sent to a group automatically —
+          WhatsApp gives software no way to post into one, so you paste it in yourself.
+        </p>
+        <input
+          value={groupLabel}
+          onChange={(e) => setGroupLabel(e.target.value)}
+          placeholder="What the group is called"
+          className="mb-1.5 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5
+                     text-sm text-slate-100"
+        />
+        <input
+          value={groupLink}
+          onChange={(e) => setGroupLink(e.target.value)}
+          placeholder="https://chat.whatsapp.com/… (optional)"
+          className="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5
+                     text-sm text-slate-100"
+        />
+        <div className="mt-1.5 flex gap-2">
+          <button
+            type="button"
+            disabled={(!groupLabel.trim() && !groupLink.trim()) || saveChannel.isPending}
+            onClick={() => saveChannel.mutate()}
+            className="flex-1 rounded-md border border-slate-600 bg-slate-900 px-2 py-1.5
+                       text-[11px] text-slate-200 disabled:opacity-40"
+          >
+            {saveChannel.isPending ? "Saving…" : channel ? "Update the group" : "Save the group"}
+          </button>
+          {channel && (
+            <button
+              type="button"
+              disabled={clearChannel.isPending}
+              onClick={() => clearChannel.mutate(channel.id)}
+              className="rounded-md border border-slate-700 px-2 py-1.5 text-[11px] text-slate-500
+                         hover:text-rose-300"
+            >
+              Forget it
+            </button>
+          )}
+        </div>
+        {saveChannel.isError && (
+          <p className="mt-1 text-[11px] text-rose-300">{(saveChannel.error as Error).message}</p>
+        )}
       </div>
 
       <div className="mt-5 border-t border-slate-800 pt-3">

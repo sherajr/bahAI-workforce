@@ -19,6 +19,7 @@ import type {
   AgentRun, ColonyAction, TeamGoal, GoalLaunchResult, ModelChoices,
   WalletStatus, WalletBalances, WalletTx, CreatedWallet, WalletSendResult,
   NucleiSnapshot, NucleiActorDetail, NucleiGroupingDetail, NucleiQuietLights,
+  NucleiChannel, WorkforceDraft, WorkforcePicture, WorkforceSendResult,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -977,6 +978,28 @@ export const api = {
     kind_slug?: string; grouping_id?: number; participant_ids: number[]; title?: string;
   }) => post<Record<string, unknown>>("/nuclei/activities", body),
   getQuietLights: () => get<NucleiQuietLights>("/nuclei/quiet-lights"),
+
+  // The Bahá'í Workforce as a place on the Real World map (rules 65-68).
+  getWorkforcePicture: () => get<WorkforcePicture>("/nuclei/workforce"),
+  addWorkforcePerson: (body: { display_name?: string; actor_id?: number; role?: string }) =>
+    post<{ actor_id: number; membership_id: number; snapshot: NucleiSnapshot }>(
+      "/nuclei/workforce/people", body),
+  removeWorkforcePerson: (membershipId: number) =>
+    post<{ result: string; snapshot: NucleiSnapshot }>(
+      `/nuclei/workforce/people/${membershipId}/end`),
+  setNucleiChannel: (groupingId: number, body: { label?: string; link?: string;
+                                                 kind?: string }) =>
+    post<{ channel: NucleiChannel; snapshot: NucleiSnapshot }>(
+      `/nuclei/groupings/${groupingId}/channel`, body),
+  removeNucleiChannel: (channelId: number) =>
+    request<{ result: string; snapshot: NucleiSnapshot }>(
+      "DELETE", `/nuclei/channels/${channelId}`),
+  draftWorkforceMessage: (body: {
+    about: string; to_kind: "contact" | "group";
+    contact_id?: number; channel_id?: number; include_recent_work?: boolean;
+  }) => post<WorkforceDraft>("/nuclei/workforce/message/draft", body),
+  sendWorkforceMessage: (body: { contact_id: number; message: string }) =>
+    post<WorkforceSendResult>("/nuclei/workforce/message/send", body),
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),

@@ -21,6 +21,7 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 50–54 | Abigail and the teams |
 | 55–57 | Cancelling a run |
 | 59–64 | The Real World (nuclei) |
+| 65–68 | The Bahá'í Workforce on the Real World map |
 
 ## Working norms
 
@@ -57,7 +58,7 @@ python scripts/test_secretary_colony.py    # Abigail <-> the teams: 92 checks
 python scripts/test_job_cancel.py          # Cancelling a run: 24 checks
 python scripts/test_wallet.py              # Wallet: 90 checks, no network/keys
 python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
-python scripts/test_nuclei.py              # Real World (nuclei): 130 checks
+python scripts/test_nuclei.py              # Real World (nuclei): 225 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -945,6 +946,116 @@ The Colony tab's other sky: Sheraj's nuclei and friends. Design in
 63. **Grouping kinds, axes, facet kinds, tie kinds, activity kinds and institute units are DATA.** Adding a relationship type a year from now is an `INSERT`. Participation and service are two lists: service sits closer; core-activity kinds carry `is_core`. Do not hardcode the spreadsheet's six columns as an enum or a linear funnel.
 
 64. **A workforce gift stores a `product_id` and a theme, never a friend's name, and `workforce.db` never learns who a gathering is for.** Job progress strings stay mechanical.
+
+## Rules 65–68 — the Bahá'í Workforce on the Real World map
+
+The workforce light on the Real World sky opens like a family opens: the agents
+fan out, real people can be put on it, and a WhatsApp message can be written
+from it to a friend or to a nucleus's group. Added 2026-08-17 (owner ask).
+`agents/nuclei_bridge.py` is the one module where the two worlds touch;
+`dashboard/src/components/colony/WorkforceDrawer.tsx` is the UI. Verify with
+`scripts/test_nuclei.py`.
+
+65. **The workforce is a real grouping, and never a table on the sky.** It is
+    one row in `private/nuclei.db` of its own kind (`WORKFORCE_KIND` /
+    `WORKFORCE_SLUG`), created by `init_db` and only there — `create_grouping`
+    refuses a second one. Making it a grouping is what lets a person join it
+    through the ordinary `add_membership` path, so every existing drawer, query
+    and gate works unchanged. What it must never become is a table:
+    `nuclei_layout.is_workforce_row` makes `assign_slots` skip it *before any
+    chair index is spent* (otherwise a nucleus would slide onto the next chair
+    for a light that is drawn somewhere else entirely), `optimize_layout`
+    excludes it so Arrange can never move it, and it keeps the fixed
+    `WORKFORCE` position it has always had.
+    - **Its people get no second light** (rule 62). A workforce-only person has
+      no seat on the sky at all and lives inside the workforce light until it is
+      opened — exactly the family-only case. Someone who already gathers
+      somewhere keeps that light and is reached by a thread when the workforce
+      opens, never redrawn.
+    - **The Digital World shows the same people, DERIVED.** `GET /colony`
+      merges `nuclei_store.workforce_members()` in as `humans` on every read;
+      they are never rows in `workforce.db` (rule 68), the same shape as the
+      finished-video shelf (rule 58). They draw without trust, without a finish
+      and without a team ring — polishing a person would be a score on a human
+      being (rules 61 / 41b).
+66. **A nucleus's WhatsApp GROUP is data; posting into one is not possible.**
+    `grouping_channels` notes the group a table already talks in (a name and an
+    invite link) so a message can be written *for* it. Two halves:
+    - **Rule 60 is not relaxed.** No phone, email or address column exists on a
+      channel and none may be added; a group invite link is what every member of
+      that group can already see. One-to-one numbers stay in Abigail's
+      `contacts` table and only there (rule 28). Only `whatsapp_group` is an
+      accepted kind, and only a real `chat.whatsapp.com` / `wa.me` link is
+      accepted — a link that is not one is refused rather than stored.
+    - **The Cloud API has no group endpoint at all.** Meta's WhatsApp Cloud API
+      — the whole basis of the Secretary — can only message one person. So a
+      group draft ends in Copy plus a link that opens the group, and the UI SAYS
+      SO on screen. Never add a Send button for a group: a button that silently
+      does nothing is the Canva-autofill failure, and this one would look like a
+      message went out to a whole community.
+67. **A draft that names a friend runs on the LOCAL model, and cannot be routed
+    off it.** `router.call_local` exists for exactly this: `call_llm` picks a
+    provider from the task type *and* from the per-agent model saved in the
+    Colony tab (rule 41a), so anything going through it can be moved onto a paid
+    cloud API by a dropdown. That is right for product work and wrong for a
+    prompt containing one of Sheraj's friends' names — the Real World lives in
+    `private/` precisely so those names stay on this machine. `call_local` takes
+    no `agent=` parameter, so there is nothing to override; the suite asserts
+    the routed call is never reached. Claude is not an option here either
+    (rule 16). Two things follow from the model being small and local:
+    - **A draft is never sent as written.** It lands in an editable box and
+      Sheraj sends it, so nothing here is autonomous.
+    - **Invented specifics are FLAGGED in code**, because prompt compliance is
+      not trusted for anything a friend will act on (rule 4's reasoning). Asked
+      only to "invite them on Friday", Qwen wrote "around 7" on the very first
+      real draft. `invented_specifics()` points at any time, day, date or
+      amount the message asserts that was not supplied, and the drawer shows
+      it. It does NOT edit — there is no safe mechanical rewrite of free
+      prose — and the prompt asks for a `[time]` blank rather than a guess.
+68. **Reads cross the bridge; writes do not.** No friend's name, no group name
+    and no group link is ever written into `workforce.db`.
+    `nuclei_bridge.assert_no_personal_leak` refuses a recipient, a number or a
+    link riding along in anything handed to the workforce side — narrow on
+    purpose and it says so, the same discipline as
+    `secretary_colony.assert_shareable` (rule 50). The suite proves the
+    invariant the strong way: it adds a person over HTTP, exercises `/colony`
+    and `/nuclei/workforce`, then reads `workforce.db` as BYTES and requires
+    the name to be absent. Two consequences:
+    - **Sending reuses rule 28's tiers untouched.** `send_to_contact` sends
+      directly only to the owner or an allowlisted contact; anyone else becomes
+      a `pending_actions` row of kind `whatsapp_send`, the same unified queue.
+      Sheraj clicking Send in the drawer is owner action, not a relaxation — no
+      new path to an un-allowlisted number is opened.
+    - **No model has a door to any of this.** Nothing in `colony_tools` or
+      `secretary_tools` exposes the nuclei, the channels or the workforce
+      roster, and the suite asserts no tool name reaches them — the same
+      control that makes the wallet allowlist (rule 42) and the WhatsApp
+      allowlist (rule 28) survive a prompt injection.
+68b. **Switching worlds folds one sky into the workforce light and grows the
+    other out of it** (owner ask 2026-08-17). Both skies use the same
+    1440x720 space and both draw that light, so it is the only body that
+    survives the swap and is therefore the anchor. Four things are
+    load-bearing:
+    - **The map is the FIRST child in both worlds.** The Real World's "add a
+      nucleus" rows were moved BELOW its map for this: a control row above it
+      sat the workforce light ~110px lower in one world than in the other, and
+      the dot visibly jumped at the swap. Do not move them back on top.
+    - **The Digital World is handed the Real World's SCREEN anchor**
+      (`workforceScreenAnchor` — the light's fixed position pushed through that
+      view's saved camera), because the Real World pans and zooms and the
+      Digital World has no camera of its own. The hinge dot is drawn OUTSIDE
+      the camera in both, so it is the same size however far the Real World is
+      zoomed.
+    - **The incoming sky opens itself one PAINTED frame after mount**
+      (`mounted` + `requestAnimationFrame`), the same pattern as the family
+      bloom. Setting the open state in the same tick as the mount gives the
+      browser only the end state and the transition has nothing to run from.
+    - **`WORLD_MORPH_MS` and the CSS duration are one timing**, and the fold is
+      what sequences the swap — change `colony/layout.ts` and
+      `.colony-world-morph` in `index.css` together, or the world flips before
+      the fold has finished. The opacity fade is deliberately DELAYED behind
+      the scale so the bodies are seen travelling rather than winking out, and
+      the whole thing is stilled under `prefers-reduced-motion`.
 
 ## Gotchas
 

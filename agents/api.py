@@ -4697,9 +4697,28 @@ def _colony_agent_or_404(agent: str) -> str:
 
 @app.get("/colony")
 def colony_overview():
-    """The whole graph in one call: agents, teams, goals and derived handoffs."""
+    """The whole graph in one call: agents, teams, goals and derived handoffs.
+
+    The real PEOPLE on the workforce are merged in here at read time from the
+    private store — derived on every read, never a row in workforce.db, the
+    same shape as the finished-video shelf (rules 58 / 68). That is what lets
+    someone Sheraj adds in the Real World show up in the Digital World too
+    without a name ever being written on the workforce side.
+    """
     from agents import colony
-    return colony.colony_snapshot()
+    snap = colony.colony_snapshot()
+    snap["humans"] = _workforce_humans()
+    return snap
+
+
+def _workforce_humans() -> list[dict]:
+    """Never let a missing/locked private DB break the Colony map."""
+    try:
+        from agents import nuclei_store
+        nuclei_store.init_db()
+        return nuclei_store.workforce_members()
+    except Exception:
+        return []
 
 
 @app.get("/colony/agents/{agent}")
@@ -6693,6 +6712,140 @@ def nuclei_sat_together(req: NucleiSatIn):
 @app.get("/nuclei/quiet-lights")
 def nuclei_quiet_lights():
     return {"items": _nuclei().quiet_lights()}
+
+
+# --- The Bahá'í Workforce on the Real World map (rules 65-68) ------------------
+# The workforce light opens like a family opens: agents and the real people who
+# work alongside them. Everything personal still lives in private/nuclei.db;
+# agents.nuclei_bridge is the ONE module where the two sides touch.
+
+class NucleiWorkforcePersonIn(BaseModel):
+    display_name: Optional[str] = None
+    actor_id: Optional[int] = None
+    role: Optional[str] = None
+
+
+class NucleiChannelIn(BaseModel):
+    kind: str = "whatsapp_group"
+    label: Optional[str] = None
+    link: Optional[str] = None
+
+
+class NucleiDraftIn(BaseModel):
+    about: str
+    to_kind: str = "contact"          # "contact" | "group"
+    contact_id: Optional[int] = None
+    channel_id: Optional[int] = None
+    include_recent_work: bool = False
+
+
+class NucleiSendIn(BaseModel):
+    contact_id: int
+    message: str
+
+
+def _bridge():
+    from agents import nuclei_bridge
+    return nuclei_bridge
+
+
+def _bridge_err(exc: Exception):
+    from agents.nuclei_bridge import BridgeError
+    if isinstance(exc, (BridgeError, ValueError)):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    raise exc
+
+
+@app.get("/nuclei/workforce")
+def nuclei_workforce():
+    """Who works here, what is running, what was finished lately."""
+    try:
+        return _bridge().workforce_picture()
+    except Exception as e:
+        _bridge_err(e)
+
+
+@app.post("/nuclei/workforce/people")
+def nuclei_add_workforce_person(req: NucleiWorkforcePersonIn):
+    try:
+        added = _nuclei().add_workforce_person(
+            display_name=req.display_name, actor_id=req.actor_id, role=req.role,
+        )
+        return {**added, "snapshot": _nuclei().snapshot()}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/workforce/people/{membership_id}/end")
+def nuclei_remove_workforce_person(membership_id: int):
+    try:
+        _nuclei().remove_workforce_person(membership_id)
+        return {"result": "ok", "snapshot": _nuclei().snapshot()}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/groupings/{grouping_id}/channel")
+def nuclei_set_channel(grouping_id: int, req: NucleiChannelIn):
+    """Note the WhatsApp GROUP a nucleus already talks in. Never a number."""
+    try:
+        channel = _nuclei().set_grouping_channel(
+            grouping_id, label=req.label, link=req.link, kind=req.kind,
+        )
+        return {"channel": channel, "snapshot": _nuclei().snapshot()}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.delete("/nuclei/channels/{channel_id}")
+def nuclei_remove_channel(channel_id: int):
+    try:
+        _nuclei().remove_grouping_channel(channel_id)
+        return {"result": "ok", "snapshot": _nuclei().snapshot()}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/workforce/message/draft")
+def nuclei_draft_message(req: NucleiDraftIn):
+    """Clara drafts one WhatsApp message. Nothing is sent from here."""
+    ns = _nuclei()
+    to_name = ""
+    nucleus_name = ""
+    try:
+        if req.to_kind == "group":
+            channel = ns.get_grouping_channel(req.channel_id) if req.channel_id else None
+            if not channel:
+                raise ValueError("Pick a WhatsApp group to write to")
+            grouping = ns.get_grouping(int(channel["grouping_id"]))
+            nucleus_name = (grouping or {}).get("name") or ""
+            to_name = channel.get("label") or nucleus_name
+        else:
+            from agents import secretary_store
+            secretary_store.init_db()
+            contact = next(
+                (c for c in secretary_store.list_contacts()
+                 if int(c["id"]) == int(req.contact_id or 0)), None,
+            )
+            if not contact:
+                raise ValueError("Pick someone to write to")
+            to_name = contact["name"]
+        return _bridge().draft_message(
+            about=req.about, to_name=to_name, to_kind=req.to_kind,
+            include_recent_work=req.include_recent_work,
+            nucleus_name=nucleus_name,
+        )
+    except Exception as e:
+        _bridge_err(e)
+
+
+@app.post("/nuclei/workforce/message/send")
+def nuclei_send_message(req: NucleiSendIn):
+    """Send to one contact on Abigail's WhatsApp. Rule 28's tiers are unchanged."""
+    try:
+        return _bridge().send_to_contact(req.contact_id, req.message)
+    except Exception as e:
+        _bridge_err(e)
 
 
 # --- Health check ---

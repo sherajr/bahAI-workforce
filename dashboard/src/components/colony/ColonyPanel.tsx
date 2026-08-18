@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, Orbit, ShieldCheck, TrendingUp, Wallet } from "lucide-react";
 import { api } from "../../lib/api";
@@ -12,9 +12,11 @@ import { ActorDrawer } from "./ActorDrawer";
 import { AgentDrawer } from "./AgentDrawer";
 import { ColonyGraph } from "./ColonyGraph";
 import { GroupingDrawer } from "./GroupingDrawer";
-import { RealWorldGraph } from "./RealWorldGraph";
+import { WORKFORCE_ANCHOR, WORLD_MORPH_MS } from "./layout";
+import { RealWorldGraph, workforceScreenAnchor } from "./RealWorldGraph";
 import { TeamDrawer } from "./TeamDrawer";
 import { TreasuryView } from "./TreasuryView";
+import { WorkforceDrawer } from "./WorkforceDrawer";
 
 type View = "map" | "performance" | "handoffs" | "approvals" | "treasury";
 
@@ -40,8 +42,31 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
   );
   const [rwActor, setRwActor] = useState<number | null>(null);
   const [rwGrouping, setRwGrouping] = useState<number | null>(null);
+  const [rwWorkforce, setRwWorkforce] = useState(false);
   const [newNucleus, setNewNucleus] = useState("");
   const [newInstitution, setNewInstitution] = useState("");
+  // false while a world-swap is folding the sky on screen into the workforce
+  // light. Both skies use the same 1440x720 space and both draw that light, so
+  // it is the one body that survives the swap and the fold anchors on it.
+  const [expanded, setExpanded] = useState(true);
+  const swapTimer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (swapTimer.current !== null) window.clearTimeout(swapTimer.current);
+  }, []);
+
+  const switchWorld = (next: "digital" | "real") => {
+    // Ignore a second click mid-swap: re-entering would swap the world under a
+    // fold that is already running and leave the incoming sky stuck at 2%.
+    if (next === world || swapTimer.current !== null) return;
+    setExpanded(false);
+    swapTimer.current = window.setTimeout(() => {
+      setWorld(next);
+      // The incoming sky mounts folded and opens itself a frame later, so this
+      // can be set in the same tick without racing the mount.
+      setExpanded(true);
+      swapTimer.current = null;
+    }, WORLD_MORPH_MS);
+  };
 
   useEffect(() => { patchColonyUi({ view, agent, team, consultJobId, world }); },
     [view, agent, team, consultJobId, world]);
@@ -102,7 +127,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
             <div className="flex gap-1 rounded-xl border border-slate-800 bg-slate-950/60 p-1">
               <button
                 type="button"
-                onClick={() => setWorld("digital")}
+                onClick={() => switchWorld("digital")}
                 className={cn(
                   "rounded-lg px-3.5 py-2 text-sm font-medium",
                   world === "digital" ? "bg-amber-400/10 text-amber-300" : "text-slate-400 hover:text-slate-200",
@@ -112,7 +137,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
               </button>
               <button
                 type="button"
-                onClick={() => setWorld("real")}
+                onClick={() => switchWorld("real")}
                 className={cn(
                   "rounded-lg px-3.5 py-2 text-sm font-medium",
                   world === "real" ? "bg-amber-400/10 text-amber-300" : "text-slate-400 hover:text-slate-200",
@@ -167,6 +192,8 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
                 onSelectAgent={selectAgent}
                 onSelectTeam={selectTeam}
                 emphasis={view === "handoffs" ? "handoffs" : "map"}
+                expanded={view === "map" ? expanded : true}
+                anchor={workforceScreenAnchor(rw?.layout.workforce ?? WORKFORCE_ANCHOR)}
               />
               {view === "handoffs" && <HandoffList />}
               {view === "map" && !agent && !team && (
@@ -180,6 +207,36 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
 
           {view === "map" && world === "real" && (
             <div className="space-y-4">
+              {/* The map comes FIRST here, as it does in the Digital World.
+                  That is not a preference: switching worlds folds one sky into
+                  the workforce light and grows the other out of the same pixel,
+                  and a control row above the map would sit that light ~110px
+                  lower in this world than in the other, so the dot would jump
+                  at the swap. Controls sit under the map instead. */}
+              {rw && (
+                <RealWorldGraph
+                  snapshot={rw}
+                  colony={snapshot}
+                  selectedActor={rwActor}
+                  selectedGrouping={rwGrouping}
+                  workforceOpen={rwWorkforce}
+                  expanded={expanded}
+                  onSelectActor={(id) => {
+                    setRwActor(id);
+                    if (id) { setRwGrouping(null); setRwWorkforce(false); }
+                  }}
+                  onSelectGrouping={(id) => {
+                    setRwGrouping(id);
+                    if (id) { setRwActor(null); setRwWorkforce(false); }
+                  }}
+                  onSelectWorkforce={() => {
+                    setRwWorkforce((open) => !open);
+                    setRwActor(null);
+                    setRwGrouping(null);
+                  }}
+                  onMoveGrouping={(id, x, y) => moveNucleus.mutateAsync({ id, x, y })}
+                />
+              )}
               {nuclei.isError && (
                 <ErrorNote>Could not load the Real World: {(nuclei.error as Error).message}</ErrorNote>
               )}
@@ -203,8 +260,9 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
                 </button>
                 <button
                   type="button"
-                  disabled={!rw || rw.groupings.filter((g) => g.kind_slug !== "institution").length < 2
-                    || arrangeTables.isPending}
+                  disabled={!rw || rw.groupings.filter(
+                    (g) => g.kind_slug !== "institution" && g.kind_slug !== "workforce",
+                  ).length < 2 || arrangeTables.isPending}
                   onClick={() => arrangeTables.mutate()}
                   title="Places every table by size, who gathers where, and who walks with whom."
                   className="rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm font-medium text-slate-200 hover:border-slate-500 disabled:opacity-40"
@@ -246,18 +304,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
                   {((moveNucleus.error || arrangeTables.error) as Error).message}
                 </ErrorNote>
               )}
-              {rw && (
-                <RealWorldGraph
-                  snapshot={rw}
-                  selectedActor={rwActor}
-                  selectedGrouping={rwGrouping}
-                  onSelectActor={(id) => { setRwActor(id); if (id) setRwGrouping(null); }}
-                  onSelectGrouping={(id) => { setRwGrouping(id); if (id) setRwActor(null); }}
-                  onSelectWorkforce={() => { setRwActor(null); setRwGrouping(null); }}
-                  onMoveGrouping={(id, x, y) => moveNucleus.mutateAsync({ id, x, y })}
-                />
-              )}
-              {!rwActor && !rwGrouping && (
+              {!rwActor && !rwGrouping && !rwWorkforce && (
                 <p className="text-center text-sm text-slate-500">
                   Scroll to zoom, or drag the empty sky to move around.
                   Drag a nucleus to place it. Optimize locations sits related tables together.
@@ -269,6 +316,9 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
                   Add a local institution on the left — LSA, Regional Institute,
                   Auxiliary Board, teaching committee. Open one to note who serves,
                   or to take it off the map.
+                  Click the Bahá'í Workforce to open it: the agents fan out, you can
+                  put real people on it, and you can write a WhatsApp message to a
+                  friend or to a nucleus's group.
                 </p>
               )}
             </div>
@@ -306,6 +356,15 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
             onClose={() => setRwActor(null)}
             onChanged={() => qc.invalidateQueries({ queryKey: ["nuclei"] })}
             onSelectActor={(id) => setRwActor(id)}
+          />
+        )}
+        {world === "real" && rw && rwWorkforce && (
+          <WorkforceDrawer
+            snapshot={rw}
+            onClose={() => setRwWorkforce(false)}
+            onChanged={() => qc.invalidateQueries({ queryKey: ["nuclei"] })}
+            onSelectActor={(id) => { setRwActor(id); setRwWorkforce(false); }}
+            onOpenDigital={() => { setRwWorkforce(false); switchWorld("digital"); }}
           />
         )}
         {world === "real" && rw && rwGrouping && (

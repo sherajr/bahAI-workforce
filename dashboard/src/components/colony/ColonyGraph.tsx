@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ColonySnapshot } from "../../lib/types";
 import { accentFor, agentLabel, cn } from "../../lib/utils";
 import { agentFinish, teamFinish } from "./finish";
-import { edgePath, layoutColony, TILT, VIEW_H, VIEW_W } from "./layout";
+import { edgePath, layoutColony, morphStyle, TILT, VIEW_H, VIEW_W,
+  WORKFORCE_ANCHOR } from "./layout";
 import { Sphere, SphereDefs } from "./Sphere";
 
 interface Props {
@@ -13,13 +14,39 @@ interface Props {
   onSelectTeam: (team: string | null) => void;
   /** "map" draws everything; "handoffs" emphasises the edges and dims the rest. */
   emphasis: "map" | "handoffs";
+  /**
+   * false while the world-swap is folding this sky into the workforce light.
+   * Defaults to expanded, so the Handoffs view is unaffected.
+   */
+  expanded?: boolean;
+  /**
+   * Where the workforce light actually sits ON SCREEN in the Real World right
+   * now — its fixed position pushed through that view's saved camera. Passing
+   * it keeps the fold anchored on the same pixel in both skies even when the
+   * Real World has been panned or zoomed.
+   */
+  anchor?: { cx: number; cy: number };
 }
 
 export function ColonyGraph({
   snapshot, selectedAgent, selectedTeam, onSelectAgent, onSelectTeam, emphasis,
+  expanded = true, anchor = WORKFORCE_ANCHOR,
 }: Props) {
   const [hover, setHover] = useState<string | null>(null);
   const layout = useMemo(() => layoutColony(snapshot), [snapshot]);
+  // The sky starts folded on its FIRST painted frame and opens on the next, so
+  // the grow-out runs whether this mount came from a world swap or from opening
+  // the tab. Setting the open state in the same tick as the mount would give the
+  // browser only the end state, and the transition would have nothing to run
+  // from — the same reason the family bloom waits a frame.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setMounted(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  const open = expanded && mounted;
+
+  const humans = snapshot.humans ?? [];
 
   const maxEdge = Math.max(1, ...snapshot.edges.map((e) => e.count));
   // What the cursor or the selection is focused on — used to decide which
@@ -77,6 +104,16 @@ export function ColonyGraph({
 
         <rect width={VIEW_W} height={VIEW_H} fill="url(#colony-vignette)" />
         <rect width={VIEW_W} height={VIEW_H} fill="url(#colony-grid)" />
+
+        {/* Everything below folds into the workforce light when the world is
+            switched. The background above stays put, so the panel never
+            flashes empty mid-swap. Pointer events go off while it is folding
+            so a click cannot land on a body that is halfway to a dot. */}
+        <g
+          className="colony-world-morph"
+          style={morphStyle(open, anchor)}
+          pointerEvents={open ? undefined : "none"}
+        >
 
         {/* Ambient ripples under each system — the soft pooled light in the
             reference. Pure decoration, so no pointer events. */}
@@ -322,12 +359,85 @@ export function ColonyGraph({
             </g>
           );
         })}
+        {/* The real PEOPLE on the workforce. They are not agents: no trust, no
+            finish, no team ring — a shine or a scratch on a person would be a
+            score on a human being, which nothing in this app does (rules 61 /
+            41b). They sit in their own quiet cluster in the empty upper left,
+            derived on every read from the private store (rule 68). */}
+        {humans.length > 0 && (
+          <g>
+            <text
+              x={HUMANS.cx} y={HUMANS.cy - 40}
+              textAnchor="middle"
+              className="fill-amber-200/70 text-[11px] tracking-wide"
+              style={{ paintOrder: "stroke", stroke: "#05060a", strokeWidth: 3 }}
+            >
+              The people
+            </text>
+            {humans.map((h, i) => {
+              const at = humanSeat(i, humans.length);
+              return (
+                <g key={`human-${h.membership_id}`}>
+                  <line
+                    x1={HUMANS.cx} y1={HUMANS.cy} x2={at.x} y2={at.y}
+                    stroke="#fbbf24" strokeWidth="0.75" opacity={0.2}
+                  />
+                  <circle cx={at.x} cy={at.y} r={13} fill="#fbbf24" opacity={0.1} />
+                  <circle cx={at.x} cy={at.y} r={7} fill="#fef3c7" />
+                  <circle cx={at.x} cy={at.y} r={10.5} fill="none" stroke="#fbbf24"
+                          strokeWidth={1} opacity={0.7} />
+                  <text
+                    x={at.x} y={at.y + 22}
+                    textAnchor="middle"
+                    className="fill-amber-100/90 text-[11px]"
+                    style={{ paintOrder: "stroke", stroke: "#05060a", strokeWidth: 3 }}
+                  >
+                    {h.display_name.split(" ")[0] || h.display_name}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        )}
+        </g>
+
+        {/* The hinge: the one body that belongs to both skies. It fades up as
+            this world folds away, and the Real World's own workforce light
+            takes over from it at the same pixel. */}
+        <g
+          className="colony-world-morph"
+          pointerEvents="none"
+          style={{ opacity: open ? 0 : 1 }}
+        >
+          <circle cx={anchor.cx} cy={anchor.cy} r={32} fill="#fbbf24" opacity="0.22"
+                  filter="url(#colony-glow)" />
+          <circle cx={anchor.cx} cy={anchor.cy} r={6.5} fill="#fff7ed" />
+          <circle cx={anchor.cx} cy={anchor.cy} r={3.5} fill="#ffffff" />
+        </g>
       </svg>
 
-      <Legend />
-      {hover && <HoverCard snapshot={snapshot} name={hover} />}
+      {/* The overlays fade with the sky they belong to, so a world-swap moves
+          the whole view rather than leaving a legend floating over a fold. */}
+      <div className="colony-world-morph" style={{ opacity: open ? 1 : 0 }}>
+        <Legend />
+        {hover && <HoverCard snapshot={snapshot} name={hover} />}
+      </div>
     </div>
   );
+}
+
+// The upper LEFT is the one part of the canvas no team slot reaches, and the
+// legend already owns the lower left. Fixed, like every other position here.
+const HUMANS = { cx: 132, cy: 148 };
+function humanSeat(i: number, n: number): { x: number; y: number } {
+  const perRow = 3;
+  const col = i % perRow;
+  const row = Math.floor(i / perRow);
+  const width = Math.min(n, perRow);
+  return {
+    x: HUMANS.cx + (col - (width - 1) / 2) * 62,
+    y: HUMANS.cy + row * 48,
+  };
 }
 
 function Legend() {

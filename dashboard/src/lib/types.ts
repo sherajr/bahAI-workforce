@@ -1074,6 +1074,9 @@ export interface ColonySnapshot {
   edges: HandoffEdge[];
   pending_actions: number;
   generated_at: string;
+  /** Real people on the workforce, derived from the private store on every
+   *  read — never a row in workforce.db (rule 68). */
+  humans?: NucleiWorkforcePerson[];
 }
 
 export interface AgentRun {
@@ -1400,6 +1403,57 @@ export interface NucleiSnapshot {
   };
   quiet_after_days: number;
   workforce: { cx: number; cy: number };
+  /** The Bahá'í Workforce is a real grouping — it just keeps its own light. */
+  workforce_grouping_id?: number;
+  workforce_members?: NucleiWorkforcePerson[];
+  channels?: NucleiChannel[];
+}
+
+export interface NucleiWorkforcePerson {
+  membership_id: number;
+  actor_id: number;
+  display_name: string;
+  kind: string;
+  role: string;
+  since?: string | null;
+}
+
+/** The WhatsApp GROUP a nucleus already talks in. Never a person's number. */
+export interface NucleiChannel {
+  id: number;
+  grouping_id: number;
+  kind: string;
+  label: string | null;
+  link: string | null;
+}
+
+export interface WorkforcePicture {
+  grouping_id: number;
+  name: string;
+  agents: ColonyAgent[];
+  instruments: ColonyAgent[];
+  teams: ColonyTeam[];
+  people: NucleiWorkforcePerson[];
+  running_jobs: { job_id: string; kind: string; progress?: string; started_by?: string;
+                  team?: string; team_name?: string }[];
+  pending_actions: number;
+  recent_work: { id: string; title: string; kind: string; created_at?: string }[];
+}
+
+export interface WorkforceDraft {
+  message: string;
+  drafted_by: string;
+  model: string;
+  /** Concrete details the draft asserts that were never supplied. */
+  warnings?: string[];
+}
+
+export interface WorkforceSendResult {
+  status: "sent" | "queued";
+  to: string;
+  note: string;
+  action_id?: number;
+  as_template?: boolean;
 }
 
 export interface NucleiHouseholdMember {

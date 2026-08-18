@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { Maximize2, Minus, Plus } from "lucide-react";
-import type { NucleiSnapshot } from "../../lib/types";
+import type { ColonySnapshot, NucleiSnapshot } from "../../lib/types";
 import { getColonyUi, patchColonyUi } from "../../lib/settings";
-import { accentFor } from "../../lib/utils";
-import { TILT, VIEW_H, VIEW_W } from "./layout";
+import { accentFor, agentLabel } from "../../lib/utils";
+import { morphStyle, TILT, VIEW_H, VIEW_W, WORKFORCE_ANCHOR } from "./layout";
 
 const ZOOM_MIN = 0.55;
 const ZOOM_MAX = 3.2;
@@ -19,13 +19,30 @@ function institutionLines(name: string): string[] {
 
 interface Props {
   snapshot: NucleiSnapshot;
+  /** The Digital World's own snapshot — the workforce light opens into it. */
+  colony?: ColonySnapshot;
   selectedActor: number | null;
   selectedGrouping: number | null;
+  workforceOpen: boolean;
+  /** false while the world-swap is folding this sky into the workforce light. */
+  expanded?: boolean;
   onSelectActor: (id: number | null) => void;
   onSelectGrouping: (id: number | null) => void;
   onSelectWorkforce: () => void;
   onMoveGrouping: (id: number, x: number, y: number) => void | Promise<unknown>;
 }
+
+/** One body on the ring that opens out of the workforce light. */
+type WorkforcePetal = {
+  key: string;
+  label: string;
+  /** An agent has no dot on this map; a real person may already have one. */
+  human: boolean;
+  actorId?: number;
+  live?: boolean;
+  paused?: boolean;
+  accent: string;
+};
 
 type Drag = {
   id: number;
@@ -71,8 +88,22 @@ function loadCam(): Cam {
   return clampCam(s.rwScale ?? 1, s.rwPanX ?? 0, s.rwPanY ?? 0);
 }
 
+/**
+ * Where the workforce light sits in VIEWBOX units right now — its fixed world
+ * position pushed through this sky's saved camera. The Digital World has no
+ * camera of its own, so it is handed this number to fold onto; without it a
+ * panned or zoomed Real World would hand back a dot in the wrong place.
+ */
+export function workforceScreenAnchor(
+  wf: { cx: number; cy: number },
+): { cx: number; cy: number } {
+  const c = loadCam();
+  return { cx: c.x + wf.cx * c.k, cy: c.y + wf.cy * c.k };
+}
+
 export function RealWorldGraph({
-  snapshot, selectedActor, selectedGrouping,
+  snapshot, colony, selectedActor, selectedGrouping, workforceOpen,
+  expanded = true,
   onSelectActor, onSelectGrouping, onSelectWorkforce, onMoveGrouping,
 }: Props) {
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -86,6 +117,19 @@ export function RealWorldGraph({
   const [cam, setCam] = useState<Cam>(() => camRef.current);
   const [bloomIds, setBloomIds] = useState<number[]>([]);
   const [bloomOpen, setBloomOpen] = useState(false);
+
+  // The sky starts folded on its FIRST painted frame and opens on the next, so
+  // the grow-out runs whether this mount came from a world swap or from opening
+  // the tab. Setting the open state in the same tick as the mount would give the
+  // browser only the end state, and the transition would have nothing to run
+  // from — the same reason the family bloom waits a frame.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setMounted(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  const open = expanded && mounted;
+
 
   const actorsById = useMemo(() => {
     const m: Record<number, NucleiSnapshot["actors"][number]> = {};
@@ -198,6 +242,55 @@ export function RealWorldGraph({
   const bloomFamilyIds = new Set(
     familyMembers.filter((m) => bloomIds.includes(m.household_id)).map((m) => m.person_id),
   );
+
+  // --- The workforce light opens the same way a family does (rule 65) --------
+  // Its bodies are drawn on a fan to the RIGHT, away from the institution
+  // column, on a rounder ellipse than the tables use: this is a panel opening
+  // out, not another orbit lying on the ground plane, and a dozen names
+  // squeezed onto a tilted ring would sit on top of each other.
+  const wfPeople = snapshot.workforce_members ?? [];
+  const wfPetals: WorkforcePetal[] = useMemo(() => {
+    const rows: WorkforcePetal[] = [];
+    for (const a of colony?.agents ?? []) {
+      if (a.is_instrument) continue;
+      rows.push({
+        key: `agent-${a.name}`,
+        label: agentLabel(a.name),
+        human: false,
+        live: a.live,
+        paused: a.paused,
+        accent: colony?.teams.find((t) => t.id === a.team)?.accent ?? "amber",
+      });
+    }
+    for (const p of wfPeople) {
+      rows.push({
+        key: `person-${p.membership_id}`,
+        label: p.display_name.split(" ")[0] || p.display_name,
+        human: true,
+        actorId: p.actor_id,
+        accent: "amber",
+      });
+    }
+    return rows;
+  }, [colony, wfPeople]);
+
+  const [wfOpen, setWfOpen] = useState(false);
+  useEffect(() => {
+    if (workforceOpen) {
+      const frame = requestAnimationFrame(() => setWfOpen(true));
+      return () => cancelAnimationFrame(frame);
+    }
+    setWfOpen(false);
+    return undefined;
+  }, [workforceOpen]);
+
+  // A person already lit somewhere on this map keeps that light and is reached
+  // by a thread — never redrawn as a second dot (rule 62), exactly as a family
+  // member who already sits at a table is.
+  const wfSeated = new Set(
+    wfPeople.filter((p) => seatedIds.has(p.actor_id)).map((p) => p.actor_id),
+  );
+  const wfRing = wfPetals.filter((p) => !(p.actorId != null && wfSeated.has(p.actorId)));
 
   const insideOf = (houseId: number) =>
     familyMembers.filter((m) => m.household_id === houseId && !seatedIds.has(m.person_id));
@@ -576,6 +669,18 @@ export function RealWorldGraph({
         <g transform={`translate(${cam.x} ${cam.y}) scale(${cam.k})`}>
         <rect width={VIEW_W} height={VIEW_H} fill="url(#rw-grid)" pointerEvents="none" />
 
+        {/* Folds into the workforce light on a world-swap. It sits INSIDE the
+            camera, anchored on the light's world position, so the fold happens
+            where the light really is on screen however the sky has been panned
+            — and ColonyPanel hands the other world that same screen point. */}
+        <g
+          className="colony-world-morph"
+          style={morphStyle(open, {
+            cx: wf?.cx ?? WORKFORCE_ANCHOR.cx, cy: wf?.cy ?? WORKFORCE_ANCHOR.cy,
+          })}
+          pointerEvents={open ? undefined : "none"}
+        >
+
         {institutions.length > 0 && (
           <text
             x={118} y={118}
@@ -812,19 +917,125 @@ export function RealWorldGraph({
           });
         })}
 
+        {/* Threads to workforce people who already have a light of their own. */}
+        {workforceOpen && wfPeople.map((p) => {
+          if (!wfSeated.has(p.actor_id)) return null;
+          const lit = lights.find((l) => l.id === p.actor_id);
+          if (!lit) return null;
+          const d = edgePath(wf.cx, wf.cy, lit.x, lit.y, 0.1);
+          return (
+            <g key={`wf-thread-${p.membership_id}`} className="rw-family-link">
+              <path d={d} fill="none" stroke="#fbbf24" strokeWidth={1.4}
+                    opacity={wfOpen ? 0.4 : 0} />
+            </g>
+          );
+        })}
+
+        {workforceOpen && wfRing.map((petal, i) => {
+          const at = workforcePetal(i, wfRing.length);
+          const px = wf.cx + at.x;
+          const py = wf.cy + at.y;
+          const hex = accentFor(petal.accent).hex;
+          const r = petal.human ? 4.6 : 5.4;
+          return (
+            <g key={`wf-petal-${petal.key}`}>
+              <line
+                x1={wf.cx} y1={wf.cy} x2={px} y2={py}
+                stroke={petal.human ? "#fbbf24" : hex} strokeWidth={1}
+                className="rw-family-link"
+                opacity={wfOpen ? 0.34 : 0}
+              />
+              <g
+                className="rw-petal cursor-pointer"
+                transform={`translate(${px} ${py})`}
+                opacity={wfOpen ? 1 : 0}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (petal.actorId != null) onSelectActor(petal.actorId);
+                  else onSelectWorkforce();
+                }}
+              >
+                <g style={{
+                  transform: wfOpen ? "scale(1)" : "scale(0.15)",
+                  transformOrigin: "0px 0px",
+                  transition: "transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)",
+                }}>
+                  <circle r={r * 3.2} fill={hex} opacity={petal.live ? 0.3 : 0.14}
+                          filter="url(#rw-glow)" />
+                  <circle r={r * 1.8} fill={hex} opacity={0.26} />
+                  <circle r={r} fill={petal.paused ? "#64748b" : "#fff7ed"} />
+                  <circle r={r * 0.45} fill="#ffffff" />
+                  {/* A person on the workforce wears a ring, so a real friend
+                      is never mistaken for one of the agents. */}
+                  {petal.human && (
+                    <circle r={r + 3.6} fill="none" stroke="#fbbf24" strokeWidth={1}
+                            opacity={0.75} />
+                  )}
+                  <text
+                    y={r + 13}
+                    textAnchor="middle"
+                    className={petal.human ? "fill-amber-100 text-[11px]" : "fill-slate-300 text-[11px]"}
+                    style={{ paintOrder: "stroke", stroke: "#05060a", strokeWidth: 3 }}
+                  >
+                    {petal.label}
+                  </text>
+                </g>
+              </g>
+            </g>
+          );
+        })}
+
         <g className="cursor-pointer" onClick={onSelectWorkforce}>
           <circle cx={wf.cx} cy={wf.cy} r={32} fill="#fbbf24" opacity="0.22" filter="url(#rw-glow)" />
           <circle cx={wf.cx} cy={wf.cy} r={16} fill="#fbbf24" opacity="0.2" className="colony-live-pulse" />
-          <circle cx={wf.cx} cy={wf.cy} r={6.5} fill="#fff7ed" />
-          <circle cx={wf.cx} cy={wf.cy} r={3.5} fill="#ffffff" />
+          {workforceOpen && (
+            <circle cx={wf.cx} cy={wf.cy} r={40} fill="none" stroke="#fbbf24"
+                    strokeWidth={1.2} opacity={wfOpen ? 0.5 : 0}
+                    className="rw-family-link" />
+          )}
+          {/* A real hit area: the drawn core is 6.5px and was almost
+              unclickable at the default zoom. */}
+          <circle cx={wf.cx} cy={wf.cy} r={26} fill="transparent" />
+          <circle cx={wf.cx} cy={wf.cy} r={6.5} fill="#fff7ed" pointerEvents="none" />
+          <circle cx={wf.cx} cy={wf.cy} r={3.5} fill="#ffffff" pointerEvents="none" />
           <text x={wf.cx} y={wf.cy + 28} textAnchor="middle" fill="#fde68a" className="text-[12px]"
+                pointerEvents="none"
                 style={{ paintOrder: "stroke", stroke: "#05060a", strokeWidth: 3 }}>
             Bahá'í Workforce
           </text>
+          {!workforceOpen && (
+            <text x={wf.cx} y={wf.cy + 42} textAnchor="middle" fill="#94a3b8"
+                  className="text-[10px]" pointerEvents="none"
+                  style={{ paintOrder: "stroke", stroke: "#05060a", strokeWidth: 3 }}>
+              click to open
+            </text>
+          )}
         </g>
+        </g>
+
+        </g>
+
+        {/* The hinge: the one body that belongs to both skies. It fades up as
+            this world folds away, and the other world's copy takes over from it
+            at the same pixel. Drawn OUTSIDE the camera, in screen units, so it
+            is the same size in both worlds however this one is zoomed. */}
+        <g
+          className="colony-world-morph"
+          pointerEvents="none"
+          style={{ opacity: open ? 0 : 1 }}
+        >
+          <circle cx={cam.x + wf.cx * cam.k} cy={cam.y + wf.cy * cam.k} r={32}
+                  fill="#fbbf24" opacity="0.22" filter="url(#rw-glow)" />
+          <circle cx={cam.x + wf.cx * cam.k} cy={cam.y + wf.cy * cam.k} r={6.5}
+                  fill="#fff7ed" />
+          <circle cx={cam.x + wf.cx * cam.k} cy={cam.y + wf.cy * cam.k} r={3.5}
+                  fill="#ffffff" />
         </g>
       </svg>
 
+      {/* The overlays fade with the sky they belong to, so a world-swap moves
+          the whole view rather than leaving a legend floating over a fold. */}
+      <div className="colony-world-morph" style={{ opacity: open ? 1 : 0 }}>
       <div className="pointer-events-none absolute bottom-4 left-4 max-w-[260px] space-y-1.5 rounded-lg
                       border border-slate-800/80 bg-slate-950/70 px-3 py-2.5 text-[11px]
                       text-slate-400 backdrop-blur">
@@ -900,6 +1111,7 @@ export function RealWorldGraph({
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -909,6 +1121,27 @@ function shortName(name: string, kind: string): string {
   if (kind === "collective") return name.length > 22 ? "the gathering" : name;
   const parts = name.split(" ");
   return parts[0] || name;
+}
+
+/**
+ * Where the i-th body sits when the workforce light opens.
+ *
+ * A fan to the RIGHT, in rings of six: the institution column sits to the
+ * left of the workforce and a full circle would drop names on top of it. The
+ * ellipse is rounder than the tables' TILT because a dozen labels squeezed
+ * onto a flat orbit overlap at the top and bottom of the ring.
+ */
+const WF_FAN_TILT = 0.78;
+const WF_RING_SIZE = 6;
+function workforcePetal(i: number, total: number): { x: number; y: number } {
+  const ring = Math.floor(i / WF_RING_SIZE);
+  const inRing = i % WF_RING_SIZE;
+  const remaining = total - ring * WF_RING_SIZE;
+  const n = Math.min(WF_RING_SIZE, remaining);
+  const r = 88 + ring * 46;
+  const span = (160 * Math.PI) / 180;
+  const ang = n === 1 ? 0 : -span / 2 + (inRing / (n - 1)) * span;
+  return { x: r * Math.cos(ang), y: r * WF_FAN_TILT * Math.sin(ang) };
 }
 
 function emberOpacity(days: number | null | undefined): number {

@@ -76,6 +76,19 @@ input[type="range"] {
   transform-box: fill-box;
 }
 
+/* Switching between the Digital and Real worlds: everything on screen folds
+   into the Bahá'í Workforce light, and the other world grows back out of it.
+   The duration is mirrored by WORLD_MORPH_MS in colony/layout.ts, which is what
+   sequences the swap in ColonyPanel — change both together. */
+.colony-world-morph {
+  /* The fade is DELAYED so the bodies are still visible while they travel —
+     fading them out from the first frame would hide the very thing the swap is
+     showing, and they would just wink out. Growing back, the same delay reads
+     as the sky materialising as it comes out of the dot. */
+  transition: transform 380ms cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 260ms ease 120ms;
+}
+
 .rw-petal {
   transition: opacity 0.3s ease;
 }
@@ -94,7 +107,8 @@ input[type="range"] {
 
 @media (prefers-reduced-motion: reduce) {
   .rw-petal,
-  .rw-family-link {
+  .rw-family-link,
+  .colony-world-morph {
     transition: none;
   }
   .colony-edge-flow,

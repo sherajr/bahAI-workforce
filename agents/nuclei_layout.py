@@ -158,6 +158,17 @@ def is_institution_row(g: dict) -> bool:
     return g.get("kind_slug") == "institution"
 
 
+def is_workforce_row(g: dict) -> bool:
+    """The Bahá'í Workforce keeps its own fixed light (rule 65).
+
+    It is a real grouping so that joining it is an ordinary membership, but
+    it is never a table on the sky: it takes no chair, it takes no slot
+    index (so a new nucleus cannot slide onto it), and its members get no
+    seat from it — they open out of it like a family opens (rule 62).
+    """
+    return g.get("kind_slug") == "workforce"
+
+
 def institution_chair(index: int) -> dict:
     if index < len(INSTITUTION_SLOTS):
         return dict(INSTITUTION_SLOTS[index])
@@ -268,6 +279,8 @@ def assign_slots(groupings: list[dict],
     table_i = 0
     inst_i = 0
     for g in ordered:
+        if is_workforce_row(g):
+            continue
         institution = is_institution_row(g)
         chair = chair_for(g, inst_i if institution else table_i)
         if institution:

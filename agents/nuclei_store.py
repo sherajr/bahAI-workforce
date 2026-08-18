@@ -44,6 +44,19 @@ POSTURE_SLUGS = ("protagonist",)
 
 ACTOR_KINDS = ("person", "household", "collective")
 
+# The Bahá'í Workforce is a real place on this map, not a decoration: a
+# singleton grouping of its own kind, so adding a person to it is an ordinary
+# membership row and every existing gate, drawer and query works unchanged
+# (rule 65). Its slug is stable so the layout can pin it to its fixed chair.
+WORKFORCE_KIND = "workforce"
+WORKFORCE_SLUG = "bahai_workforce"
+WORKFORCE_NAME = "Bahá'í Workforce"
+
+# Channels a grouping can be reached on. WhatsApp GROUPS only — a channel row
+# never holds a person's number (rule 60); one-to-one numbers live in
+# Abigail's own contacts table and only there (rule 28).
+CHANNEL_KINDS = ("whatsapp_group",)
+
 # Worldwide bodies we briefly seeded; they do not belong on this local map.
 RETIRED_INSTITUTION_SLUGS = (
     "universal_house_of_justice",
@@ -243,6 +256,15 @@ def init_db(db_path: Path | str | None = None):
                 received_at TEXT,
                 pending_action_id INTEGER
             );
+            CREATE TABLE IF NOT EXISTS grouping_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                grouping_id INTEGER NOT NULL REFERENCES groupings(id),
+                kind TEXT NOT NULL DEFAULT 'whatsapp_group',
+                label TEXT,
+                link TEXT,
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                ended_at TEXT
+            );
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
@@ -255,6 +277,7 @@ def init_db(db_path: Path | str | None = None):
         _migrate_groupings(conn)
         _retire_worldwide_institutions(conn)
         _restack_institutions(conn)
+        _ensure_workforce_row(conn)
         conn.commit()
 
 
@@ -294,6 +317,38 @@ def is_institution(g: dict | None) -> bool:
     if not g:
         return False
     return g.get("kind_slug") == "institution"
+
+
+def is_workforce(g: dict | None) -> bool:
+    if not g:
+        return False
+    return g.get("kind_slug") == WORKFORCE_KIND
+
+
+def _ensure_workforce_row(conn: sqlite3.Connection):
+    """One workforce, always present, always the same row (rule 65).
+
+    Created here rather than through create_grouping so it can never be
+    given a table chair: nuclei_layout pins it at its own fixed light and
+    assign_slots skips it, so a new nucleus never slides onto it.
+    """
+    row = conn.execute(
+        "SELECT id FROM groupings WHERE slug = ?", (WORKFORCE_SLUG,)
+    ).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE groupings SET archived_at = NULL WHERE id = ?", (row["id"],)
+        )
+        return
+    kind = conn.execute(
+        "SELECT id FROM grouping_kinds WHERE slug = ?", (WORKFORCE_KIND,)
+    ).fetchone()
+    if not kind:
+        return
+    conn.execute(
+        "INSERT INTO groupings (kind_id, name, slug) VALUES (?, ?, ?)",
+        (kind["id"], WORKFORCE_NAME, WORKFORCE_SLUG),
+    )
 
 
 def _retire_worldwide_institutions(conn: sqlite3.Connection):
@@ -352,6 +407,7 @@ def _seed_kinds(conn: sqlite3.Connection):
         ("junior_youth", "Junior youth families", 0, "rose", 3),
         ("other", "Other grouping", 0, "amber", 4),
         ("institution", "Institution of the Faith", 0, "gold", 5),
+        ("workforce", "The Bahá'í Workforce", 0, "amber", 6),
     ]
     for slug, label, is_n, accent, order in groupings:
         conn.execute(
@@ -488,6 +544,9 @@ def create_grouping(kind_slug: str, name: str,
     name = (name or "").strip()
     if not name:
         raise ValueError("A grouping needs a name")
+    if kind_slug == WORKFORCE_KIND:
+        # There is exactly one workforce and init_db already made it.
+        raise ValueError("There is only one Bahá'í Workforce")
     if kind_slug == "institution" and name == "Local Assembly":
         name = "Local Spiritual Assembly"
     kind_id = _kind_id("grouping_kinds", kind_slug, db_path)
@@ -629,8 +688,10 @@ def optimize_layout(db_path: Path | str | None = None) -> dict:
     from agents.nuclei_layout import optimize_positions
     init_db(db_path)
     owner = ensure_owner(db_path)
+    # The workforce keeps its own fixed light, so it is never arranged
+    # with the tables and never given a pos_x/pos_y (rule 65).
     community = [g for g in list_groupings(db_path, include_archived=True)
-                 if not is_institution(g)]
+                 if not is_institution(g) and not is_workforce(g)]
     positions = optimize_positions(
         community,
         live_memberships(db_path),
@@ -1222,6 +1283,161 @@ def quiet_lights(db_path: Path | str | None = None) -> list[dict]:
 
 # --- snapshot (the map's one payload) ---
 
+# --- The Bahá'í Workforce as a place (rules 65-67) -----------------------------
+
+def workforce_grouping(db_path: Path | str | None = None) -> dict:
+    """The one workforce row. Created by init_db, never by create_grouping."""
+    with _connect(db_path) as conn:
+        _ensure_workforce_row(conn)
+        conn.commit()
+    for g in list_groupings(db_path):
+        if g.get("slug") == WORKFORCE_SLUG:
+            return g
+    raise RuntimeError("The workforce grouping is missing")
+
+
+def workforce_members(db_path: Path | str | None = None) -> list[dict]:
+    """The people who work alongside the agents. Names, and what they do here.
+
+    Rule 60: nothing here a depicted person could not also see — a chosen
+    name and a role sentence. `introduced_as` is the existing membership
+    column; no new personal field is invented for this.
+    """
+    wf = workforce_grouping(db_path)
+    out = []
+    for m in live_memberships(db_path):
+        if int(m["grouping_id"]) != int(wf["id"]):
+            continue
+        actor = get_actor(int(m["actor_id"]), db_path)
+        if not actor or actor.get("archived_at"):
+            continue
+        out.append({
+            "membership_id": int(m["id"]),
+            "actor_id": int(actor["id"]),
+            "display_name": actor["display_name"],
+            "kind": actor["kind"],
+            "role": m.get("introduced_as") or "",
+            "since": m.get("created_at"),
+        })
+    return out
+
+
+def add_workforce_person(display_name: str | None = None,
+                         actor_id: int | None = None,
+                         role: str | None = None,
+                         db_path: Path | str | None = None) -> dict:
+    """Put a real person on the workforce — a new one, or a friend already here.
+
+    A person already lit somewhere on the map keeps that light (rule 62);
+    joining the workforce adds a membership, never a second dot.
+    """
+    wf = workforce_grouping(db_path)
+    if actor_id is None:
+        name = (display_name or "").strip()
+        if not name:
+            raise ValueError("Give the person a name")
+        actor = create_actor("person", name, db_path=db_path)
+        actor_id = int(actor["id"])
+    else:
+        actor = get_actor(int(actor_id), db_path)
+        if not actor:
+            raise ValueError("No such friend")
+        if actor.get("kind") != "person":
+            raise ValueError("Only a person can join the workforce")
+        actor_id = int(actor["id"])
+    mem = add_membership(actor_id, int(wf["id"]), introduced_as=role, db_path=db_path)
+    if role and not (mem.get("introduced_as") or "").strip():
+        with _connect(db_path) as conn:
+            conn.execute(
+                "UPDATE memberships SET introduced_as = ? WHERE id = ?",
+                (role.strip(), int(mem["id"])),
+            )
+            conn.commit()
+    return {"actor_id": actor_id, "membership_id": int(mem["id"])}
+
+
+def remove_workforce_person(membership_id: int,
+                            db_path: Path | str | None = None) -> dict:
+    """Take someone off the workforce. The person stays on the map."""
+    wf = workforce_grouping(db_path)
+    mem = get_membership(int(membership_id), db_path)
+    if not mem or int(mem["grouping_id"]) != int(wf["id"]):
+        raise ValueError("That is not a workforce membership")
+    end_membership(int(membership_id), db_path)
+    return {"result": "ok"}
+
+
+# --- Channels: the WhatsApp group a nucleus already talks in (rule 66) ---------
+
+def set_grouping_channel(grouping_id: int, label: str | None = None,
+                         link: str | None = None, kind: str = "whatsapp_group",
+                         db_path: Path | str | None = None) -> dict:
+    """Note the WhatsApp GROUP a table already uses. Never a person's number.
+
+    Rule 60 still holds: no phone column exists here and none is added. A
+    group invite link is what every member of that group can already see.
+    """
+    if kind not in CHANNEL_KINDS:
+        raise ValueError("Only a WhatsApp group can be noted here")
+    g = get_grouping(int(grouping_id), db_path)
+    if not g:
+        raise ValueError("No such grouping")
+    label = (label or "").strip() or None
+    link = (link or "").strip() or None
+    if not label and not link:
+        raise ValueError("Give the group a name or a link")
+    if link and not link.lower().startswith(("https://chat.whatsapp.com/", "https://wa.me/")):
+        raise ValueError(
+            "A WhatsApp group link looks like https://chat.whatsapp.com/…"
+        )
+    now = _now()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE grouping_channels SET ended_at = ? "
+            "WHERE grouping_id = ? AND kind = ? AND ended_at IS NULL",
+            (now, int(grouping_id), kind),
+        )
+        cur = conn.execute(
+            "INSERT INTO grouping_channels (grouping_id, kind, label, link) "
+            "VALUES (?, ?, ?, ?)",
+            (int(grouping_id), kind, label, link),
+        )
+        conn.commit()
+        cid = cur.lastrowid
+    return get_grouping_channel(int(cid), db_path)
+
+
+def get_grouping_channel(channel_id: int,
+                         db_path: Path | str | None = None) -> dict | None:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM grouping_channels WHERE id = ?", (int(channel_id),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_grouping_channels(grouping_id: int | None = None,
+                           db_path: Path | str | None = None) -> list[dict]:
+    sql = "SELECT * FROM grouping_channels WHERE ended_at IS NULL"
+    args: tuple = ()
+    if grouping_id is not None:
+        sql += " AND grouping_id = ?"
+        args = (int(grouping_id),)
+    sql += " ORDER BY id"
+    with _connect(db_path) as conn:
+        return _rows(conn.execute(sql, args))
+
+
+def remove_grouping_channel(channel_id: int, db_path: Path | str | None = None) -> dict:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE grouping_channels SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+            (_now(), int(channel_id)),
+        )
+        conn.commit()
+    return {"result": "ok"}
+
+
 FORBIDDEN_SNAPSHOT_KEYS = (
     "phone", "email", "address", "notes", "private_note", "score",
     "grade", "receptiveness", "spiritual", "rank",
@@ -1247,6 +1463,7 @@ def snapshot(db_path: Path | str | None = None) -> dict:
         if a["kind"] == "person" and int(a["id"]) != int(owner["id"]):
             embers[str(a["id"])] = days_since_sat(int(a["id"]), db_path)
     houses = live_household_members(db_path)
+    wf = workforce_grouping(db_path)
     from agents.nuclei_layout import layout_real_world
     layout = layout_real_world(
         all_groupings, actors, memberships, facets_by_mem, counts, houses, ties,
@@ -1277,6 +1494,18 @@ def snapshot(db_path: Path | str | None = None) -> dict:
         "layout": layout,
         "quiet_after_days": int(get_setting("quiet_after_days", "35", db_path) or "35"),
         "workforce": dict(layout["workforce"]),
+        # The workforce is a grouping like any other, so the people on it are
+        # ordinary memberships — but it is never a table on the sky: it keeps
+        # its own fixed light and opens like a family (rule 65).
+        "workforce_grouping_id": int(wf["id"]),
+        "workforce_members": workforce_members(db_path),
+        "channels": [
+            {
+                "id": c["id"], "grouping_id": c["grouping_id"], "kind": c["kind"],
+                "label": c["label"], "link": c["link"],
+            }
+            for c in list_grouping_channels(db_path=db_path)
+        ],
     }
     _assert_shareable_obj(out)
     return out
