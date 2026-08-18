@@ -20,6 +20,7 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 42–49 | The project wallet |
 | 50–54 | Abigail and the teams |
 | 55–57 | Cancelling a run |
+| 59–64 | The Real World (nuclei) |
 
 ## Working norms
 
@@ -56,6 +57,7 @@ python scripts/test_secretary_colony.py    # Abigail <-> the teams: 92 checks
 python scripts/test_job_cancel.py          # Cancelling a run: 24 checks
 python scripts/test_wallet.py              # Wallet: 90 checks, no network/keys
 python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
+python scripts/test_nuclei.py              # Real World (nuclei): 130 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -925,6 +927,24 @@ Verify with `scripts/test_job_cancel.py` (real worker threads, fake runners).
     "stopped", because the step in flight has to finish first. Job ids are
     random 8-char uuids, never a sequence, so a cancelled run can never collide
     with or renumber a later one.
+
+## Rules 59–64 — the Real World (nuclei)
+
+The Colony tab's other sky: Sheraj's nuclei and friends. Design in
+`private/nuclei/`. Data in `private/nuclei.db`. Verify with
+`scripts/test_nuclei.py`.
+
+59. **Community data lives in `private/nuclei.db` via `nuclei_store.py` and only there.** Follows `secretary_store.py`: one git-ignored SQLite file. Nothing personal in `workforce.db`, `log_run` summaries, job progress strings, stdout, or any committed file — including seeds, fixtures, tests and screenshots. Tests build invented people in a temp directory and must refuse to open `private/nuclei.db`. `assert_test_db(path)` is the gate.
+
+60. **Models may read a shareable snapshot; they may not read private detail, and they may not write.** The store holds only what a depicted friend could also see: chosen name, groupings, the two lists, gatherings (who / kind / when), study as sentences, ties, gifts by theme. No phone, email, address, or intimate-note column exists. An unprompted model write is a bug. `assert_shareable` still runs on anything that later crosses into `workforce.db`.
+
+61. **Never score a person's spiritual condition.** Count actions, not interior states. The largest numbers point at the owner (his consistency), never at a ranking of friends. No grade, percentage, heat-map of receptiveness, or "spiritual growth" figure on any human being.
+
+62. **One light per person. Each nucleus is its own point of light; distance to each is about that nucleus.** Default chairs are by `created_at` then `id` (a seventh table spirals out — never `i % 6` on top of the first). `pos_x`/`pos_y` is an owner override: a drag, or Arrange / Optimize locations, which is deterministic from size, shared people, recorded gatherings and ties — not a physics sim on every load. The owner is excluded from that affinity so his seat at every nucleus cannot collapse the map (rule 61). A person is placed once: a target on each grouping's own rings (core service close, connected far); the seat is the engagement-weighted average, boosted by recorded gatherings. They are not copied. A household lists its people (`household_members`); the same person may sit in a family and serve on an institution. A family-only person lives inside the household light until that family is opened (petals). Someone who already sits elsewhere stays there; opening the family draws a thread. Walking with someone is service for a particular grouping (a directed tie), not a seat at that table — the one who walks sits near the work and is not made a member. Leaving an institution ends that membership only. A neighbour arriving does not change anyone's seat; lights that would cover each other (dots or names) are then squeezed apart by the smallest step that keeps every label readable — never a physics shuffle on load, never a score. Friends who serve a local institution sit on an even ring outside its light, not in a pile on the core. Taking a friend off the map archives them (ends live memberships, keeps gatherings); the owner's light cannot be archived. Local institutions of the Faith (LSA, Regional Institute, Auxiliary Board, Area Teaching Committee, and any the owner names) sit in a column left of the Workforce. The owner adds and rarely archives them; worldwide bodies are not on this map. Nuclei are points of light (the Vision in that place), not a single central sphere and not Colony agent-bodies.
+
+63. **Grouping kinds, axes, facet kinds, tie kinds, activity kinds and institute units are DATA.** Adding a relationship type a year from now is an `INSERT`. Participation and service are two lists: service sits closer; core-activity kinds carry `is_core`. Do not hardcode the spreadsheet's six columns as an enum or a linear funnel.
+
+64. **A workforce gift stores a `product_id` and a theme, never a friend's name, and `workforce.db` never learns who a gathering is for.** Job progress strings stay mechanical.
 
 ## Gotchas
 

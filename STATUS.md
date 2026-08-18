@@ -19,7 +19,7 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-08-16)
+## Snapshot (as of 2026-08-17)
 
 **Live and working** (committed, in production):
 - **Bookmark pipeline** (Librarian → Artist → consultation → Scribe → Reviewer
@@ -45,9 +45,16 @@ claiming otherwise: **the Colony** (rules 35–41a), **the project wallet** (42�
 **finished-video shelf** (58). Sheraj has still not reviewed that pile by hand —
 "committed" is not "reviewed".
 
-**Uncommitted in the working tree**: nothing. The Colony map's performance
-finish (rule 41b) went up on 2026-08-16. Re-derive this line with `git status`
-before trusting it — it has been wrong before, in this exact way.
+**Uncommitted in the working tree**: the **Real World view** of the Colony
+(nuclei and friends). Design lived in `private/nuclei/` (git-ignored);
+implementation is in the tree: `agents/nuclei_store.py`,
+`agents/nuclei_layout.py`, `/nuclei/*` endpoints, Colony tab
+Digital/Real World toggle (drag tables + Optimize locations;
+remove a friend from a table or the map; people-dots squeeze
+and never cover; local institutions sit left of the Workforce
+and can be added or rarely removed; the map zooms and pans),
+`scripts/test_nuclei.py` (130 checks), rules 59–64 in AGENTS.md.
+Not committed. Re-derive with `git status`.
 
 **Deferred / proposed, not started** (nobody should re-discover these from
 scratch):
@@ -75,6 +82,161 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-08-17 — Grok (grok-4.6), direct — Assembly people reach their family
+Owner: clicking the Local Spiritual Assembly should line a friend to
+their JY family name. A family is not a table seat, so it was missed.
+Any institution or nucleus now continues from each person to their
+household, same for every family.
+
+### 2026-08-17 — Grok (grok-4.6), direct — a nucleus that reaches You stops there
+Owner: clicking All You Can Eat lit You and then every other nucleus,
+because You sit at all of them. From You, a nucleus now only continues
+to walks recorded for that table — not to Scattered, JY, and the rest.
+Other friends at that table still continue to their walks and tables.
+
+### 2026-08-17 — Grok (grok-4.6), direct — LSA name; nucleus lines keep going
+Owner: the map said Local Assembly — it is Local Spiritual Assembly
+(two-line label). Clicking an institution or nucleus now continues
+from each person there to who they walk with and the other tables
+they sit at. JY still only shows walks recorded for JY. 130/130.
+
+### 2026-08-17 — Grok (grok-4.6), direct — walks stay on their own work
+Owner: clicking JY showed a friend who walks with You for a different
+nucleus. A walk is for one work only. Clicking a table now shows only
+walks recorded for that table — not every walk of everyone who sits there.
+
+### 2026-08-17 — Grok (grok-4.6), direct — walk reaches a table through the friend
+Owner: clicking Scattered drew a straight line to a friend who walks
+with You. A walk is person-to-person; the table only joins people who
+sit there. Path is now table -> You -> the friend, never table -> walker.
+
+### 2026-08-17 — Grok (grok-4.6), direct — walking-with form starts empty
+Owner: the three Walking with dropdowns were pre-filled (You, JY).
+They now open on the placeholders: who walks with them, who they
+walk with, and for which work.
+
+### 2026-08-17 — Grok (grok-4.6), direct — walking-with threads only on click
+Owner: a friend's line to You stayed lit. Accompaniment threads were
+drawn all the time (and kept flowing when dimmed). They now appear
+only when you click one of the two people or the work, same as every
+other connection. `RealWorldGraph.tsx`.
+
+### 2026-08-17 — Grok (grok-4.6), direct — accompaniment is a way to serve
+Owner: walking with someone for a particular work (for example JY)
+is service, not a seat at that table. Directed `accompanying` tie
+names the work; the walker sits near it and is not made a member.
+Person and grouping drawers record who walks with whom. Clicking JY
+draws lines to both people. Rule 62. `scripts/test_nuclei.py` 129/129.
+Official API restarted (scheduled task).
+
+### 2026-08-17 — Grok (grok-4.6), direct — JY click reaches families and people
+Clicking Junior Youth still links to each family, then also to the
+people in those families (petals for family-only members, threads to
+anyone who already sits elsewhere).
+
+### 2026-08-17 — Grok (grok-4.6), direct — click any light to see connections
+Clicking a person, family, nucleus or institution draws every link:
+family, tables they sit at, institutions they serve, accompaniment.
+Unrelated accompaniment threads quiet down while something is selected.
+
+### 2026-08-17 — Grok (grok-4.6), direct — family lights bloom
+Family-only people sit inside the household light. Click the family and
+they open like petals; members who already sit at an institution stay
+there and a gold thread joins them to the family. `scripts/test_nuclei.py`
+110/110.
+
+### 2026-08-17 — Grok (grok-4.6), direct — JY families and leaving institutions
+Owner: list people in JY families; the same friend can be in a family
+and on the Local Assembly; take someone off an institution without
+taking them off the map. `household_members` table. Grouping drawer
+adds someone already on the map and can end a membership. Household
+drawer lists / adds / removes family members. Rule 62 one light.
+`scripts/test_nuclei.py` 108/108.
+
+### 2026-08-17 — Grok (grok-4.6), direct — institution orbits grow with people
+Owner: institution rings should grow like nuclei. `institution_radius`
+uses the same start-equal / grow-with-own-people rule (smaller base
+and cap). People sit on that orbit. The map draws three rings so the
+growth is visible. `scripts/test_nuclei.py` 98/98.
+
+### 2026-08-17 — Grok (grok-4.6), direct — tighten institution spacing
+Owner: people (especially around institutions) sat too far out. Seat
+ring and name-pad pulled in; institution column restacked closer
+(~100px apart). One-time clear of auto-saved institution chairs so
+the live map picks it up. Names still must not cover. 94/94.
+
+### 2026-08-17 — Grok (grok-4.6), direct — spread institution seats and names
+People at a local institution were piling on its core. They now sit on
+an even ring outside the light (wider as more friends arrive). After
+seats are chosen, lights are separated so first-name labels do not
+cover each other, not only the dots. `scripts/test_nuclei.py` 94/94.
+
+### 2026-08-17 — Grok (grok-4.6), direct — Real World zoom and pan
+Owner asked to zoom and move the map. Real World: scroll / pinch-as-wheel
+zooms toward the cursor; drag empty sky to pan; + − and Show all in the
+corner. Table-drag still places a nucleus. Camera remembered in
+colony UI localStorage so switching tabs does not reset it.
+
+### 2026-08-16 — Grok (grok-4.6), direct — local institutions, owner-added
+Owner: House of Justice, National Assembly and Counsellors do not
+belong on this map. Those seeded rows are archived on startup.
+Local bodies (LSA, Regional Institute, Auxiliary Board, Area Teaching
+Committee, or any name) are added from the Real World bar and rarely
+removed like a nucleus. They sit in a column left of the Workforce.
+`scripts/test_nuclei.py` 91/91.
+
+### 2026-08-16 — Grok (grok-4.6), direct — institutions of the Faith
+Owner asked for the institutions on the Real World map, left of the
+Workforce light. Four seeded lights (House of Justice, National
+Assembly, Counsellors, Local Assembly) sit in a fixed constellation —
+not dragged, not archived, not in the table grid. Click one to note
+who serves there; they sit close. You is not auto-seated. Rule 62.
+`scripts/test_nuclei.py` 90/90.
+
+### 2026-08-16 — Grok (grok-4.6), direct — people-dots squeeze, never cover
+Owner: individual lights were stacking. After each person's seat is
+chosen, `_separate_lights` nudges covering dots apart by the smallest
+step (You moves less) and keeps them in a tight cluster — not a shuffle.
+A neighbour who is not sitting on anyone leaves every other light where
+it was (rule 62). `scripts/test_nuclei.py` 80/80.
+
+### 2026-08-16 — Grok (grok-4.6), direct — take a friend off the map
+Owner asked to remove people the same way a nucleus can leave the map.
+`archive_actor` sets `archived_at` and ends live memberships; gatherings
+stay; You cannot be archived (rule 62). Click a friend: "They no longer
+sit here" if they sit at more than one table, and "Remove from the map…"
+with the same confirm as a nucleus. `POST /nuclei/actors/{id}/archive`.
+`scripts/test_nuclei.py` 76/76. API restarted on :8765 without --reload.
+Verified live: You has no remove button; a friend's drawer does.
+
+### 2026-08-16 — Grok (grok-4.6), direct — drag nuclei + Optimize locations
+A seventh table was still covering a neighbour (`i % 6` stacked chairs).
+Default chairs now use the 2x3 grid then the holes between them. You can
+drag a table; the place is stored as `pos_x`/`pos_y` on that grouping
+only. **Optimize locations** rearranges from size, shared people,
+gatherings and ties (deterministic, owner excluded from affinity so his
+seat at every nucleus cannot clump the map). Rule 62 updated.
+`PATCH /nuclei/groupings/{id}/position`, `POST /nuclei/layout/optimize`.
+`scripts/test_nuclei.py` 64/64. API restarted on :8765 without --reload.
+Verified in the live dashboard: 7 distinct tables, button present, a
+drag does not open the drawer.
+
+### 2026-08-16 — Grok (grok-4.6), direct — Real World view of the Colony
+Owner asked to implement the nuclei map after living with the
+`private/nuclei/` sketch. Grammar A: each nucleus is a point of light
+(the Vision in that place); people are smaller lights, once each;
+distance to each nucleus is how they walk with *that* table.
+
+`agents/nuclei_store.py` writes only to `private/nuclei.db` (rules 15/59).
+No intimate-note column (rule 60). Layout in `nuclei_layout.py` (rule 62).
+Colony tab: Digital World / Real World. Add a nucleus (you sit there);
+click it to add a friend; click the friend to mark gathering / service
+and "we sat together today." `scripts/test_nuclei.py` 45/45 (includes archive). API
+restarted on :8765 without --reload. Dashboard HMR has the UI.
+
+Left for later slices: gifts from the workforce, cycles, kinds editor,
+Abigail's read-only snapshot tool, multiplication.
 
 *Trimmed to the last 20 entries on 2026-08-16, per this file's own policy.
 Everything older is in `git log` — `git log -p -- STATUS.md` shows every entry

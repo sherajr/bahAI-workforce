@@ -76,6 +76,13 @@ input[type="range"] {
   transform-box: fill-box;
 }
 
+.rw-petal {
+  transition: opacity 0.3s ease;
+}
+.rw-family-link {
+  transition: opacity 0.35s ease;
+}
+
 .colony-sphere-sheen {
   animation: colony-sheen 5.5s ease-in-out infinite;
 }
@@ -86,6 +93,10 @@ input[type="range"] {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .rw-petal,
+  .rw-family-link {
+    transition: none;
+  }
   .colony-edge-flow,
   .colony-orbit-spin,
   .colony-live-pulse,

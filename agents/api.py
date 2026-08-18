@@ -73,6 +73,9 @@ def _web_image_path(local_path: str) -> str:
 @app.on_event("startup")
 def on_startup():
     init_db()
+    # Real World store — its own private file, never workforce.db (rule 59).
+    from agents import nuclei_store
+    nuclei_store.init_db()
     # Secretary's reminder scheduler — all state in private/secretary.db, so a
     # restart resumes exactly where it left off.
     from agents import scheduler
@@ -6384,6 +6387,312 @@ def video_subtitles(project_id: str):
     _video_project_or_404(project_id)
     return PlainTextResponse(video_assembly.export_subtitles(project_id),
                              media_type="text/plain; charset=utf-8")
+
+
+# --- Real World (nuclei) -------------------------------------------------------
+# Rules 15 / 59 / 60 / 61. Personal community data lives in private/nuclei.db
+# via nuclei_store.py only. These endpoints never write a name into
+# workforce.db. Nothing here is a score on a soul.
+
+
+def _nuclei():
+    from agents import nuclei_store
+    nuclei_store.init_db()
+    return nuclei_store
+
+
+def _nuclei_err(exc: Exception):
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    raise exc
+
+
+class NucleiGroupingIn(BaseModel):
+    kind_slug: str = "nucleus"
+    name: str
+
+
+class NucleiGroupingPatch(BaseModel):
+    name: Optional[str] = None
+
+
+class NucleiPositionIn(BaseModel):
+    x: float
+    y: float
+
+
+class NucleiActorIn(BaseModel):
+    kind: str = "person"
+    display_name: str
+    how_we_met: Optional[str] = None
+    grouping_id: Optional[int] = None
+    introduced_as: Optional[str] = None
+
+
+class NucleiActorPatch(BaseModel):
+    display_name: Optional[str] = None
+    how_we_met: Optional[str] = None
+
+
+class NucleiMembershipIn(BaseModel):
+    actor_id: int
+    grouping_id: int
+    introduced_as: Optional[str] = None
+    introduced_by_actor_id: Optional[int] = None
+
+
+class NucleiFacetIn(BaseModel):
+    membership_id: int
+    slug: str
+
+
+class NucleiActivityIn(BaseModel):
+    kind_slug: str = "gathering"
+    happened_at: Optional[str] = None
+    participant_ids: list[int] = []
+    grouping_id: Optional[int] = None
+    title: Optional[str] = None
+    host_ids: Optional[list[int]] = None
+
+
+class NucleiSatIn(BaseModel):
+    actor_id: int
+
+
+class NucleiTieIn(BaseModel):
+    kind_slug: str = "accompanying"
+    from_actor_id: int
+    to_actor_id: int
+    grouping_id: Optional[int] = None
+
+
+class NucleiHouseholdMemberIn(BaseModel):
+    person_id: Optional[int] = None
+    display_name: Optional[str] = None
+
+
+@app.get("/nuclei/snapshot")
+def nuclei_snapshot():
+    try:
+        return _nuclei().snapshot()
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.get("/nuclei/kinds")
+def nuclei_kinds():
+    return _nuclei().list_kinds()
+
+
+@app.post("/nuclei/groupings")
+def nuclei_create_grouping(req: NucleiGroupingIn):
+    try:
+        return _nuclei().create_grouping(req.kind_slug, req.name)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.patch("/nuclei/groupings/{grouping_id}")
+def nuclei_patch_grouping(grouping_id: int, req: NucleiGroupingPatch):
+    try:
+        return _nuclei().update_grouping(grouping_id, name=req.name)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.patch("/nuclei/groupings/{grouping_id}/position")
+def nuclei_set_position(grouping_id: int, req: NucleiPositionIn):
+    """Owner dragged this table. Neighbours stay put."""
+    ns = _nuclei()
+    try:
+        ns.set_grouping_position(grouping_id, req.x, req.y)
+        return ns.snapshot()
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/layout/optimize")
+def nuclei_optimize_layout():
+    """Rearrange every table from size, who gathers where, and who walks with whom."""
+    try:
+        return _nuclei().optimize_layout()
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/groupings/{grouping_id}/archive")
+def nuclei_archive_grouping(grouping_id: int):
+    """Take a nucleus off the map. Friends and gatherings stay (rule 62)."""
+    try:
+        return _nuclei().archive_grouping(grouping_id)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.get("/nuclei/groupings/{grouping_id}")
+def nuclei_get_grouping(grouping_id: int):
+    try:
+        return _nuclei().grouping_detail(grouping_id)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/actors")
+def nuclei_create_actor(req: NucleiActorIn):
+    ns = _nuclei()
+    try:
+        actor = ns.create_actor(req.kind, req.display_name, req.how_we_met)
+        if req.grouping_id:
+            mem = ns.add_membership(
+                actor["id"], req.grouping_id,
+                introduced_as=req.introduced_as,
+            )
+            ns.add_facet(mem["id"], "connected")
+        return ns.actor_detail(actor["id"])
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.patch("/nuclei/actors/{actor_id}")
+def nuclei_patch_actor(actor_id: int, req: NucleiActorPatch):
+    try:
+        _nuclei().update_actor(actor_id, display_name=req.display_name,
+                               how_we_met=req.how_we_met)
+        return _nuclei().actor_detail(actor_id)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.get("/nuclei/actors/{actor_id}")
+def nuclei_get_actor(actor_id: int):
+    try:
+        return _nuclei().actor_detail(actor_id)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/actors/{actor_id}/archive")
+def nuclei_archive_actor(actor_id: int):
+    """Take a friend off the map. Gatherings stay. You cannot remove yourself."""
+    try:
+        return _nuclei().archive_actor(actor_id)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/memberships")
+def nuclei_add_membership(req: NucleiMembershipIn):
+    try:
+        return _nuclei().add_membership(
+            req.actor_id, req.grouping_id,
+            introduced_as=req.introduced_as,
+            introduced_by_actor_id=req.introduced_by_actor_id,
+        )
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/memberships/{membership_id}/end")
+def nuclei_end_membership(membership_id: int):
+    try:
+        _nuclei().end_membership(membership_id)
+        return {"result": "ended"}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/households/{household_id}/members")
+def nuclei_add_household_member(household_id: int, req: NucleiHouseholdMemberIn):
+    ns = _nuclei()
+    try:
+        pid = req.person_id
+        if pid is None:
+            name = (req.display_name or "").strip()
+            if not name:
+                raise ValueError("Name someone in this family")
+            person = ns.create_actor("person", name)
+            pid = person["id"]
+        return ns.add_household_member(household_id, int(pid))
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/household-members/{member_id}/end")
+def nuclei_end_household_member(member_id: int):
+    try:
+        _nuclei().end_household_member(member_id)
+        return {"result": "ended"}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/facets")
+def nuclei_add_facet(req: NucleiFacetIn):
+    try:
+        return _nuclei().add_facet(req.membership_id, req.slug)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/facets/{facet_id}/end")
+def nuclei_end_facet(facet_id: int):
+    try:
+        _nuclei().end_facet(facet_id)
+        return {"result": "ended"}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/ties")
+def nuclei_add_tie(req: NucleiTieIn):
+    try:
+        if req.kind_slug == "accompanying":
+            if req.grouping_id is None:
+                raise ValueError("Walking with someone is for a particular work")
+            return _nuclei().add_accompaniment(
+                req.from_actor_id, req.to_actor_id, req.grouping_id,
+            )
+        return _nuclei().add_tie(
+            req.kind_slug, req.from_actor_id, req.to_actor_id, req.grouping_id,
+        )
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/ties/{tie_id}/end")
+def nuclei_end_tie(tie_id: int):
+    try:
+        _nuclei().end_tie(tie_id)
+        return {"result": "ended"}
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/activities")
+def nuclei_record_activity(req: NucleiActivityIn):
+    from datetime import datetime as _dt
+    when = (req.happened_at or "").strip() or _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        return _nuclei().record_activity(
+            req.kind_slug, when, req.participant_ids,
+            grouping_id=req.grouping_id, title=req.title,
+            host_ids=req.host_ids,
+        )
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.post("/nuclei/activities/sat-together")
+def nuclei_sat_together(req: NucleiSatIn):
+    try:
+        return _nuclei().sat_together(req.actor_id)
+    except Exception as e:
+        _nuclei_err(e)
+
+
+@app.get("/nuclei/quiet-lights")
+def nuclei_quiet_lights():
+    return {"items": _nuclei().quiet_lights()}
 
 
 # --- Health check ---

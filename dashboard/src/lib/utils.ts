@@ -142,6 +142,8 @@ export const TEAM_ACCENTS: Record<string, TeamAccent> = {
   sky:     { hex: "#38bdf8", text: "text-sky-300",     border: "border-sky-400/40",     bg: "bg-sky-400/10",     dot: "bg-sky-400" },
   violet:  { hex: "#a78bfa", text: "text-violet-300",  border: "border-violet-400/40",  bg: "bg-violet-400/10",  dot: "bg-violet-400" },
   emerald: { hex: "#34d399", text: "text-emerald-300", border: "border-emerald-400/40", bg: "bg-emerald-400/10", dot: "bg-emerald-400" },
+  rose:    { hex: "#fb7185", text: "text-rose-300",    border: "border-rose-400/40",    bg: "bg-rose-400/10",    dot: "bg-rose-400" },
+  gold:    { hex: "#e8d48b", text: "text-amber-100",   border: "border-amber-200/30",   bg: "bg-amber-100/10",   dot: "bg-amber-100" },
 };
 
 export function accentFor(accent: string | undefined): TeamAccent {

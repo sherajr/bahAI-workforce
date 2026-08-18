@@ -1290,3 +1290,148 @@ export interface WalletSendResult {
   to_label: string;
   explorer_url: string;
 }
+
+// Real World (nuclei). Names live only in private/nuclei.db.
+export interface NucleiKind {
+  id: number;
+  slug: string;
+  label: string;
+  is_nucleus?: number;
+  is_core?: number;
+  accent?: string;
+  axis_slug?: string;
+  exclusive?: number;
+  axis_exclusive?: number;
+}
+
+export interface NucleiGrouping {
+  id: number;
+  name: string;
+  kind_slug: string;
+  kind_label: string;
+  is_nucleus: number;
+  accent: string;
+  created_at: string;
+  slug?: string | null;
+  pos_x?: number | null;
+  pos_y?: number | null;
+}
+
+export interface NucleiActor {
+  id: number;
+  kind: "person" | "household" | "collective" | string;
+  display_name: string;
+  how_we_met: string | null;
+  created_at: string;
+  archived_at: string | null;
+}
+
+export interface NucleiFacet {
+  id: number;
+  slug: string;
+  label: string;
+  is_core: number;
+  axis_slug: string;
+}
+
+export interface NucleiMembership {
+  id: number;
+  actor_id: number;
+  grouping_id: number;
+  orbit_index: number;
+  introduced_as: string | null;
+  facets?: NucleiFacet[];
+  grouping_name?: string;
+  grouping_kind?: string;
+  is_nucleus?: boolean;
+}
+
+export interface NucleiTie {
+  id: number;
+  slug: string;
+  label: string;
+  from_actor_id: number;
+  to_actor_id: number;
+  grouping_id: number | null;
+  grouping_name?: string | null;
+  from_name?: string;
+  to_name?: string;
+  draw_style: string;
+}
+
+export interface NucleiLayoutGrouping {
+  id: number;
+  cx: number;
+  cy: number;
+  r: number;
+  is_nucleus: boolean;
+  is_institution?: boolean;
+  slug?: string | null;
+  accent: string;
+}
+
+export interface NucleiLayoutActor {
+  id: number;
+  x: number;
+  y: number;
+  home_grouping_id: number | null;
+  accent: string;
+}
+
+export interface NucleiSnapshot {
+  owner_actor_id: number;
+  kinds: {
+    grouping_kinds: NucleiKind[];
+    axes: NucleiKind[];
+    facet_kinds: NucleiKind[];
+    activity_kinds: NucleiKind[];
+  };
+  groupings: NucleiGrouping[];
+  actors: NucleiActor[];
+  memberships: NucleiMembership[];
+  facets: Record<string, NucleiFacet[]>;
+  ties: NucleiTie[];
+  household_members?: NucleiHouseholdMember[];
+  embers: Record<string, number | null>;
+  layout: {
+    workforce: { cx: number; cy: number };
+    groupings: NucleiLayoutGrouping[];
+    actors: NucleiLayoutActor[];
+  };
+  quiet_after_days: number;
+  workforce: { cx: number; cy: number };
+}
+
+export interface NucleiHouseholdMember {
+  id: number;
+  household_id: number;
+  person_id: number;
+  person_name?: string;
+  household_name?: string;
+}
+
+export interface NucleiActorDetail {
+  actor: NucleiActor;
+  memberships: NucleiMembership[];
+  ties: NucleiTie[];
+  recent_activities: { id: number; kind_label: string; happened_at: string; title: string | null }[];
+  days_since_sat: number | null;
+  sat_sentence: string | null;
+  family?: { id: number; household_id: number; household_name: string } | null;
+  family_members?: NucleiHouseholdMember[];
+}
+
+export interface NucleiGroupingDetail {
+  grouping: NucleiGrouping;
+  members: (NucleiMembership & {
+    actor: NucleiActor;
+    facets: NucleiFacet[];
+    family_members?: NucleiHouseholdMember[];
+  })[];
+  recent_activities: { id: number; kind_label: string; happened_at: string; title: string | null }[];
+  accompaniments?: NucleiTie[];
+}
+
+export interface NucleiQuietLights {
+  items: { actor_id: number; display_name: string; days: number; sentence: string }[];
+}

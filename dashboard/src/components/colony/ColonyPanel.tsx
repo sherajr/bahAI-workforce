@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, Orbit, ShieldCheck, TrendingUp, Wallet } from "lucide-react";
 import { api } from "../../lib/api";
 import { getColonyUi, patchColonyUi } from "../../lib/settings";
@@ -8,8 +8,11 @@ import { agentLabel, badgeClasses, cn, formatDate, rosterFor } from "../../lib/u
 import { BadgePill, Card, CardContent, CardHeader, CardTitle, ErrorNote, ProgressBar,
   RosterAvatar } from "../ui";
 import { ActionQueue } from "./ActionQueue";
+import { ActorDrawer } from "./ActorDrawer";
 import { AgentDrawer } from "./AgentDrawer";
 import { ColonyGraph } from "./ColonyGraph";
+import { GroupingDrawer } from "./GroupingDrawer";
+import { RealWorldGraph } from "./RealWorldGraph";
 import { TeamDrawer } from "./TeamDrawer";
 import { TreasuryView } from "./TreasuryView";
 
@@ -32,9 +35,16 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
   const [agent, setAgent] = useState<string | null>(saved.agent);
   const [team, setTeam] = useState<string | null>(saved.team);
   const [consultJobId, setConsultJobId] = useState<string | null>(saved.consultJobId);
+  const [world, setWorld] = useState<"digital" | "real">(
+    saved.world === "real" ? "real" : "digital",
+  );
+  const [rwActor, setRwActor] = useState<number | null>(null);
+  const [rwGrouping, setRwGrouping] = useState<number | null>(null);
+  const [newNucleus, setNewNucleus] = useState("");
+  const [newInstitution, setNewInstitution] = useState("");
 
-  useEffect(() => { patchColonyUi({ view, agent, team, consultJobId }); },
-    [view, agent, team, consultJobId]);
+  useEffect(() => { patchColonyUi({ view, agent, team, consultJobId, world }); },
+    [view, agent, team, consultJobId, world]);
 
   const colony = useQuery({
     queryKey: ["colony"],
@@ -48,8 +58,33 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
   const selectAgent = (name: string | null) => { setAgent(name); if (name) setTeam(null); };
   const selectTeam = (id: string | null) => { setTeam(id); if (id) setAgent(null); };
 
+  const qc = useQueryClient();
+  const nuclei = useQuery({
+    queryKey: ["nuclei"],
+    queryFn: api.getNucleiSnapshot,
+    enabled: world === "real" || view === "map",
+  });
+  const addNucleus = useMutation({
+    mutationFn: (name: string) => api.createNucleiGrouping("nucleus", name),
+    onSuccess: () => { setNewNucleus(""); qc.invalidateQueries({ queryKey: ["nuclei"] }); },
+  });
+  const addInstitution = useMutation({
+    mutationFn: (name: string) => api.createNucleiGrouping("institution", name),
+    onSuccess: () => { setNewInstitution(""); qc.invalidateQueries({ queryKey: ["nuclei"] }); },
+  });
+  const moveNucleus = useMutation({
+    mutationFn: ({ id, x, y }: { id: number; x: number; y: number }) =>
+      api.setNucleiPosition(id, x, y),
+    onSuccess: (snap) => { qc.setQueryData(["nuclei"], snap); },
+  });
+  const arrangeTables = useMutation({
+    mutationFn: () => api.optimizeNucleiLayout(),
+    onSuccess: (snap) => { qc.setQueryData(["nuclei"], snap); },
+  });
+
   const snapshot = colony.data;
   const openTeam = snapshot?.teams.find((t) => t.id === team) ?? null;
+  const rw = nuclei.data;
 
   return (
     <div className="mx-auto flex h-full min-h-0 max-w-[104rem] flex-col gap-4">
@@ -57,10 +92,36 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
         <div>
           <h1 className="font-display text-2xl text-slate-100">The Colony</h1>
           <p className="text-sm text-slate-500">
-            Everyone who works on this, what they've earned, and how the work moves
-            between them.
+            {world === "real"
+              ? "Your nuclei and friends. Each point of light is the Vision in that place."
+              : "Everyone who works on this, what they've earned, and how the work moves between them."}
           </p>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {view === "map" && (
+            <div className="flex gap-1 rounded-xl border border-slate-800 bg-slate-950/60 p-1">
+              <button
+                type="button"
+                onClick={() => setWorld("digital")}
+                className={cn(
+                  "rounded-lg px-3.5 py-2 text-sm font-medium",
+                  world === "digital" ? "bg-amber-400/10 text-amber-300" : "text-slate-400 hover:text-slate-200",
+                )}
+              >
+                Digital World
+              </button>
+              <button
+                type="button"
+                onClick={() => setWorld("real")}
+                className={cn(
+                  "rounded-lg px-3.5 py-2 text-sm font-medium",
+                  world === "real" ? "bg-amber-400/10 text-amber-300" : "text-slate-400 hover:text-slate-200",
+                )}
+              >
+                Real World
+              </button>
+            </div>
+          )}
         <nav className="flex gap-1 rounded-xl border border-slate-800 bg-slate-950/60 p-1">
           {VIEWS.map(({ id, label, icon: Icon }) => (
             <button
@@ -84,6 +145,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
             </button>
           ))}
         </nav>
+        </div>
       </header>
 
       {colony.isError && (
@@ -96,7 +158,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
             <p className="text-sm text-slate-500">Loading the colony…</p>
           )}
 
-          {snapshot && (view === "map" || view === "handoffs") && (
+          {snapshot && (view === "map" || view === "handoffs") && world === "digital" && (
             <div className="space-y-4">
               <ColonyGraph
                 snapshot={snapshot}
@@ -116,6 +178,102 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
             </div>
           )}
 
+          {view === "map" && world === "real" && (
+            <div className="space-y-4">
+              {nuclei.isError && (
+                <ErrorNote>Could not load the Real World: {(nuclei.error as Error).message}</ErrorNote>
+              )}
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="min-w-[16rem] flex-1 text-xs text-slate-500">
+                  A new nucleus
+                  <input
+                    value={newNucleus}
+                    onChange={(e) => setNewNucleus(e.target.value)}
+                    placeholder="e.g. Thursday supper"
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={!newNucleus.trim() || addNucleus.isPending}
+                  onClick={() => addNucleus.mutate(newNucleus.trim())}
+                  className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm font-medium text-amber-200 disabled:opacity-40"
+                >
+                  Add this nucleus
+                </button>
+                <button
+                  type="button"
+                  disabled={!rw || rw.groupings.filter((g) => g.kind_slug !== "institution").length < 2
+                    || arrangeTables.isPending}
+                  onClick={() => arrangeTables.mutate()}
+                  title="Places every table by size, who gathers where, and who walks with whom."
+                  className="rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm font-medium text-slate-200 hover:border-slate-500 disabled:opacity-40"
+                >
+                  {arrangeTables.isPending ? "Arranging…" : "Optimize locations"}
+                </button>
+              </div>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="min-w-[16rem] flex-1 text-xs text-slate-500">
+                  A local institution
+                  <input
+                    value={newInstitution}
+                    onChange={(e) => setNewInstitution(e.target.value)}
+                    placeholder="e.g. Local Spiritual Assembly"
+                    list="rw-institution-suggestions"
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                  />
+                  <datalist id="rw-institution-suggestions">
+                    <option value="Local Spiritual Assembly" />
+                    <option value="Regional Institute" />
+                    <option value="Auxiliary Board" />
+                    <option value="Area Teaching Committee" />
+                  </datalist>
+                </label>
+                <button
+                  type="button"
+                  disabled={!newInstitution.trim() || addInstitution.isPending}
+                  onClick={() => addInstitution.mutate(newInstitution.trim())}
+                  className="rounded-lg border border-amber-200/30 bg-amber-100/10 px-3 py-2 text-sm font-medium text-amber-100 disabled:opacity-40"
+                >
+                  Add this institution
+                </button>
+              </div>
+              {addInstitution.isError && (
+                <ErrorNote>{(addInstitution.error as Error).message}</ErrorNote>
+              )}
+              {(moveNucleus.isError || arrangeTables.isError) && (
+                <ErrorNote>
+                  {((moveNucleus.error || arrangeTables.error) as Error).message}
+                </ErrorNote>
+              )}
+              {rw && (
+                <RealWorldGraph
+                  snapshot={rw}
+                  selectedActor={rwActor}
+                  selectedGrouping={rwGrouping}
+                  onSelectActor={(id) => { setRwActor(id); if (id) setRwGrouping(null); }}
+                  onSelectGrouping={(id) => { setRwGrouping(id); if (id) setRwActor(null); }}
+                  onSelectWorkforce={() => { setRwActor(null); setRwGrouping(null); }}
+                  onMoveGrouping={(id, x, y) => moveNucleus.mutateAsync({ id, x, y })}
+                />
+              )}
+              {!rwActor && !rwGrouping && (
+                <p className="text-center text-sm text-slate-500">
+                  Scroll to zoom, or drag the empty sky to move around.
+                  Drag a nucleus to place it. Optimize locations sits related tables together.
+                  Click a nucleus to add someone who sat with you. Click a friend to say
+                  they gather regularly, or that they have begun to serve — they will sit closer.
+                  Click a person, family, or table to see every connection.
+                  Open a friend to take them off a table or an institution, or off the map.
+                  Open a junior youth family to list the people in it.
+                  Add a local institution on the left — LSA, Regional Institute,
+                  Auxiliary Board, teaching committee. Open one to note who serves,
+                  or to take it off the map.
+                </p>
+              )}
+            </div>
+          )}
+
           {view === "performance" && <PerformanceView />}
           {view === "treasury" && <TreasuryView />}
           {view === "approvals" && (
@@ -125,7 +283,7 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
           )}
         </div>
 
-        {agent && (
+        {agent && world === "digital" && (
           <AgentDrawer
             agent={agent}
             onClose={() => setAgent(null)}
@@ -133,12 +291,30 @@ export function ColonyPanel({ onNavigate }: { onNavigate: (tab: Tab) => void }) 
             onOpenSecretary={() => onNavigate("secretary")}
           />
         )}
-        {openTeam && (
+        {openTeam && world === "digital" && (
           <TeamDrawer
             team={openTeam}
             onClose={() => setTeam(null)}
             consultJobId={consultJobId}
             setConsultJobId={setConsultJobId}
+          />
+        )}
+        {world === "real" && rw && rwActor && (
+          <ActorDrawer
+            actorId={rwActor}
+            snapshot={rw}
+            onClose={() => setRwActor(null)}
+            onChanged={() => qc.invalidateQueries({ queryKey: ["nuclei"] })}
+            onSelectActor={(id) => setRwActor(id)}
+          />
+        )}
+        {world === "real" && rw && rwGrouping && (
+          <GroupingDrawer
+            groupingId={rwGrouping}
+            snapshot={rw}
+            onClose={() => setRwGrouping(null)}
+            onChanged={() => qc.invalidateQueries({ queryKey: ["nuclei"] })}
+            onSelectActor={(id) => { setRwActor(id); setRwGrouping(null); }}
           />
         )}
       </div>

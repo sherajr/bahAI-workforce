@@ -125,11 +125,16 @@ export interface ColonyUiState {
   agent: string | null;     // selected agent id
   team: string | null;      // selected team id
   consultJobId: string | null;
+  world: string | null;     // "digital" | "real"
+  rwScale: number | null;   // Real World camera
+  rwPanX: number | null;
+  rwPanY: number | null;
 }
 
 const COLONY_KEY = "bahai.workforce.colonyUi";
 const EMPTY_COLONY_UI: ColonyUiState = {
-  view: null, agent: null, team: null, consultJobId: null,
+  view: null, agent: null, team: null, consultJobId: null, world: null,
+  rwScale: null, rwPanX: null, rwPanY: null,
 };
 
 export function getColonyUi(): ColonyUiState {
@@ -142,6 +147,10 @@ export function getColonyUi(): ColonyUiState {
       agent: typeof p.agent === "string" ? p.agent : null,
       team: typeof p.team === "string" ? p.team : null,
       consultJobId: typeof p.consultJobId === "string" ? p.consultJobId : null,
+      world: p.world === "real" || p.world === "digital" ? p.world : null,
+      rwScale: typeof p.rwScale === "number" && Number.isFinite(p.rwScale) ? p.rwScale : null,
+      rwPanX: typeof p.rwPanX === "number" && Number.isFinite(p.rwPanX) ? p.rwPanX : null,
+      rwPanY: typeof p.rwPanY === "number" && Number.isFinite(p.rwPanY) ? p.rwPanY : null,
     };
   } catch {
     return EMPTY_COLONY_UI;

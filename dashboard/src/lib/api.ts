@@ -18,6 +18,7 @@ import type {
   ColonySnapshot, ColonyAgentDetail, ColonyChatResult, AgentSettings, HandoffEdge,
   AgentRun, ColonyAction, TeamGoal, GoalLaunchResult, ModelChoices,
   WalletStatus, WalletBalances, WalletTx, CreatedWallet, WalletSendResult,
+  NucleiSnapshot, NucleiActorDetail, NucleiGroupingDetail, NucleiQuietLights,
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -931,6 +932,51 @@ export const api = {
   },
   exportVideoMetadata: (projectId: string) =>
     get<Record<string, unknown>>(`/video/projects/${projectId}/export`),
+
+  // Real World (nuclei) — private/nuclei.db only (rules 15 / 59)
+  getNucleiSnapshot: () =>
+    request<NucleiSnapshot>("GET", "/nuclei/snapshot", undefined, { silent: true }),
+  createNucleiGrouping: (kind_slug: string, name: string) =>
+    post<NucleiSnapshot["groupings"][number]>("/nuclei/groupings", { kind_slug, name }),
+  getNucleiGrouping: (id: number) => get<NucleiGroupingDetail>(`/nuclei/groupings/${id}`),
+  archiveNucleiGrouping: (id: number) =>
+    post<NucleiSnapshot["groupings"][number]>(`/nuclei/groupings/${id}/archive`),
+  setNucleiPosition: (id: number, x: number, y: number) =>
+    patch<NucleiSnapshot>(`/nuclei/groupings/${id}/position`, { x, y }),
+  optimizeNucleiLayout: () =>
+    post<NucleiSnapshot>("/nuclei/layout/optimize"),
+  createNucleiActor: (body: {
+    kind?: string; display_name: string; how_we_met?: string;
+    grouping_id?: number; introduced_as?: string;
+  }) => post<NucleiActorDetail>("/nuclei/actors", body),
+  patchNucleiActor: (id: number, body: { display_name?: string; how_we_met?: string }) =>
+    request<NucleiActorDetail>("PATCH", `/nuclei/actors/${id}`, body),
+  getNucleiActor: (id: number) => get<NucleiActorDetail>(`/nuclei/actors/${id}`),
+  archiveNucleiActor: (id: number) =>
+    post<NucleiSnapshot["actors"][number]>(`/nuclei/actors/${id}/archive`),
+  addNucleiMembership: (actor_id: number, grouping_id: number) =>
+    post<Record<string, unknown>>("/nuclei/memberships", { actor_id, grouping_id }),
+  endNucleiMembership: (id: number) =>
+    post<{ result: string }>(`/nuclei/memberships/${id}/end`),
+  addHouseholdMember: (householdId: number, body: { person_id?: number; display_name?: string }) =>
+    post<Record<string, unknown>>(`/nuclei/households/${householdId}/members`, body),
+  endHouseholdMember: (id: number) =>
+    post<{ result: string }>(`/nuclei/household-members/${id}/end`),
+  addNucleiTie: (body: {
+    kind_slug?: string; from_actor_id: number; to_actor_id: number; grouping_id?: number;
+  }) => post<Record<string, unknown>>("/nuclei/ties", body),
+  endNucleiTie: (id: number) =>
+    post<{ result: string }>(`/nuclei/ties/${id}/end`),
+  addNucleiFacet: (membership_id: number, slug: string) =>
+    post<Record<string, unknown>>("/nuclei/facets", { membership_id, slug }),
+  endNucleiFacet: (id: number) =>
+    post<{ result: string }>(`/nuclei/facets/${id}/end`),
+  satTogether: (actor_id: number) =>
+    post<Record<string, unknown>>("/nuclei/activities/sat-together", { actor_id }),
+  recordNucleiActivity: (body: {
+    kind_slug?: string; grouping_id?: number; participant_ids: number[]; title?: string;
+  }) => post<Record<string, unknown>>("/nuclei/activities", body),
+  getQuietLights: () => get<NucleiQuietLights>("/nuclei/quiet-lights"),
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),
