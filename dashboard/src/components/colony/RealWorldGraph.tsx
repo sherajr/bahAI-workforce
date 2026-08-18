@@ -487,6 +487,11 @@ export function RealWorldGraph({
   }
 
   const wf = snapshot.layout.workforce;
+  // Read from the snapshot rather than hardcoded, so the label on the map can
+  // never disagree with what the row is actually called.
+  const wfName = snapshot.groupings.find(
+    (g) => g.id === snapshot.workforce_grouping_id,
+  )?.name ?? "Bahá'í Workforce";
   const tables = placed.filter((g) => !g.is_institution);
   const institutions = placed.filter((g) => g.is_institution);
   const empty = snapshot.groupings.every((g) => g.kind_slug === "institution");
@@ -1001,7 +1006,7 @@ export function RealWorldGraph({
           <text x={wf.cx} y={wf.cy + 28} textAnchor="middle" fill="#fde68a" className="text-[12px]"
                 pointerEvents="none"
                 style={{ paintOrder: "stroke", stroke: "#05060a", strokeWidth: 3 }}>
-            Bahá'í Workforce
+            {wfName}
           </text>
           {!workforceOpen && (
             <text x={wf.cx} y={wf.cy + 42} textAnchor="middle" fill="#94a3b8"

@@ -940,6 +940,8 @@ export const api = {
   createNucleiGrouping: (kind_slug: string, name: string) =>
     post<NucleiSnapshot["groupings"][number]>("/nuclei/groupings", { kind_slug, name }),
   getNucleiGrouping: (id: number) => get<NucleiGroupingDetail>(`/nuclei/groupings/${id}`),
+  renameNucleiGrouping: (id: number, name: string) =>
+    patch<NucleiSnapshot["groupings"][number]>(`/nuclei/groupings/${id}`, { name }),
   archiveNucleiGrouping: (id: number) =>
     post<NucleiSnapshot["groupings"][number]>(`/nuclei/groupings/${id}/archive`),
   setNucleiPosition: (id: number, x: number, y: number) =>

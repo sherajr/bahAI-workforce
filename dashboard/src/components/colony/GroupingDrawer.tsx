@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import type { NucleiSnapshot } from "../../lib/types";
+import { RenameField } from "./RenameField";
 
 interface Props {
   groupingId: number;
@@ -35,6 +36,14 @@ export function GroupingDrawer({ groupingId, snapshot, onClose, onChanged, onSel
       const snap = await api.getNucleiSnapshot();
       return api.addNucleiMembership(snap.owner_actor_id, groupingId);
     },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nuclei"] });
+      onChanged();
+      q.refetch();
+    },
+  });
+  const rename = useMutation({
+    mutationFn: (name: string) => api.renameNucleiGrouping(groupingId, name),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["nuclei"] });
       onChanged();
@@ -142,12 +151,14 @@ export function GroupingDrawer({ groupingId, snapshot, onClose, onChanged, onSel
   return (
     <aside className="w-80 shrink-0 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/70 p-4">
       <button type="button" onClick={onClose} className="float-right text-xs text-slate-500">Close</button>
-      <h2 className="font-display text-lg text-slate-100">{g.name}</h2>
-      <p className="mb-3 text-xs text-slate-500">
-        {isInstitution ? "An institution of the Faith"
+      <RenameField
+        name={g.name}
+        label={isInstitution ? "Rename this institution" : "Rename this nucleus"}
+        subtitle={isInstitution ? "An institution of the Faith"
           : g.is_nucleus ? "A nucleus — a point of light, the Vision in this place"
             : g.kind_label}
-      </p>
+        onSave={(name) => rename.mutateAsync(name)}
+      />
       <p className="mb-3 text-sm text-slate-400">
         {isInstitution
           ? "Friends who serve here sit close to this light. Click a name to open them. You can take someone off when they no longer serve here."

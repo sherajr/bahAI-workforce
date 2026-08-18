@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import type { NucleiSnapshot } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { RenameField } from "./RenameField";
 
 interface Props {
   actorId: number;
@@ -46,6 +47,19 @@ export function ActorDrawer({ actorId, snapshot, onClose, onChanged, onSelectAct
   const leave = useMutation({
     mutationFn: (membership_id: number) => api.endNucleiMembership(membership_id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["nuclei"] }); onChanged(); q.refetch(); },
+  });
+  // Renaming a person changes the label on their light, the name in every
+  // table they sit at, and -- if they are on the workforce -- the name in the
+  // Digital World too, so all three caches have to be told.
+  const rename = useMutation({
+    mutationFn: (display_name: string) => api.patchNucleiActor(actorId, { display_name }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["nuclei"] });
+      qc.invalidateQueries({ queryKey: ["nuclei-workforce"] });
+      qc.invalidateQueries({ queryKey: ["colony"] });
+      onChanged();
+      q.refetch();
+    },
   });
   const remove = useMutation({
     mutationFn: () => api.archiveNucleiActor(actorId),
@@ -111,12 +125,14 @@ export function ActorDrawer({ actorId, snapshot, onClose, onChanged, onSelectAct
   return (
     <aside className="w-80 shrink-0 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950/70 p-4">
       <button type="button" onClick={onClose} className="float-right text-xs text-slate-500">Close</button>
-      <h2 className="font-display text-lg text-slate-100">{actor.display_name}</h2>
-      <p className="mb-3 text-xs text-slate-500">
-        {actor.kind === "household" ? "A household"
+      <RenameField
+        name={actor.display_name}
+        label={actor.kind === "household" ? "Rename this family" : "Rename"}
+        subtitle={actor.kind === "household" ? "A household"
           : actor.kind === "collective" ? "A gathering of many — not yet named"
             : isYou ? "This light is you" : "A friend"}
-      </p>
+        onSave={(name) => rename.mutateAsync(name)}
+      />
       {actor.how_we_met && <p className="mb-3 text-sm text-slate-400">{actor.how_we_met}</p>}
 
       {(detail?.memberships ?? []).map((m) => {

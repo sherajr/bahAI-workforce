@@ -1163,6 +1163,139 @@ draft_group = client.post("/nuclei/workforce/message/draft",
 check("drafting to a group that is not there is a 400",
       draft_group.status_code == 400, str(draft_group.status_code))
 
+section("Renaming a person, a nucleus or an institution")
+# Renaming is a display change only: nothing keyed on a name, so every
+# membership, tie, gathering and seat has to survive it untouched.
+ren_person = store.create_actor("person", "Test Wrongly Named", db_path=TEST_DB)
+ren_mem = store.add_membership(int(ren_person["id"]), int(dawn["id"]), db_path=TEST_DB)
+store.add_facet(int(ren_mem["id"]), "regularly_participating", TEST_DB)
+seat_before = next(
+    (a for a in store.snapshot(TEST_DB)["layout"]["actors"]
+     if int(a["id"]) == int(ren_person["id"])), None)
+
+renamed = store.update_actor(int(ren_person["id"]),
+                             display_name="Test Rightly Named", db_path=TEST_DB)
+check("a person can be renamed", renamed["display_name"] == "Test Rightly Named")
+check("renaming keeps their id", int(renamed["id"]) == int(ren_person["id"]))
+still = [m for m in store.live_memberships(TEST_DB)
+         if int(m["actor_id"]) == int(ren_person["id"])]
+check("renaming keeps every membership", len(still) == 1)
+check("renaming keeps the facets on it",
+      [f["slug"] for f in store.live_facets(int(ren_mem["id"]), TEST_DB)]
+      == ["regularly_participating"])
+seat_after = next(
+    (a for a in store.snapshot(TEST_DB)["layout"]["actors"]
+     if int(a["id"]) == int(ren_person["id"])), None)
+check("renaming does not move their light",
+      seat_before is not None and seat_after is not None
+      and abs(seat_before["x"] - seat_after["x"]) < 1e-6
+      and abs(seat_before["y"] - seat_after["y"]) < 1e-6)
+check("the new name is what the map shows",
+      any(a["display_name"] == "Test Rightly Named"
+          for a in store.snapshot(TEST_DB)["actors"]))
+
+for bad in ("", "   "):
+    try:
+        store.update_actor(int(ren_person["id"]), display_name=bad, db_path=TEST_DB)
+        check(f"an empty name is refused ({bad!r})", False, "it was saved")
+    except ValueError:
+        check(f"an empty name is refused ({bad!r})", True)
+check("the name is unchanged after a refusal",
+      store.get_actor(int(ren_person["id"]), TEST_DB)["display_name"]
+      == "Test Rightly Named")
+check("a name is trimmed, not stored with its whitespace",
+      store.update_actor(int(ren_person["id"]), display_name="  Test Trimmed  ",
+                         db_path=TEST_DB)["display_name"] == "Test Trimmed")
+
+# The owner's own light is renameable -- ensure_owner creates it as "You" and
+# says so. It is only ARCHIVING him that is refused (rule 62).
+_owner = store.ensure_owner(TEST_DB)
+_owner_was = _owner["display_name"]
+check("the owner can rename his own light",
+      store.update_actor(int(_owner["id"]), display_name="Test Owner Name",
+                         db_path=TEST_DB)["display_name"] == "Test Owner Name")
+store.update_actor(int(_owner["id"]), display_name=_owner_was, db_path=TEST_DB)
+
+# A workforce person is an ordinary actor, so one rename reaches both worlds.
+wf_ren = store.add_workforce_person(display_name="Test Before Rename",
+                                    role="prints", db_path=TEST_DB)
+store.update_actor(wf_ren["actor_id"], display_name="Test After Rename",
+                   db_path=TEST_DB)
+wf_people = store.workforce_members(TEST_DB)
+check("renaming a workforce person shows through to the workforce",
+      any(p["display_name"] == "Test After Rename" for p in wf_people))
+check("and their role is untouched by it",
+      next(p["role"] for p in wf_people
+           if p["display_name"] == "Test After Rename") == "prints")
+store.remove_workforce_person(wf_ren["membership_id"], TEST_DB)
+
+# Groupings: a nucleus and an institution both rename, and keep their chair.
+nuc_ren = store.create_grouping("nucleus", "Test Old Nucleus Name", TEST_DB)
+store.set_grouping_position(int(nuc_ren["id"]), 720.0, 400.0, TEST_DB)
+chair_before = next(g for g in store.snapshot(TEST_DB)["layout"]["groupings"]
+                    if int(g["id"]) == int(nuc_ren["id"]))
+g_renamed = store.update_grouping(int(nuc_ren["id"]), "Test New Nucleus Name", TEST_DB)
+check("a nucleus can be renamed", g_renamed["name"] == "Test New Nucleus Name")
+check("it is still a nucleus after the rename", bool(g_renamed["is_nucleus"]))
+chair_after = next(g for g in store.snapshot(TEST_DB)["layout"]["groupings"]
+                   if int(g["id"]) == int(nuc_ren["id"]))
+check("renaming a nucleus does not move it",
+      abs(chair_before["cx"] - chair_after["cx"]) < 1e-6
+      and abs(chair_before["cy"] - chair_after["cy"]) < 1e-6)
+check("its people stay with it",
+      len([m for m in store.live_memberships(TEST_DB)
+           if int(m["grouping_id"]) == int(nuc_ren["id"])]) >= 1)
+
+inst_ren = store.create_grouping("institution", "Test Old Institution", TEST_DB)
+i_renamed = store.update_grouping(int(inst_ren["id"]), "Test New Institution", TEST_DB)
+check("an institution can be renamed", i_renamed["name"] == "Test New Institution")
+check("it stays on the institution column",
+      store.is_institution(i_renamed))
+try:
+    store.update_grouping(int(nuc_ren["id"]), "   ", TEST_DB)
+    check("a grouping cannot be renamed to nothing", False, "it was saved")
+except ValueError:
+    check("a grouping cannot be renamed to nothing", True)
+check("the grouping name survives a refusal",
+      store.get_grouping(int(nuc_ren["id"]), TEST_DB)["name"] == "Test New Nucleus Name")
+
+section("Renaming over HTTP")
+http_ren = client.patch(f"/nuclei/actors/{ren_person['id']}",
+                        json={"display_name": "Test HTTP Renamed"})
+check("PATCH a friend's name is 200", http_ren.status_code == 200, http_ren.text)
+check("the detail comes back with the new name",
+      http_ren.json()["actor"]["display_name"] == "Test HTTP Renamed")
+check("the snapshot agrees",
+      any(a["display_name"] == "Test HTTP Renamed"
+          for a in client.get("/nuclei/snapshot").json()["actors"]))
+bad_ren = client.patch(f"/nuclei/actors/{ren_person['id']}", json={"display_name": " "})
+check("an empty name is a 400, not a 500", bad_ren.status_code == 400,
+      str(bad_ren.status_code))
+check("a 400 explains itself in words",
+      "name" in (bad_ren.json().get("detail") or "").lower(), bad_ren.text)
+missing_ren = client.patch("/nuclei/actors/999999", json={"display_name": "Nobody"})
+check("renaming someone who is not there is a 400",
+      missing_ren.status_code == 400, str(missing_ren.status_code))
+
+g_http = client.patch(f"/nuclei/groupings/{nuc_ren['id']}",
+                      json={"name": "Test HTTP Nucleus"})
+check("PATCH a nucleus name is 200", g_http.status_code == 200, g_http.text)
+check("it comes back renamed", g_http.json()["name"] == "Test HTTP Nucleus")
+check("the map shows the new name",
+      any(g["name"] == "Test HTTP Nucleus"
+          for g in client.get("/nuclei/snapshot").json()["groupings"]))
+g_bad = client.patch(f"/nuclei/groupings/{nuc_ren['id']}", json={"name": ""})
+check("an empty grouping name is a 400", g_bad.status_code == 400, str(g_bad.status_code))
+g_missing = client.patch("/nuclei/groupings/999999", json={"name": "Nowhere"})
+check("renaming a grouping that is not there is a 400",
+      g_missing.status_code == 400, str(g_missing.status_code))
+
+# Tidy up so later checks and counts see the map they expect.
+client.post(f"/nuclei/groupings/{nuc_ren['id']}/archive")
+client.post(f"/nuclei/groupings/{inst_ren['id']}/archive")
+client.post(f"/nuclei/actors/{ren_person['id']}/archive")
+client.post(f"/nuclei/actors/{wf_ren['actor_id']}/archive")
+
 section("Nothing personal reaches the workforce side (rule 68)")
 # The strongest form of the check: a real person is put on the workforce over
 # HTTP, then the workforce database is read as BYTES and must not contain the

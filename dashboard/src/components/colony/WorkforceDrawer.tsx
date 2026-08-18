@@ -70,7 +70,9 @@ export function WorkforceDrawer({
       <button type="button" onClick={onClose} className="float-right text-xs text-slate-500">
         Close
       </button>
-      <h2 className="font-display text-lg text-amber-100">Bahá'í Workforce</h2>
+      <h2 className="font-display text-lg text-amber-100">
+        {wf?.name ?? "Bahá'í Workforce"}
+      </h2>
       <p className="mb-3 text-xs text-slate-500">
         The agents who do the work, and the people who work alongside them.
       </p>

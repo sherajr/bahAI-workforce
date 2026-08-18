@@ -58,7 +58,7 @@ python scripts/test_secretary_colony.py    # Abigail <-> the teams: 92 checks
 python scripts/test_job_cancel.py          # Cancelling a run: 24 checks
 python scripts/test_wallet.py              # Wallet: 90 checks, no network/keys
 python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
-python scripts/test_nuclei.py              # Real World (nuclei): 225 checks
+python scripts/test_nuclei.py              # Real World (nuclei): 257 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -943,6 +943,21 @@ The Colony tab's other sky: Sheraj's nuclei and friends. Design in
 
 62. **One light per person. Each nucleus is its own point of light; distance to each is about that nucleus.** Default chairs are by `created_at` then `id` (a seventh table spirals out — never `i % 6` on top of the first). `pos_x`/`pos_y` is an owner override: a drag, or Arrange / Optimize locations, which is deterministic from size, shared people, recorded gatherings and ties — not a physics sim on every load. The owner is excluded from that affinity so his seat at every nucleus cannot collapse the map (rule 61). A person is placed once: a target on each grouping's own rings (core service close, connected far); the seat is the engagement-weighted average, boosted by recorded gatherings. They are not copied. A household lists its people (`household_members`); the same person may sit in a family and serve on an institution. A family-only person lives inside the household light until that family is opened (petals). Someone who already sits elsewhere stays there; opening the family draws a thread. Walking with someone is service for a particular grouping (a directed tie), not a seat at that table — the one who walks sits near the work and is not made a member. Leaving an institution ends that membership only. A neighbour arriving does not change anyone's seat; lights that would cover each other (dots or names) are then squeezed apart by the smallest step that keeps every label readable — never a physics shuffle on load, never a score. Friends who serve a local institution sit on an even ring outside its light, not in a pile on the core. Taking a friend off the map archives them (ends live memberships, keeps gatherings); the owner's light cannot be archived. Local institutions of the Faith (LSA, Regional Institute, Auxiliary Board, Area Teaching Committee, and any the owner names) sit in a column left of the Workforce. The owner adds and rarely archives them; worldwide bodies are not on this map. Nuclei are points of light (the Vision in that place), not a single central sphere and not Colony agent-bodies.
 
+62b. **A name is a display label and nothing is keyed on it, so anyone and
+    anything on this map can be renamed.** (Owner ask 2026-08-17.) People,
+    nuclei and institutions all rename through the store's existing
+    `update_actor` / `update_grouping` — including the owner's own light, which
+    `ensure_owner` creates as "You" and has always described as renameable; it
+    is only ARCHIVING him that is refused. A rename keeps the id, so every
+    membership, facet, tie, gathering and chair survives it and no seat moves.
+    An empty or whitespace-only name is refused at the store, and the endpoint
+    returns 400 with the reason rather than saving a nameless light.
+    `RenameField.tsx` is the shared control; the one thing it must keep doing is
+    resetting its draft when the drawer is pointed at someone else, or you open
+    a second person and find the first one's name in the box, one Enter away
+    from renaming the wrong light. The workforce label on the map reads its name
+    from the snapshot for the same reason — hardcoding it would let a rename
+    leave the map and the drawer disagreeing.
 63. **Grouping kinds, axes, facet kinds, tie kinds, activity kinds and institute units are DATA.** Adding a relationship type a year from now is an `INSERT`. Participation and service are two lists: service sits closer; core-activity kinds carry `is_core`. Do not hardcode the spreadsheet's six columns as an enum or a linear funnel.
 
 64. **A workforce gift stores a `product_id` and a theme, never a friend's name, and `workforce.db` never learns who a gathering is for.** Job progress strings stay mechanical.

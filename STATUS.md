@@ -95,6 +95,31 @@ scratch):
 
 ## Activity Log (newest first)
 
+### 2026-08-17 — Claude Code (Opus 5) — names can be edited
+Owner ask: the option to edit the names of people, nuclei and institutions.
+Both store functions and both PATCH endpoints already existed and validated
+empty names — what was missing was any way to reach them. `patchNucleiActor`
+had been in the API client since the Real World shipped and was called from
+nowhere; groupings had no client method at all. So this is mostly UI:
+`RenameField.tsx` (new) is a pencil beside the drawer heading that turns it
+into a field, shared by `ActorDrawer` and `GroupingDrawer`, with Enter to
+save and Escape to leave it.
+
+Two things worth knowing. The owner's own light renames too — `ensure_owner`
+has always called it renameable, so "You" can become his actual name; only
+archiving him is refused. And the workforce label on the map now reads its
+name from the snapshot instead of being hardcoded, so a rename can never
+leave the map and the drawer disagreeing.
+
+Renaming had NO test coverage at either level before this, despite the
+backend being months old: `scripts/test_nuclei.py` 225 -> 257 checks, pinning
+that a rename keeps the id, every membership, every facet and the seat, that
+an empty name is refused at the store and 400s over HTTP with a reason, and
+that renaming a workforce person reaches both worlds. Rule 62b in AGENTS.md.
+Verified live only through the refusal paths, deliberately — the happy path
+is covered on a temp database, and exercising it against the real map would
+have meant renaming Sheraj's actual nuclei.
+
 ### 2026-08-17 — Claude Code (Opus 5) — the Workforce light opens
 Owner ask: make the Bahá'í Workforce atom on the Real World map clickable —
 agents fanning out like a family's petals, real people addable to the
