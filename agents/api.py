@@ -22,6 +22,7 @@ Map of this file:
 """
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -53,12 +54,39 @@ from agents.state import (
 from agents.state import _connect as _state_connect
 
 app = FastAPI(title="bahAI Workforce API", version="1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Owner-only, enforced on every request (rule 70). The dashboard's Vite proxy
+# adds the key, so nothing in dashboard/src changes.
+from agents.auth import api_key_middleware  # noqa: E402
+app.middleware("http")(api_key_middleware)
+
+# CORS is deliberately NOT wildcarded (rule 70). The dashboard reaches this API
+# through Vite's same-origin /api proxy -- including images and video -- so it
+# never makes a cross-origin request and needs no CORS grant at all. The
+# wildcard that used to sit here served only a page trying to READ the reply.
+_CORS_ORIGINS = [o.strip() for o in os.getenv("DASHBOARD_ORIGINS", "").split(",") if o.strip()]
+if _CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware, allow_origins=_CORS_ORIGINS,
+        allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 # Serve generated bookmark images to the dashboard at http://localhost:8765/outputs/<filename>
 OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
+
+
+def _esc(value) -> str:
+    """
+    Escape anything an OAuth callback echoes back into its HTML page (rule 71).
+
+    Those three callbacks are the only endpoints outside the API key gate
+    (they are redirect targets, so the provider cannot carry a header), which
+    makes them the one place a crafted link reaches HTML this server writes.
+    `error`/`error_description` come straight off the query string, so
+    unescaped they were a script-injection primitive on the API's own origin.
+    """
+    return html.escape(str(value), quote=True)
 
 
 def _web_image_path(local_path: str) -> str:
@@ -4181,8 +4209,8 @@ def canva_oauth_callback(
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Canva authorisation failed</h2>
-            <p><strong>Error:</strong> {error}</p>
-            <p><strong>Details:</strong> {error_description or 'No details provided'}</p>
+            <p><strong>Error:</strong> {_esc(error)}</p>
+            <p><strong>Details:</strong> {_esc(error_description or 'No details provided')}</p>
             <hr>
             <p>If this says <em>invalid_scope</em>: go to your
             <a href="https://www.canva.com/developers" target="_blank">Canva developer portal</a>
@@ -4213,7 +4241,7 @@ def canva_oauth_callback(
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Token exchange failed</h2>
-            <p>{e}</p>
+            <p>{_esc(e)}</p>
             <p><a href="/canva/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
@@ -4300,8 +4328,8 @@ def etsy_oauth_callback(
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Etsy authorisation failed</h2>
-            <p><strong>Error:</strong> {error}</p>
-            <p><strong>Details:</strong> {error_description or 'No details provided'}</p>
+            <p><strong>Error:</strong> {_esc(error)}</p>
+            <p><strong>Details:</strong> {_esc(error_description or 'No details provided')}</p>
             <p><a href="/etsy/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
@@ -4327,7 +4355,7 @@ def etsy_oauth_callback(
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Token exchange failed</h2>
-            <p>{e}</p>
+            <p>{_esc(e)}</p>
             <p><a href="/etsy/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
@@ -5248,7 +5276,7 @@ def google_oauth_callback(
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
             <h2>❌ Google authorisation failed</h2>
-            <p>{error or 'No authorisation code returned.'}</p>
+            <p>{_esc(error or 'No authorisation code returned.')}</p>
             <p><a href="/google/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
@@ -5267,7 +5295,7 @@ def google_oauth_callback(
     except Exception as e:
         return HTMLResponse(f"""
             <html><body style="font-family:sans-serif;padding:2em">
-            <h2>❌ Token exchange failed</h2><p>{e}</p>
+            <h2>❌ Token exchange failed</h2><p>{_esc(e)}</p>
             <p><a href="/google/oauth/start">Try again</a>.</p>
             </body></html>
         """, status_code=400)
@@ -6862,4 +6890,8 @@ def health():
 
 
 if __name__ == "__main__":
-    uvicorn.run("agents.api:app", host="0.0.0.0", port=8765, reload=True)
+    # Loopback, no reload -- matches scripts/start_secretary_server.ps1, the
+    # managed task that actually runs this in production. Binding 0.0.0.0
+    # here put the whole owner-only API on the LAN (rule 70); --reload also
+    # serves stale .env values (see AGENTS.md gotchas).
+    uvicorn.run("agents.api:app", host="127.0.0.1", port=8765)

@@ -23,9 +23,11 @@ import type {
 } from "./types";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
-// The API server itself (used for OAuth links opened in a new tab, outside the proxy).
-export const API_ORIGIN =
-  (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? "http://localhost:8765";
+// There is deliberately no API_ORIGIN. Everything reaching the API -- fetches,
+// <img>/<video> sources, and links opened in a new tab such as the OAuth start
+// pages and /whatsapp/setup -- goes through BASE, because the proxy is where
+// the owner key is attached (AGENTS.md rule 70). A URL naming the API's own
+// host and port directly skips the proxy and comes back 401.
 
 // ── Activity log event bus ────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
-import { API_ORIGIN, api } from "../lib/api";
+import { BASE, api } from "../lib/api";
 import { getSettings, saveSettings } from "../lib/settings";
 import { Button, Card, CardContent, CardHeader, CardTitle } from "./ui";
 
@@ -88,7 +88,7 @@ export function SettingsPanel() {
             </p>
           )}
           {!canva.data?.authorised && (
-            <Button variant="secondary" onClick={() => window.open(`${API_ORIGIN}/canva/oauth/start`, "_blank")}>
+            <Button variant="secondary" onClick={() => window.open(`${BASE}/canva/oauth/start`, "_blank")}>
               Connect Canva <ExternalLink className="h-3.5 w-3.5" />
             </Button>
           )}
@@ -114,7 +114,7 @@ export function SettingsPanel() {
             </p>
           )}
           {etsy.data?.configured && !etsy.data.authorised && (
-            <Button variant="secondary" onClick={() => window.open(`${API_ORIGIN}/etsy/oauth/start`, "_blank")}>
+            <Button variant="secondary" onClick={() => window.open(`${BASE}/etsy/oauth/start`, "_blank")}>
               Connect Etsy <ExternalLink className="h-3.5 w-3.5" />
             </Button>
           )}

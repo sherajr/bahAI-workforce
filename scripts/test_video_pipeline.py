@@ -19,6 +19,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# The API is owner-only (rule 70). Setting the key in the environment keeps
+# this suite off the real private/api_key.txt and lets its TestClient present
+# a valid key -- there is deliberately no switch that turns the gate off.
+os.environ["DASHBOARD_API_KEY"] = "dashboard-suite-test-key"
+_AUTH = {"X-API-Key": os.environ["DASHBOARD_API_KEY"]}
 os.environ.setdefault("VIDEO_PROVIDER", "mock")
 
 from agents import video_assembly, video_director, video_provider, video_safety, video_store  # noqa: E402
@@ -595,7 +601,7 @@ def test_finished_shelf():
         # HTTP: the dashboard needs servable URLs, not Windows paths.
         from fastapi.testclient import TestClient
         from agents import api as api_module
-        client = TestClient(api_module.app)
+        client = TestClient(api_module.app, headers=_AUTH)
         r = client.get("/video/finished")
         check("GET /video/finished responds", r.status_code == 200, r.text[:200])
         api_items = {v["id"]: v for v in r.json()["videos"]}
@@ -658,7 +664,7 @@ def test_api():
     from agents.state import init_db
 
     init_db()
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers=_AUTH)
 
     r = client.get("/video/providers")
     check("GET /video/providers responds", r.status_code == 200)
@@ -1060,7 +1066,7 @@ def test_safeguard_is_unbypassable():
     section("Sacred-figure safeguard cannot be bypassed")
     from fastapi.testclient import TestClient
     from agents import api as api_module, video_pipeline
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers=_AUTH)
 
     pid = video_store.create_project(source_kind="scene_story", source_text="A journey.",
                                      title="Safeguard", direction={"provider": "mock"})
@@ -1239,7 +1245,7 @@ def test_cinematic_pacing():
     # -- applying the cut policy to an EXISTING plan, in place ----------------
     from fastapi.testclient import TestClient
     from agents import api as api_module, video_pipeline
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers=_AUTH)
 
     check("the pacing options are offered to the dashboard",
           {o["id"] for o in client.get("/video/defaults").json()["pacing_options"]}
@@ -1520,7 +1526,7 @@ def test_chain_preflight():
     import inspect
     from fastapi.testclient import TestClient
     from agents import api as api_module, video_pipeline
-    client = TestClient(api_module.app)
+    client = TestClient(api_module.app, headers=_AUTH)
 
     check("preflight is a separate, callable check",
           callable(getattr(video_pipeline, "chain_preflight", None)))

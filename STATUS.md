@@ -53,10 +53,15 @@ Design lives in `private/nuclei/` (git-ignored). Not reviewed by hand yet.
 Also committed in `d2b4609` (2026-08-17): the **Bahá'í Workforce light** on the
 Material World map (rules 65–68).
 
-**Uncommitted in the working tree**: nothing. The two chunks that sat here --
-the GPT-5.6/OpenAI provider option and the rule 69 junior youth work -- were
-committed and pushed to `origin/master` on 2026-08-18; see the Activity Log.
-Neither has been reviewed by hand yet: "committed" is not "reviewed".
+**Uncommitted in the working tree**: the security hardening tranche of
+2026-08-19 -- the API's owner gate (rules 70-71) and the prompt-injection hold
+(rule 72). Not committed, not reviewed by hand. See the Activity Log for what
+Sheraj has to do once (restart the API and the dashboard) and what is
+deliberately still open.
+
+Committed and pushed to `origin/master` on 2026-08-18: the GPT-5.6/OpenAI
+provider option and the rule 69 junior youth work. Neither has been reviewed by
+hand yet: "committed" is not "reviewed".
 
 **Deferred / proposed, not started** (nobody should re-discover these from
 scratch):
@@ -89,6 +94,61 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-08-19 -- Claude Code (Opus 5) -- the API had no lock on the door
+
+Sheraj had ChatGPT scan the repo. Its headline finding was real and I confirmed
+it against the code: `agents/api.py` had no authentication on any of its 165
+endpoints and carried `allow_origins=["*"]`. Loopback was doing the work of a
+password, and it cannot -- with wildcard CORS, any web page open in Sheraj's
+browser could call this API *and read the answer*: Abigail's chat history, the
+Material World map, the approval queue, the trusted-contacts list, and a wallet
+chain that adds an address to the allowlist and then spends to it. Mainnet
+being off is what kept that last one theoretical.
+
+Fixed by `agents/auth.py`, one middleware ahead of routing (rules 70-71). The
+key generates itself into `private/api_key.txt` and `dashboard/vite.config.ts`
+attaches it in the **proxy** -- the only layer that also covers `<img>` and
+`<video>`, and it keeps the key in Node, out of the browser bundle. No
+component changed. Also: `__main__` no longer binds `0.0.0.0` (the file's own
+docstring told you to start it that way, which put the whole thing on the LAN),
+the three OAuth callbacks now escape what they echo instead of interpolating
+query strings into HTML, and `.gitignore` picked up `canva_pkce_state.json` and
+`.env.*`.
+
+Then the second finding, which is the one that will keep mattering: Gmail/Docs/
+Sheets/Slides content went straight into the loop that can call write tools,
+with nothing marking it as written by someone else. Rule 72 puts the hold in
+`secretary_tools.make_executor` rather than in her prompt -- a prompt is
+precisely what an injection attacks. Once a turn has read outside content,
+tools that REACH (WhatsApp, calendar, Drive, products, team goals) queue into
+the existing approval queue instead of firing; `remember`/`add_task`/
+`set_reminder` stay immediate so "read that email and note it down" still
+works. Approval re-enters the same executor with the hold lifted and every
+ownership gate still running.
+
+Two new suites: `scripts/test_api_auth.py` (66) walks the real route table so a
+future unprotected endpoint fails there rather than in the wild, and
+`scripts/test_secretary_injection.py` (50) stubs the Google clients and tests
+the executor, not the model. All six existing suites still pass (135/92/24/90/
+281/288) -- they needed a key, so each now sets `DASHBOARD_API_KEY`; there is
+deliberately no switch that disables the gate. `npx tsc --noEmit` clean.
+
+**Sheraj has to do two things once, or the dashboard will look broken:** restart
+the API (`Start-ScheduledTask -TaskName "bahAI Secretary API"` after killing
+whatever holds :8765) and restart `npm run dev`. The key is made automatically;
+there is nothing to type. WhatsApp is unaffected -- the webhook stays public
+behind its HMAC signature, and the Cloudflare tunnel already exposed only that
+path.
+
+**Deliberately NOT done, so nobody thinks it was:** secrets at rest are still
+plaintext in `private/` (Google/Canva/Etsy tokens, Abigail's DB) -- real
+protection there is OS-level disk encryption, not application code, and it is
+Sheraj's call. Dev-only npm advisories (Vite/esbuild/PostCSS) are untouched;
+`npm audit --omit=dev` reports zero. Python deps still have no lockfile.
+ChatGPT's report also listed one thing that was already handled -- the
+Cloudflare tunnel's ingress is restricted to `/whatsapp/webhook` and
+`/whatsapp/privacy` in `~/.cloudflared/config.yml`, verified this session.
 
 ### 2026-08-18 -- Claude Code (Opus 5) -- model picker 500, then committed the tree
 Owner report: the per-agent Model dropdown showed "Could not load the model

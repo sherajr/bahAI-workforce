@@ -1,6 +1,9 @@
 # Secrets & credentials
 .env
+.env.*
+!.env.example
 canva_token.json
+canva_pkce_state.json
 
 # Database & generated data
 workforce.db

@@ -9,7 +9,7 @@ import {
   Send, StickyNote, ListChecks, CalendarDays, BellRing, ShieldQuestion, ExternalLink,
   MessageCircle, UserPlus, Trash2, Phone,
 } from "lucide-react";
-import { api, API_ORIGIN } from "../lib/api";
+import { api, BASE } from "../lib/api";
 import type {
   Contact, PendingApproval, SecretaryStatus, SecretaryUpcoming, WhatsAppStatus,
 } from "../lib/types";
@@ -414,7 +414,7 @@ export function SecretaryPanel() {
                     below to grant the rest (safe to do any time; it won't lose anything).
                   </p>
                   <a
-                    href={`${API_ORIGIN}/google/oauth/start`}
+                    href={`${BASE}/google/oauth/start`}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-amber-400/50 hover:text-amber-300"
@@ -430,7 +430,7 @@ export function SecretaryPanel() {
                     Gmail, Drive, Docs, Sheets, and Slides.
                   </p>
                   <a
-                    href={`${API_ORIGIN}/google/oauth/start`}
+                    href={`${BASE}/google/oauth/start`}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 rounded-lg bg-amber-400/15 px-3 py-1.5 font-medium text-amber-300 hover:bg-amber-400/25"
@@ -469,7 +469,7 @@ export function SecretaryPanel() {
                     can reach this computer) — the guide walks through each one.
                   </p>
                   <a
-                    href={`${API_ORIGIN}/whatsapp/setup`}
+                    href={`${BASE}/whatsapp/setup`}
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-1 rounded-lg bg-amber-400/15 px-3 py-1.5 font-medium text-amber-300 hover:bg-amber-400/25"

@@ -14,6 +14,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# The API is owner-only (rule 70). Setting the key in the environment keeps
+# this suite off the real private/api_key.txt and lets its TestClient present
+# a valid key -- there is deliberately no switch that turns the gate off.
+os.environ["DASHBOARD_API_KEY"] = "dashboard-suite-test-key"
+_AUTH = {"X-API-Key": os.environ["DASHBOARD_API_KEY"]}
+
 _TMP = tempfile.mkdtemp(prefix="nuclei_test_")
 TEST_DB = Path(_TMP) / "nuclei.db"
 
@@ -705,7 +711,7 @@ store.DB_PATH = TEST_DB
 from fastapi.testclient import TestClient  # noqa: E402
 import agents.api as api_mod  # noqa: E402
 
-client = TestClient(api_mod.app)
+client = TestClient(api_mod.app, headers=_AUTH)
 r = client.get("/nuclei/snapshot")
 check("GET /nuclei/snapshot is 200", r.status_code == 200, str(r.status_code))
 body = r.json()

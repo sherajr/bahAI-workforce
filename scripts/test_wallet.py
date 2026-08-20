@@ -24,6 +24,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# The API is owner-only (rule 70). Setting the key in the environment keeps
+# this suite off the real private/api_key.txt and lets its TestClient present
+# a valid key -- there is deliberately no switch that turns the gate off.
+os.environ["DASHBOARD_API_KEY"] = "dashboard-suite-test-key"
+_AUTH = {"X-API-Key": os.environ["DASHBOARD_API_KEY"]}
+
 _TMP = tempfile.mkdtemp(prefix="wallet_test_")
 os.environ["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_API_KEY", "test-key")
 os.environ["WALLET_PASSPHRASE"] = "test-passphrase-not-a-real-one"
@@ -288,7 +294,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import agents.api as api  # noqa: E402
 
-client = TestClient(api.app)
+client = TestClient(api.app, headers=_AUTH)
 
 r = client.get("/wallet/status")
 check("GET /wallet/status returns 200", r.status_code == 200, r.text[:200])
