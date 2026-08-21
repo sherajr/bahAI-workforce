@@ -104,6 +104,10 @@ def on_startup():
     # Material World store — its own private file, never workforce.db (rule 59).
     from agents import nuclei_store
     nuclei_store.init_db()
+    # Live Consultation store — its own private file too (rule 73). Meeting
+    # transcripts never touch workforce.db.
+    from agents import live_consultation_store
+    live_consultation_store.init_db()
     # Secretary's reminder scheduler — all state in private/secretary.db, so a
     # restart resumes exactly where it left off.
     from agents import scheduler
@@ -6880,6 +6884,17 @@ def nuclei_send_message(req: NucleiSendIn):
         return _bridge().send_to_contact(req.contact_id, req.message)
     except Exception as e:
         _bridge_err(e)
+
+
+# --- Live Consultation (rules 73-86) ---
+#
+# Its own router in its own module rather than another thousand lines here. The
+# owner gate is on the APP, not on any router, so every one of these paths is
+# covered by rule 70 the moment it is mounted — nothing to remember, and
+# scripts/test_api_auth.py proves it by walking the route table.
+from agents.live_consultation_api import router as live_consultation_router  # noqa: E402
+
+app.include_router(live_consultation_router)
 
 
 # --- Health check ---

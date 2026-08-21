@@ -21,6 +21,11 @@ import type {
   NucleiSnapshot, NucleiActorDetail, NucleiGroupingDetail, NucleiQuietLights,
   NucleiChannel, WorkforceDraft, WorkforcePicture, WorkforceSendResult,
 } from "./types";
+import type {
+  AnalysisResult, ConsultationCapabilities, ConsultationDetail, ConsultationMode,
+  ConsultationPresence, ConsultationSession, RealtimeCredential, SpeechDecision,
+  VerifiedWriting,
+} from "./consultationTypes";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 // There is deliberately no API_ORIGIN. Everything reaching the API -- fetches,
@@ -1006,6 +1011,79 @@ export const api = {
   }) => post<WorkforceDraft>("/nuclei/workforce/message/draft", body),
   sendWorkforceMessage: (body: { contact_id: number; message: string }) =>
     post<WorkforceSendResult>("/nuclei/workforce/message/send", body),
+
+  // ── Live Consultation (rules 73-86) ───────────────────────────────────────
+  // A separate subsystem from the product pipeline's consultation: these calls
+  // reach private/consultation.db and nothing else.
+  consultationCapabilities: () =>
+    get<ConsultationCapabilities>("/live-consultation/capabilities"),
+  listConsultations: () =>
+    get<{ sessions: ConsultationSession[] }>("/live-consultation/sessions"),
+  createConsultation: (body: {
+    title: string; question?: string; context?: string; framework?: string;
+    mode?: ConsultationMode; decision_method?: string; presence?: ConsultationPresence;
+  }) => post<ConsultationSession>("/live-consultation/sessions", body),
+  getConsultation: (id: string) =>
+    get<ConsultationDetail>(`/live-consultation/sessions/${id}`),
+  patchConsultation: (id: string, body: Record<string, unknown>) =>
+    request<ConsultationDetail>("PATCH", `/live-consultation/sessions/${id}`, body),
+  deleteConsultation: (id: string) =>
+    request<{ deleted: boolean; turns: number; observations: number; audio_files: number }>(
+      "DELETE", `/live-consultation/sessions/${id}`),
+  startConsultation: (id: string) =>
+    post<ConsultationDetail>(`/live-consultation/sessions/${id}/start`),
+  endConsultation: (id: string) =>
+    post<ConsultationDetail>(`/live-consultation/sessions/${id}/end`, {}),
+  // Silent: transcript turns arrive every few seconds and would drown the
+  // Activity Log, which exists to show Sheraj what the workforce is doing.
+  addConsultationTurn: (id: string, body: {
+    text: string; realtime_item_id?: string; role?: string; is_final?: boolean;
+    speaker_label?: string | null;
+  }) => request<{ turn: unknown }>("POST", `/live-consultation/sessions/${id}/turns`, body,
+                                   { silent: true }),
+  labelConsultationTurn: (id: string, turnId: number, speaker_label: string | null) =>
+    post<{ turn: unknown }>(`/live-consultation/sessions/${id}/turns/${turnId}/label`,
+                            { speaker_label }),
+  analyzeConsultation: (id: string, force = false) =>
+    request<AnalysisResult>("POST", `/live-consultation/sessions/${id}/analyze`, { force },
+                            { silent: !force }),
+  // The server's half of the floor gate. The client governor has already said
+  // yes; nothing speaks until this one does too.
+  consultationSpeechPermission: (id: string, body: Record<string, unknown>) =>
+    request<SpeechDecision>("POST", `/live-consultation/sessions/${id}/speech-permission`,
+                            body, { silent: true }),
+  askConsultation: (id: string, body: Record<string, unknown>) =>
+    post<SpeechDecision>(`/live-consultation/sessions/${id}/ask`, body),
+  answerConsultationPermission: (id: string, observationId: string,
+                                 body: { granted: boolean; ignored?: boolean }) =>
+    post<{ granted: boolean; instructions?: string; reason?: string }>(
+      `/live-consultation/sessions/${id}/observations/${observationId}/answer`, body),
+  dismissConsultationObservation: (id: string, observationId: string) =>
+    post<{ observation: unknown }>(
+      `/live-consultation/sessions/${id}/observations/${observationId}/dismiss`),
+  setConsultationObservationStatus: (id: string, observationId: string, status: string) =>
+    request<{ observation: unknown }>(
+      "POST", `/live-consultation/sessions/${id}/observations/${observationId}/status`,
+      { status }, { silent: true }),
+  confirmConsultationDecision: (id: string, decisionId: string) =>
+    post<Record<string, unknown>>(
+      `/live-consultation/sessions/${id}/decisions/${decisionId}/confirm`),
+  rejectConsultationDecision: (id: string, decisionId: string) =>
+    post<Record<string, unknown>>(
+      `/live-consultation/sessions/${id}/decisions/${decisionId}/reject`),
+  setConsultationActionStatus: (id: string, actionId: string, status: "open" | "done") =>
+    post<Record<string, unknown>>(
+      `/live-consultation/sessions/${id}/actions/${actionId}/status`, { status }),
+  findConsultationWritings: (id: string, theme: string) =>
+    post<{ theme: string; available: boolean; note: string; passages: VerifiedWriting[] }>(
+      `/live-consultation/sessions/${id}/writings`, { theme }),
+  consultationClientSecret: (session_id: string, accept_over_ceiling = false) =>
+    post<RealtimeCredential>("/live-consultation/realtime/client-secret",
+                             { session_id, accept_over_ceiling }),
+  recordConsultationUsage: (id: string, usage: Record<string, unknown>, model: string) =>
+    request<{ recorded: boolean; cost: number | null; reason?: string }>(
+      "POST", `/live-consultation/sessions/${id}/usage`, { usage, model }, { silent: true }),
+  consultationExportUrl: (id: string) => `${BASE}/live-consultation/sessions/${id}/export`,
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),

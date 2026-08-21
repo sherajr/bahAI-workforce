@@ -165,3 +165,36 @@ export function patchColonyUi(patch: Partial<ColonyUiState>) {
 function clamp(n: number, lo: number, hi: number): number {
   return isNaN(n) ? lo : Math.min(hi, Math.max(lo, n));
 }
+
+// Live Consultation tab state. A consultation is long and the panel unmounts
+// when Sheraj looks at another tab; losing the open session and the view would
+// be the same disruption the Video tab's persistence exists to prevent
+// (AGENTS.md rule 33c). The live session itself is deliberately NOT resumed
+// from here — a realtime connection needs a fresh credential and a fresh
+// microphone permission, both of which are the user's to give.
+export interface ConsultationUiState {
+  view: string | null;      // "archive" | "setup" | "live" | "summary"
+  sessionId: string | null;
+}
+
+const CONSULTATION_KEY = "bahai.workforce.consultationUi";
+const EMPTY_CONSULTATION_UI: ConsultationUiState = { view: null, sessionId: null };
+
+export function getConsultationUi(): ConsultationUiState {
+  try {
+    const raw = localStorage.getItem(CONSULTATION_KEY);
+    if (!raw) return EMPTY_CONSULTATION_UI;
+    const p = JSON.parse(raw) as Partial<ConsultationUiState>;
+    return {
+      view: typeof p.view === "string" ? p.view : null,
+      sessionId: typeof p.sessionId === "string" ? p.sessionId : null,
+    };
+  } catch {
+    return EMPTY_CONSULTATION_UI;
+  }
+}
+
+export function patchConsultationUi(patch: Partial<ConsultationUiState>) {
+  const next = { ...getConsultationUi(), ...patch };
+  localStorage.setItem(CONSULTATION_KEY, JSON.stringify(next));
+}

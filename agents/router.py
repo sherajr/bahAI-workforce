@@ -213,18 +213,29 @@ def _chat_content_text(content) -> str:
     return "" if content is None else str(content)
 
 
+def _openai_error_text(e: requests.HTTPError) -> str:
+    """The message OpenAI actually sent, for deciding what to retry without."""
+    if e.response is None:
+        return ""
+    try:
+        return str((e.response.json().get("error") or {}).get("message", ""))
+    except Exception:
+        return (e.response.text or "")[:300]
+
+
 def _call_openai(messages: list[dict], temperature: float, max_tokens: int, _attempt: int = 0,
                  model: str = None, json_mode: bool = False,
-                 timeout: int | None = None) -> str:
+                 timeout: int | None = None, send_temperature: bool = True) -> str:
     if not OPENAI_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set - add it to .env to use OpenAI models")
     headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": model or "gpt-5.6",
         "messages": messages,
-        "temperature": temperature,
         "max_completion_tokens": max_tokens,
     }
+    if send_temperature:
+        payload["temperature"] = temperature
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     try:
@@ -234,15 +245,47 @@ def _call_openai(messages: list[dict], temperature: float, max_tokens: int, _att
         record_api_spend("openai_chat")
         return _chat_content_text(resp.json()["choices"][0]["message"].get("content"))
     except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 400 and json_mode:
+        status = e.response.status_code if e.response is not None else 0
+        # The GPT-5.x family refuses any temperature but the default: "Unsupported
+        # value: 'temperature' does not support 0.2 with this model." That made
+        # EVERY OpenAI call from this router fail with a 400 (caught 2026-08-21
+        # against gpt-5.6-sol), since a temperature was always sent. Retry once
+        # without it rather than making every caller know which models care.
+        if status == 400 and send_temperature and "temperature" in _openai_error_text(e).lower():
+            return _call_openai(messages, temperature, max_tokens, _attempt, model=model,
+                                json_mode=json_mode, timeout=timeout, send_temperature=False)
+        if status == 400 and json_mode:
             # Model/endpoint doesn't accept response_format - retry unconstrained.
             return _call_openai(messages, temperature, max_tokens, _attempt, model=model,
-                                json_mode=False, timeout=timeout)
-        if _attempt < 2 and e.response is not None and e.response.status_code in (429, 500, 502, 503):
+                                json_mode=False, timeout=timeout,
+                                send_temperature=send_temperature)
+        if _attempt < 2 and status in (429, 500, 502, 503):
             time.sleep(3 * (_attempt + 1))
             return _call_openai(messages, temperature, max_tokens, _attempt + 1, model=model,
-                                json_mode=json_mode, timeout=timeout)
+                                json_mode=json_mode, timeout=timeout,
+                                send_temperature=send_temperature)
         raise
+
+
+def call_openai(messages: list[dict], model: str, temperature: float = 0.3,
+                max_tokens: int = 2048, json_mode: bool = False,
+                timeout: int | None = None) -> str:
+    """
+    Run a prompt on a NAMED OpenAI model, with no task-type routing and no
+    per-agent override (mirroring call_local, rule 67, for the opposite reason).
+
+    The Live Consultation reasoner uses this: its provider is part of what the
+    feature IS — the owner chose OpenAI for the consultation brain and the
+    dashboard says so — and silently moving it onto another provider because a
+    dropdown elsewhere changed would be a lie about what heard the meeting. It
+    is not an agent in the Colony sense: no trust, no task type, no entry in
+    the model registry to keep in step.
+
+    Metering is unchanged: _call_openai records `openai_chat` at its own
+    chokepoint, exactly like every other paid call.
+    """
+    return _call_openai(messages, temperature, max_tokens, model=model,
+                        json_mode=json_mode, timeout=timeout)
 
 
 def call_grok_vision(image_path: str | list[str], prompt: str, system: str = None,

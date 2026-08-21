@@ -11,7 +11,7 @@ anywhere — an Etsy publishing path exists in the code but has never been
 connected (0 of 84 products ever published; see [Honest status](#honest-status-whats-real-whats-not)).
 
 > **AI coding agent? Start here.** Read [AGENTS.md](AGENTS.md) (canonical dev
-> orientation for every tool — commands, pipelines, 28 hard rules, gotchas) and
+> orientation for every tool — commands, pipelines, 86 numbered hard rules, gotchas) and
 > [STATUS.md](STATUS.md) (what's in progress, what recent sessions did) before
 > changing anything. Multiple AI coding tools work on this repo — check
 > `git status` and STATUS.md for in-flight work first.
@@ -110,6 +110,7 @@ Sheraj clicking approve. Two real posts are live as of 2026-07-09.
 | Visual layout editor | **Real and working**, exercised in production |
 | Secretary (dashboard + WhatsApp + Google Workspace) | **Real and live** — runs unattended at logon (Phases 1–3; Phase 4 "recovery rhythms" not started) |
 | X giveaway posting | **Real, human-approved** — 2 live posts |
+| Live Consultation (Consultation tab) | **Built 2026-08-21, run once for real.** Abigail sits in: realtime listening, transcript, consultation map, a restrained voice and a presence dial. 296 offline checks pass; the first real session led to the retune in rule 87 |
 | Etsy publishing | **Built, never connected.** No OAuth ever completed; `POST /etsy/publish` skips gracefully; 0 listings ever created. The listing copy the Scribe writes is currently review-and-display only |
 | Canva autofill | **Built, broken in practice** — connected once, but all 10 autofill attempts failed (API 400s, last tried 2026-07-05); superseded by the native layout editor |
 | Revenue | **$0 so far.** Total AI spend to date ≈ $14 (mostly metered per-call; ceiling $15/month) |
@@ -131,7 +132,8 @@ cd dashboard && npm install && npm run dev                       # UI on :5173
 Requires: Ollama running locally (`qwen3-16k`, `nomic-embed-text`), an xAI API
 key in `.env` (images + review), and `scripts/download_texts.py` +
 `scripts/ingest_texts.py` once to build the local library. Anthropic key only
-for the Secretary; Canva/Etsy/WhatsApp/Google/X keys all optional.
+for the Secretary; an OpenAI key for Live Consultation; Canva/Etsy/WhatsApp/Google/X
+keys all optional.
 
 ## What lives where
 
@@ -141,8 +143,10 @@ for the Secretary; Canva/Etsy/WhatsApp/Google/X keys all optional.
 | `CLAUDE.md` | Thin `@AGENTS.md` import for Claude Code — don't edit directly |
 | `STATUS.md` | Living snapshot + running log of recent sessions across all tools |
 | `bahai-workforce-constitution.md` | The 9 principles every product is scored against |
+| `docs/consultation-constitution.md` | What the live consultation assistant works under — the half asked of the model, and the half enforced in code |
 | `agents/api.py` | FastAPI backend — all endpoints + both pipeline orchestrations |
-| `agents/consultation.py` | The 3-round, scripture-grounded team consultation (one human pause) |
+| `agents/consultation.py` | The 3-round, scripture-grounded team consultation (one human pause) — the PRODUCT pipeline's, not the live one |
+| `agents/live_consultation*.py` | Live Consultation: Abigail sitting in on a real meeting over the OpenAI Realtime API — the floor governor, the silent brain, the private store (`private/consultation.db`). In a room she carries none of Sheraj's private data (rule 88) |
 | `agents/librarian.py` | Vector search over the writings (ChromaDB); citation verification |
 | `agents/artist.py` | Image prompt building + xAI image generation |
 | `agents/scribe.py` | Listing copy writing/revision; `_sanitize_claims` honesty scrub |
@@ -156,7 +160,7 @@ for the Secretary; Canva/Etsy/WhatsApp/Google/X keys all optional.
 | `agents/secretary*.py`, `agents/gcal.py` + `g*.py`, `agents/whatsapp.py`, `agents/scheduler.py`, `agents/badi_dates.py` | The Secretary subsystem (private data stays in `private/`, git-ignored) |
 | `agents/x_post.py` | The human-approved X giveaway pipeline |
 | `agents/etsy.py` / `agents/canva.py` | Publishing integrations — built, currently dormant (see status table) |
-| `dashboard/` | React + TypeScript + Tailwind UI (Pipeline, Products, Video, Post to X, Abigail, Colony, Settings + activity log strip) |
+| `dashboard/` | React + TypeScript + Tailwind UI (Pipeline, Products, Video, Post to X, Abigail, Consultation, Colony, Settings + activity log strip) |
 | `docs/ARCHITECTURE.md` | Diagrams + deeper conventions |
 | `scripts/` | One-time setup (text download/ingest) and diagnostics |
 

@@ -19,7 +19,7 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-08-18)
+## Snapshot (as of 2026-08-21)
 
 **Live and working** (committed, in production):
 - **Bookmark pipeline** (Librarian → Artist → consultation → Scribe → Reviewer
@@ -53,11 +53,22 @@ Design lives in `private/nuclei/` (git-ignored). Not reviewed by hand yet.
 Also committed in `d2b4609` (2026-08-17): the **Bahá'í Workforce light** on the
 Material World map (rules 65–68).
 
-**Uncommitted in the working tree**: the security hardening tranche of
-2026-08-19 -- the API's owner gate (rules 70-71) and the prompt-injection hold
-(rule 72). Not committed, not reviewed by hand. See the Activity Log for what
-Sheraj has to do once (restart the API and the dashboard) and what is
-deliberately still open.
+Also committed in `a306551` (2026-08-19): the **API's owner gate** (rules 70-71)
+and the **prompt-injection hold** (rule 72). This section claimed for two days
+that those were still uncommitted -- check `git status` rather than a line like
+this.
+
+Committed and pushed 2026-08-21: **Live Consultation** (rules 73-88) -- the
+Consultation tab, `agents/live_consultation*.py`,
+`dashboard/src/components/consultation/`, `docs/consultation-constitution.md`,
+`scripts/test_live_consultation.py`. Abigail sits in on a real meeting over the
+OpenAI Realtime API. Sheraj has run ONE real session, which produced the retune
+and the Abigail change (rules 87-88); it has not been re-run in a room since,
+and nothing here is reviewed by hand. The same commit fixes a repo-wide OpenAI
+bug: the router always sent a `temperature`, which the GPT-5.x family refuses,
+so the Colony's OpenAI provider (rule 41a) had never actually worked.
+
+**The working tree is otherwise clean.**
 
 Committed and pushed to `origin/master` on 2026-08-18: the GPT-5.6/OpenAI
 provider option and the rule 69 junior youth work. Neither has been reviewed by
@@ -94,6 +105,168 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-08-21 (later) -- Claude Code (Opus 5) -- the consultation assistant is Abigail, and she waits less
+
+Sheraj ran the first real session and gave two pieces of feedback: "a little too
+unresponsive", and "let's actually make it like it's Abigail, my secretary".
+Both are done (rules 87-88).
+
+**She waits less.** The old defaults were a formal body's pace: six seconds
+before a floor could even be CONSIDERED open, two minutes before offering
+anything, five minutes between offers. The new attentive baseline is floor-open
+3s, invited grace 0.4s, warmup 45s, cooldown 2min, importance 0.62 -- and
+`CONSULTATION_VAD_EAGERNESS` went `low` -> `medium`, which is the single biggest
+thing a person actually feels, because nothing downstream can start until the
+detector reports the turn has ended. The analysis debounce came down too (2
+turns / 25 words / 12s), so the map fills in during the meeting rather than
+after it.
+
+**And how long she waits is now a dial**, not a constant: `presence` is
+`reserved | attentive | present`, a per-session setting changeable MID-MEETING,
+because the moment you notice she is too slow is while you are sitting there
+waiting for her. `resolve_policy()` is the only place any of it is computed --
+the browser is served one resolved set of numbers per preset, so
+`consultationGovernor.ts` still contains no timing constant and no arithmetic of
+its own. **What the dial cannot do at any setting is make silence into
+permission**; the suite now asserts a ten-minute silence is refused at every
+preset in every mode.
+
+**She is Abigail.** Same name, same manner, same face (`RosterAvatar` with
+`/abigail.jpg`, served from `capabilities` so the tab hardcodes nothing), and
+her name is a wake word in both governors. The boundary that makes this safe is
+the interesting part: **in a room she carries none of his private world** -- no
+memory notes, no tasks, no calendar, no messages, no custom instructions -- and
+can act on nothing from in there. That is the reasoning behind her tool-less
+guest-WhatsApp tier (rule 27) applied to a room, and it is structural: nothing
+in `live_consultation_*` imports `secretary_store`, the suite asserts it, and
+the subsystem has no tools at all. The setup screen says so in plain words,
+because the people in the room deserve to know what she is and is not.
+
+Worth being explicit about, since it looks like a rule-16 problem and is not:
+**she is not on Claude in here and cannot be** -- there is no Claude realtime
+voice, so the words heard in the room come from the realtime model. Rules 16 and
+41a reserve Claude FOR her and pin her CHAT to it; neither says the person
+cannot have a mouth somewhere else. Her dashboard chat and WhatsApp are
+untouched, and the setup screen says which model is speaking rather than leaving
+it to be assumed.
+
+`presence` needed a real migration (`ALTER TABLE`, since `CREATE TABLE IF NOT
+EXISTS` is a no-op on a database that already exists) -- his `private/
+consultation.db` already had sessions in it from the first run. The suite builds
+a pre-`presence` database and proves an existing meeting survives with the
+default.
+
+**Verified:** 296 offline checks, all other suites unchanged, `tsc` and the
+build clean. The API was restarted onto this code and answers
+`/live-consultation/capabilities` with her name, her avatar and all three
+presets. Not yet re-run in a real room -- that is Sheraj's next session.
+
+### 2026-08-21 -- Claude Code (Opus 5) -- Live Consultation: an assistant that listens to a real meeting and almost never speaks
+
+New dashboard tab, **Consultation**, and a whole subsystem behind it (rules
+73-86, `docs/consultation-constitution.md`). A meeting of actual people is heard
+through the browser on the **OpenAI Realtime API** (WebRTC, `gpt-realtime-2.1`),
+transcribed live, and read continuously by a second, slower model
+(`gpt-5.6-sol`) that keeps a structured map of the consultation -- facts,
+assumptions, principles, concerns, ideas, agreements, tensions, questions,
+possible syntheses, decision candidates, action items. The assistant's mouth is
+usually closed: **listen constantly, understand continuously, speak rarely.**
+
+The hard part is not the transcription, it is the restraint. **Silence is never
+permission to speak** -- and that is enforced in code, in two places, not asked
+of a prompt. The realtime session is configured `create_response: false`, so
+voice-activity detection can report that a turn seems to have ended and
+*cannot* make the model talk; the decision belongs to a Speech Governor
+(`agents/live_consultation_governor.py`, mirrored in
+`dashboard/src/lib/consultationGovernor.ts` for barge-in latency, with every
+timing number served from Python so the two cannot drift). The floor check runs
+LAST and can only ever withhold: something material has to have been noticed
+first. A human starting to speak wins from any state, including mid-sentence --
+cancel, clear the audio buffer, truncate the unheard tail, never resume. For an
+unsolicited thought the assistant may at most ask one short question ("I think I
+see a possible synthesis. Would it be useful to hear it?") and then stop; if
+nobody answers, that is a no, and it is never asked again.
+
+Everything said lives in `private/consultation.db` and nowhere else (rule 73).
+The suite proves it the strong way -- it reads `workforce.db` as bytes and
+requires a sentence spoken in a test meeting to be absent. `OPENAI_API_KEY`
+never reaches the browser: the API mints a short-lived client secret and the
+page does its own handshake. Quotations come only from the verified Librarian
+index and a near miss is a failure, not a correction -- the voice says a passage
+is on screen rather than reciting it. Nothing is ever a decision until Sheraj
+(or whoever is in the room) presses Confirm; a meeting that ends undecided says
+so.
+
+**Two real bugs found while wiring this up, both live-checked, both fixed:**
+- `router._call_openai` always sent a `temperature`, and the GPT-5.x family
+  refuses any but its default -- so **every** OpenAI call from this repo came
+  back 400. That means the Colony's OpenAI provider (rule 41a, shipped
+  2026-08-18) has never actually worked. It now retries once without the field,
+  the same shape as the existing `response_format` retry.
+- The bare `gpt-5.6` id 404s on this account (`GET /v1/models/gpt-5.6` ->
+  model_not_found) even though `models.py` offers it as a documented alias. The
+  real ids are `gpt-5.6-sol` / `-terra` / `-luna`. The consultation reasoner
+  defaults to `-sol`, and `capabilities` now reports a configured model the
+  account does not have -- only when the lookup succeeded and said 404, never
+  from a network failure (rule 41a's discipline).
+
+**Verified:** `scripts/test_live_consultation.py` -- 247 offline checks (296 after the retune), no
+network, no keys, no paid calls. All other suites still pass (api_auth 66,
+colony 135, secretary_colony 92, job_cancel 24, wallet 90, nuclei 281,
+injection 50). `npx tsc --noEmit` and `npm run build` clean. Live checks that
+cost nothing: OpenAI accepted the realtime session config and echoed
+`create_response: false` back. One genuinely paid check (~2 calls, a few cents):
+a real analysis pass on an invented five-turn transcript, which produced a
+correct map -- facts marked *uncertain* rather than confirmed, the unexamined
+assumption caught, a synthesis offered, a decision *candidate* and no confirmed
+decision, and one observation it judged not worth interrupting for.
+
+**What is NOT done, deliberately:** no audio recording (the endpoint refuses
+`record_audio` rather than accepting a flag that would read as "you are being
+recorded"), no diarisation (a turn says "Participant" until a human types a
+name), no post-session re-transcription.
+
+**Sheraj has to do the last mile by hand:** restart the API to pick up the new
+router, then run a real meeting with a real microphone. Nobody has yet heard
+this thing speak. The step-by-step first run is at the end of
+`docs/consultation-constitution.md` ("Trying it for the first time"). Note that
+a realtime meeting is the most expensive thing in this repo per minute (metered
+as `openai_realtime`; the client-secret endpoint refuses over the monthly
+ceiling unless you explicitly accept it).
+
+### 2026-08-20 -- Claude Code (Opus 5) -- Qwen3.8-27B pulled and measured: too big for this laptop
+
+Sheraj asked for the new 27B Qwen as another local option. It is real --
+Qwen3.8-27B, released 2026-08-14, 27.8B dense multimodal, Apache 2.0 -- but
+Ollama's official build is 18GB against 8GB of VRAM and 13.7GB of system RAM,
+so that build cannot load here at all. With his go-ahead I pulled Unsloth's
+IQ3_XXS instead (~11GB) and made `qwen3.8-27b-16k`, a derived tag pinning
+num_ctx to 16384; the stock 256K context would spend more on KV cache than the
+card holds. Modelfile mirrors qwen3-16k so the A/B is like-for-like.
+
+**It works and it is unusably slow: 2.5 tok/s against qwen3-16k's 29** -- 11x,
+because only 43% of it fits on the card (`ollama ps`: 57%/43% CPU/GPU). An 8K
+variant reached only 2.8 tok/s, so this is not a tuning problem; a 27B does not
+fit in 8GB at any quant worth running. QUALITY was not the problem: on the three
+machine-parsed contracts this repo actually depends on -- the Librarian's
+VERDICT block (rule 10), Reviewer JSON (rule 5), video shot JSON (rule 33b) --
+it passed all three, same as the 8B, checked with the repo's own parsers
+(`_parse_verdict_grounded`, `_parse_review`). Bench script is in the scratchpad,
+not committed.
+
+No code changed. It appears in the Colony dropdown on its own because rule 41a
+discovers Ollama tags rather than hardcoding them; `validate_choice` accepts it
+for a workforce agent and still refuses it for Abigail. **Left NOT selected** --
+at 2.5 tok/s a video plan (already 10-15 min on the 8B, rule 33b) would run
+into hours. Worth it only for a single high-value pass where Sheraj can wait.
+
+One footgun left deliberately, for Sheraj to decide: the raw
+`hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ3_XXS` tag ALSO shows in the dropdown and
+carries the 256K context. Picking that one instead of `qwen3.8-27b-16k` would
+try to allocate a KV cache far past the card. Removing that tag is one
+`ollama rm`, but it is an 11GB re-download to undo, so it was not done
+unilaterally.
 
 ### 2026-08-19 -- Claude Code (Opus 5) -- the API had no lock on the door
 

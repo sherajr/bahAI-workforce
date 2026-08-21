@@ -8,6 +8,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { SecretaryPanel } from "./components/SecretaryPanel";
 import { XPostsPanel } from "./components/XPostsPanel";
 import { VideoPanel } from "./components/VideoPanel";
+import { ConsultationPanel } from "./components/consultation/ConsultationPanel";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("pipeline");
@@ -20,6 +21,9 @@ export default function App() {
       {tab === "video" && <VideoPanel />}
       {tab === "x-posts" && <XPostsPanel />}
       {tab === "secretary" && <SecretaryPanel />}
+      {/* A live meeting between people, heard through the browser. Its own
+          subsystem and its own private store (rules 73-86). */}
+      {tab === "consultation" && <ConsultationPanel />}
       {/* The Colony can send you to Abigail's own tab — she is a node in the
           graph but is never chatted with through it (rules 15/16). */}
       {tab === "colony" && <ColonyPanel onNavigate={setTab} />}
