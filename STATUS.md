@@ -19,7 +19,7 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-08-21)
+## Snapshot (as of 2026-08-24)
 
 **Live and working** (committed, in production):
 - **Bookmark pipeline** (Librarian → Artist → consultation → Scribe → Reviewer
@@ -62,13 +62,50 @@ Committed and pushed 2026-08-21: **Live Consultation** (rules 73-88) -- the
 Consultation tab, `agents/live_consultation*.py`,
 `dashboard/src/components/consultation/`, `docs/consultation-constitution.md`,
 `scripts/test_live_consultation.py`. Abigail sits in on a real meeting over the
-OpenAI Realtime API. Sheraj has run ONE real session, which produced the retune
-and the Abigail change (rules 87-88); it has not been re-run in a room since,
-and nothing here is reviewed by hand. The same commit fixes a repo-wide OpenAI
-bug: the router always sent a `temperature`, which the GPT-5.x family refuses,
-so the Colony's OpenAI provider (rule 41a) had never actually worked.
+OpenAI Realtime API. That commit also fixes a repo-wide OpenAI bug: the router
+always sent a `temperature`, which the GPT-5.x family refuses, so the Colony's
+OpenAI provider (rule 41a) had never actually worked.
 
-**The working tree is otherwise clean.**
+Sheraj has now run TWO real sessions, and the tab has changed a lot since the
+second one. **Everything below is UNCOMMITTED and none of it has been used in a
+real room yet**, though all of it is exercised by the suite and over HTTP:
+- 2026-08-24: she was cancelling her own answers, and the presence dial was
+  missing its biggest lever (rule 89, and the amendment to rule 87).
+- 2026-08-27: the spend-ceiling dead end, benign realtime errors no longer
+  shown, the opening passage collapses, and the glance panel (rule 93).
+- 2026-08-25: the live map is four things instead of ten lists; a readable
+  REPORT is written when the meeting ends and can be copied or downloaded;
+  participants can be named and matched to voices from a recording afterwards;
+  the setup boxes can be dictated; she opens the meeting with the consultation
+  passage and keeps time (rules 90-92).
+
+- 2026-09-03: **the record became true and human-owned** (rules 94-99).
+  Privacy copy that was false is corrected and starting is gated on the host
+  attesting the room was told; the owner/deadline persistence defects are
+  fixed; the map, the transcript and the commitments can all be corrected by
+  hand and are then protected from the model; a fact says who established it; a
+  concern is never deleted; End session opens a closeout where a person
+  confirms what actually happened; and `Consultation: A Compilation` is
+  ingested as a verified corpus in its own collection. The offline suite was
+  found to be making three real paid calls per run and now proves it is
+  offline.
+
+Nothing in this subsystem has been reviewed by hand. **The closeout, the map
+editing and the transcript correction have never been used in a real meeting.**
+
+**A real loss, on 2026-09-03:** roughly 426 lines of UNCOMMITTED tests covering
+rules 89-93 (the opening, the clock, participants and diarisation, dictation,
+the glance panel and the report) were destroyed by a bad file write during that
+session and could not be recovered -- not from git (never staged), a stash, a
+worktree or editor history. Replacement coverage for those rules was written
+fresh against the source and passes, but it is a rebuild, not the original, and
+is probably thinner. The lesson, in case it saves someone else: work in that
+tree was uncommitted for two weeks, and nothing else would have made it
+recoverable.
+
+**Also uncommitted:** the `npm run dev` startup work of 2026-08-24
+(`dashboard/scripts/`, `scripts/ensure_backend.ps1`,
+`scripts/clear_stale_dashboards.ps1`).
 
 Committed and pushed to `origin/master` on 2026-08-18: the GPT-5.6/OpenAI
 provider option and the rule 69 junior youth work. Neither has been reviewed by
@@ -105,6 +142,301 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-03 -- Claude Code (Opus 5) -- the consultation record becomes true, and human-owned
+
+Sheraj asked for Live Consultation to stop being a transcriber with an opinion
+and start producing a record people can trust and correct. Phase 1 of an agreed
+plan; the TRUTH compass, consultation projects and the post-meeting Abigail
+handoff were deliberately deferred to a second pass.
+
+**What was actually wrong, measured rather than assumed** (all from
+`private/consultation.db`, counts only):
+- 203 action items carried **3 owners and 0 due dates**; one meeting held 102
+  near-identical actions. `upsert_action_item` matched on
+  normalised text and returned the old row untouched, so an owner said aloud
+  after the action was first noticed could never be recorded.
+- 116 decision candidates, one meeting at 58, same cause.
+- 2624 map items carried provenance on **28** of them, because
+  `source_turn_ids` was asked for in a trailing sentence and never appeared in
+  the JSON schema the model was shown.
+- Two sentences on screen were false ("stays on this machine", "never heard by
+  anyone else") and a third panel said there was no recorder, eighty lines
+  above the working recorder checkbox.
+- The "offline, free, no keys" suite made **three real authenticated calls per
+  run** on the owner's key -- a model lookup, an actual mint of a live realtime
+  credential, and a billable chat completion via `end_session` -> `build_report`
+  -- and still printed 408 passed, because each sat behind an
+  `except Exception`. The charge was invisible: spend is metered into a temp
+  database the suite discards.
+
+**What changed** (rules 94-99, appended to `AGENTS.md`): truthful privacy copy
+and a server-enforced host attestation; per-session transcript retention and a
+"delete the words, keep the record" path; identity on the map's stable id so
+refinements land; `human_edited` protection; honest fact states where only a
+human may claim more than "reported"; a lifecycle instead of deleting concerns;
+a closeout where "no decision was reached" is a first-class outcome and a
+confirmed decision can carry dissent with it; commitments with tri-state owner
+acceptance; and a socket-level tripwire (deriving from `BaseException`, rule
+55's reasoning) that makes the suite provably offline.
+
+Also: `Consultation: A Compilation` (bahai.org) ingested as a verified corpus
+for the live consultation only -- its own ChromaDB collection, cosine space to
+match the others, per-passage citations, and a flag keeping Assembly-specific
+guidance out of a general consultation. `bahai_texts` is untouched at 6,342
+chunks, so nothing changed for quote cards (rule 11).
+
+Files: `agents/live_consultation{,_store,_reasoner,_api,_report,_writings}.py`,
+`agents/librarian.py` (one additive metadata passthrough),
+`scripts/download_consultation_compilation.py`, `scripts/ingest_consultation.py`,
+`dashboard/src/components/consultation/*` (new `ConsultationCloseout.tsx`),
+`dashboard/src/lib/{api,consultationTypes}.ts`.
+
+Verified: all eight Python suites green (Live Consultation 510, api_auth 66,
+injection 50, colony 135, secretary_colony 92, job_cancel 24, wallet 90,
+nuclei 281, video 288), `npx tsc --noEmit` clean, production build clean, and
+the migration exercised against a COPY of the real database (9 sessions, 467
+turns, 203 actions, 116 decisions as of 2026-09-09) with every row preserved,
+`init_db` run twice, and no default implying consent, review or deletion that
+never happened. **Not tested in a real meeting.**
+
+Note: Sheraj held a real consultation on 2026-09-04 while this work sat in the
+tree. It ran on the OLD code -- the API had not been restarted -- so it hit the
+persistence defect like the rest (34 actions, no owners), and the real database
+is still unmigrated. The migration runs the first time the API restarts on this
+code.
+
+**Damage done in this session, recorded honestly:** ~426 lines of uncommitted
+tests for rules 89-93 were destroyed by a bad file write
+(`io.open(..., newline="\\n")`, which truncates before raising) and were
+unrecoverable. Replacement coverage was written fresh and passes, but it is not
+what was lost. Nothing else in the tree was affected.
+
+
+### 2026-08-26 -- Claude Code (Opus 5) -- the scripture corpus, exported to share
+
+Sheraj asked whether the Bahá'í scripture vector databases could be handed to
+another AI as a single attached file. The vectors cannot: `vector_store/` is
+73 MB of ChromaDB holding 6,342 `bahai_texts` chunks and the 67
+`ruhi_book1_quotes`, each a 768-number nomic-embed-text embedding, and those
+numbers are only readable by that same embedding model plus a retrieval layer.
+The TEXT travels, so `scripts/export_scripture.py` writes portable copies to
+`outputs/scripture/`: one complete markdown of all 4,085 passages (~357k words),
+a per-book split so each file fits an ordinary context window, the curated Ruhi
+Book 1 pool, and a JSONL for rebuilding an index elsewhere. Passages are
+verbatim (verified word-for-word against `texts/*.json`); only the source
+pages' hard line wrapping was removed, and every passage keeps its section
+heading and reference.bahai.org link so anything quoted from it can be cited.
+Nothing in the pipelines changed -- this reads `texts/` and
+`agents/ruhi_book1_source.py` and writes only into `outputs/`.
+
+### 2026-08-27 (later) -- Claude Code (Opus 5) -- the brain moved to Luna
+
+`CONSULTATION_REASONING_MODEL=gpt-5.6-luna` in `.env` (was the code default
+`gpt-5.6-sol`; the code default is unchanged, so this is a machine-local
+setting). Checked before switching, per rule 41a's discipline about never
+assuming a model id: `gpt-5.6-luna` returns 200 on this account, and a real call
+through `router.call_openai` with `json_mode` came back as clean JSON that
+`_extract_json` parsed -- which is how the reasoner actually uses it.
+
+**This is the brain, NOT the voice.** `CONSULTATION_REALTIME_MODEL` is unchanged
+and is priced per minute of audio; nothing here makes a meeting cheaper to hold.
+Existing sessions keep `gpt-5.6-sol` in their own row, so re-running an old
+report uses what that session was created with.
+
+Worth recording because it was the reason for the switch: August spend was
+`image_gen` $7.95 (159 calls, the Artist -- nothing to do with consultation),
+`openai_chat` $3.36, `openai_realtime` $3.12, `grok_vision` $1.41,
+`grok_chat` $0.41, `claude_chat` $0.15, `openai_transcribe` $0.02. The single
+largest line is bookmark/card artwork, not the Consultation tab.
+
+### 2026-08-27 -- Claude Code (Opus 5) -- unblocked, and a visual aid
+
+Sheraj, mid-test, with a screenshot: "I'm trying to test it now and it's not
+letting me do anything." Three separate things, rule 93.
+
+**The blocker was the spend ceiling, and the message was the bug.** He is at
+$15.72 against a $15 ceiling, so the client-secret endpoint refused (rule 85,
+correctly) -- but told him to "start anyway from the setup screen" while he was
+on the LIVE screen, sitting in front of a started, recording session with no
+button to press. The detail is now a plain fact and **Start anyway** sits under
+it. Verified against the real ceiling: 402 without acceptance, a real `ek_`
+credential with it.
+
+**The error recorder from 2026-08-24 earned its place.** His session had
+`[invalid_request_error during listening_idle] Cancellation failed: no active
+response found` on the record -- a race we cannot win (the cancel is on the wire
+when her response ends by itself), and nothing to alarm anyone with. Benign
+errors are now filtered out of the banner and still recorded.
+
+**"All I see is the initial announcement"** was the opening passage: ~1000
+characters holding the top of a laptop screen and pushing the transcript off the
+bottom. It now collapses to one line when she stops reading, and is capped and
+scrollable while open.
+
+**And the visual aid he asked for** (`ConsultationGlance.tsx`): a proportional
+bar of agreed / unresolved / open questions, the subjects touched as chips (a
+new `themes` list on the state), and "still to address" -- built from
+`_open_threads`, the SAME function her spoken time check reads, so the screen
+and her voice cannot disagree. Counts only, never a completeness percentage.
+
+**Verified:** 408 offline checks (was 396), `test_api_auth` 66/66, `tsc` and the
+build clean, API restarted and the over-ceiling path exercised live.
+
+### 2026-08-25 -- Claude Code (Opus 5) -- the map got short, and the meeting got a report
+
+Sheraj on the Consultation tab: "I don't like how the consultation map is and
+how the confirmed decisions work. It is far too long to read." He was right, and
+the honest answer to "are consultation maps supposed to be like that?" is that
+there is no such thing -- I invented the name and then rendered the reasoner's
+working structure straight onto the screen. Rules 90-92 are new.
+
+**The live map is four things now**: where we agree, still unresolved, decided,
+what happens next. The other ten lists moved to a Detail tab with the full
+transcript. Decision candidates stopped being the loudest thing on the page --
+rule 81 is untouched (a human still confirms) but adjudicating her guesses
+mid-meeting was a job the tool was handing the room instead of doing for it.
+
+**A report is written when the meeting ends**, and it is the front page of a
+finished consultation. HYBRID, and the split is the point: the reasoning model
+writes the narrative (it condenses -- that is what he asked for and what a
+template cannot do), while the decision, the actions, the owners and any
+passages are copied VERBATIM from the record. `_narrative` takes three prose
+fields and drops everything else, so a model returning a `decision` or an
+`action_items` list -- they do, and the suite feeds it exactly that -- cannot
+have it printed. That is where rules 81 and 83 would have been quietly undone.
+Copy and Download work. Verified against the real model once, on a throwaway
+session: it correctly reported "No decision was confirmed" and left an unowned
+action unowned.
+
+**Named speakers, honestly.** He asked whether OpenAI can tell who is who. In a
+live session, no -- `gpt-4o-transcribe-diarize` is documented as not available
+to the Realtime API. So: record the room (his choice, explicitly), diarise the
+file afterwards, and a human maps "voice B" to a name once. Diarisation is not
+recognition and this never crosses that line -- the API accepts voice reference
+clips to skip the mapping and we do not use them, because that is biometric
+enrolment of his friends. The diarised transcript is stored BESIDE the live one,
+never over it. Recording used to be refused outright (rule 86) and the setup
+screen said nothing was kept; that was honest then and would be a lie now, so
+the screen, the header light and the privacy paragraph all say it plainly.
+
+**She opens the meeting and keeps the time.** In a Bahá'í consultation she reads
+the passage on consultation he supplied, word for word, with the text on screen
+beside her -- code-owned and fixed, which is what makes it safe under rule 84
+(that rule stops a model paraphrasing scripture; it never banned scripture being
+heard). Citation verified against bahai.org. A general consultation gets the
+same qualities in her own words, quoting nothing and naming no religion. If a
+duration is set she speaks twice at most -- at the warning point and at time --
+giving the time and putting at most two loose ends from the map to the group as
+questions. Both are a new SCHEDULED governor family: invited, because a human
+asked in advance, and still refused by scribe mode, mute, pause and anyone
+holding the floor. Neither is ever reached by silence.
+
+**Also, a mic on every setup box** (rule 91b): press, say what the meeting is
+about, press again. In-memory only -- nothing about dictation is written to disk
+at either end -- on the OpenAI account already in use rather than the browser's
+built-in recognition, which would hand it to Google. A press too short to be
+speech is thrown away without being sent, because a transcription model given
+silence invents a plausible word rather than returning nothing (one second of
+silence really did come back as "Sijainti."). Dictated text APPENDS, so it can
+never wipe what is already typed.
+
+**Verified:** 396 offline checks (was 308), `test_api_auth` 66/66 -- which is
+what proves the new endpoints are behind the owner gate -- plus colony, nuclei,
+wallet and injection suites unchanged, `tsc` and the production build clean. The
+API was restarted onto this code and the opening, the time check, participants
+and the report were all exercised over HTTP. **Not yet used in a real room.**
+
+### 2026-08-24 (later) -- Claude Code (Opus 5) -- Abigail stops cancelling her own answers
+
+Sheraj, after a real session: "when I talk to abigail and just before she
+responds it gives an error and she doesn't respond", and she "feels very
+unresponsive even in the most responsive modes". Two separate faults, and they
+were feeding each other. Rule 89 is new; rule 87 gained the lever it was
+missing.
+
+**The error was us, not OpenAI.** Barge-in is three events (rule 76), and
+`cutOff` fired all three whenever the floor was `ai_speaking` *or*
+`ai_preparing`. In the preparing window there is no audio yet and often no
+response yet, so each event was refused: cancelling nothing, clearing an empty
+buffer, truncating past the end of an item. And the cancel LANDED when the
+response had just been created -- so a stray VAD trigger while she was thinking
+threw her answer away, which is precisely "an error, and then she doesn't
+respond". The client now tracks what is actually true on the wire and sends
+each event only when the thing it acts on exists. Barge-in is untouched:
+interrupted mid-sentence, all three still fire.
+
+**The dial was missing its biggest lever.** `CONSULTATION_VAD_EAGERNESS` was
+one fixed value while every other number scaled with presence -- and nothing
+downstream can start until the detector reports the turn ended, so it is the
+largest part of the wait. *Present* moved all the small waits and left the big
+one alone, which is exactly what "unresponsive even in the most responsive
+modes" feels like. It is now per-preset (low/medium/high), the env var demotes
+to an explicit pin, and a mid-meeting change is pushed with one
+`session.update` -- carrying the SERVER's `turn_detection` block verbatim,
+because a browser-built one could omit `create_response: false` and rule 75
+would be gone with nothing erroring anywhere.
+
+**A third one found on the way, worth more than it looks:** both governors
+answer "wait, try again in N ms" and the client threw N away, holding every
+queued ask until the floor-open timer instead. That made a FAST transcript
+slower than a slow one -- arriving inside the 400ms invitation grace meant
+waiting the full floor-open window (3s attentive, 1.65s present) rather than
+~200ms. Honoured now.
+
+**And so the next one is not guessed at:** a realtime error is now RECORDED
+(`POST .../client-error` -> a `realtime_error` row in the private DB), not just
+shown in a banner that dies with the page. This bug had to be diagnosed from
+four words because the backend log was all 200s -- the failing exchange never
+touches our API. The row is inert for the floor, so a fault cannot quietly
+extend a cooldown. A `response.done` with status `failed` surfaces the same way
+instead of leaving a silent gap in the transcript.
+
+**Verified:** 308 offline checks (was 296), `test_api_auth` 66/66 -- which is
+what proves the new endpoint is behind the owner gate -- `tsc` and the
+production build clean. The API was restarted onto this code and
+`/live-consultation/capabilities` serves eagerness low/medium/high per preset
+with `create_response` false in all three. **Not yet re-run in a real room**;
+that is the only thing that will settle whether she now feels right, and the
+error record is there to answer it if she does not.
+
+### 2026-08-24 -- Claude Code (Opus 5) -- `npm run dev` starts the whole app, in order
+
+Sheraj reported the app taking "forever to load" and then saying the backend was
+not running. Two independent faults, both found live and both fixed by making
+`npm run dev` do the starting instead of leaving it to luck.
+
+**The backend was alive with a dead socket.** The API process from the 2026-08-21
+logon was still running, but uvicorn's accept loop had exited with WinError 64
+(`logs/api.err.log`), so nothing was on :8765. The Scheduled Task still read
+"Ready" because it only triggers at logon, so nothing restarted it. Any check by
+PID or by port would have said everything was fine -- only `/health` told the
+truth, so that is the only thing `scripts/ensure_backend.ps1` trusts. It also
+clears every matching process rather than just the listener: the venv's
+`pythonw.exe` runs the real interpreter as a child, so one instance is two
+processes (verified: pythonw 18060 -> python 32700, only the child on the port).
+
+**And `localhost:5173` was a dead server.** Four Vite dev servers from 08-13 and
+08-14 were still holding :5173-:5176 and answering nothing, while each new
+`npm run dev` quietly moved to the next free port -- so the bookmarked address
+spun for ever. `scripts/clear_stale_dashboards.ps1` clears them, scoped to node
+processes naming this repo's own Vite binary so nothing else can match.
+
+`dashboard/scripts/dev.mjs` sequences it: API answering -> Ollama and tunnel
+REPORTED (never started -- a wrong guess there is a second copy of something) ->
+leftovers cleared -> Vite. Ctrl+C stops the dashboard only, since Abigail
+answers WhatsApp through the API with no browser open. `npm run dev:web` is the
+old bare `vite`. Verified end to end: recovery from the real broken state (both
+zombies cleared, healthy in 11.2s), then a clean run to :5173 with
+`/api/health` 200 through the proxy.
+
+**Still open:** the WinError 64 socket death recurred once during this session,
+so the API can still die on its own between sessions -- `npm run dev` now
+recovers it, but nothing watches it while the dashboard is closed. A watchdog
+(or a repeating trigger on the Scheduled Task) is the real fix and was not
+done. Note also that `start_secretary_server.ps1` OVERWRITES `logs/api.*.log`
+on every start, so a restart destroys the evidence of the crash that caused it.
+
 
 ### 2026-08-21 (later) -- Claude Code (Opus 5) -- the consultation assistant is Abigail, and she waits less
 

@@ -147,7 +147,41 @@ erDiagram
 | Post to X | `XPostsPanel.tsx` | `POST /x-post`, `GET /x-post/pending`, `.../drafts`, `.../posted`, `POST /x-post/approve/{id}`, plus edit/regenerate/discard variants — see `dashboard/src/lib/api.ts` |
 | Secretary | `SecretaryPanel.tsx` | `POST /secretary/chat` and the calendar/Gmail/Drive/Docs/Sheets/tasks/reminders/notes/contacts surface — see AGENTS.md's Secretary section and `dashboard/src/lib/api.ts` for the full list |
 | Trust | `TrustPanel.tsx` | `GET /trust/report`, `GET /agents` |
+| Consultation | `ConsultationPanel.tsx` | `GET /live-consultation/capabilities`, `POST /live-consultation/sessions`, `.../start` (refused until the host attests), `.../inform`, `.../turns`, `.../analyze`, `.../speech-permission`, `.../ask`, `.../opening`, `.../time-warning`, `.../end`, `.../closeout`, `DELETE .../transcript`, and the human-authority surface (`PATCH .../map/{list}/{id}`, `.../turns/{id}/text`, `.../actions*`) — see AGENTS.md rules 73–99 |
 | Settings | `SettingsPanel.tsx` | `GET /canva/status`, `GET /etsy/status` |
+
+## A live consultation, end to end
+
+Two stores and two models. Nothing said in the meeting reaches `workforce.db`
+(rule 73); the only thing that crosses is money.
+
+```mermaid
+flowchart TD
+    SET[Setup: question, framework, presence
+retention choice + host attestation] -->|"POST /sessions"| DRAFT[(private/consultation.db)]
+    SET -->|"POST /sessions/id/start
+REFUSED without the attestation"| LIVE[Live session]
+    LIVE -->|WebRTC, ephemeral key| RT[OpenAI Realtime
+ears and mouth]
+    RT -->|finalised turns| DRAFT
+    DRAFT -->|debounced, incremental| BRAIN[Reasoning model
+the silent brain]
+    BRAIN -->|"a REVISABLE map:
+reported / disputed only,
+nothing deleted, turn ids cited"| DRAFT
+    LIVE -->|"every word she might say"| GOV{Speech governor
+silence never permits}
+    HUM[The people in the room] -->|"correct the map, the transcript,
+the commitments"| DRAFT
+    LIVE -->|"End session"| CLOSE[Closeout: a human confirms
+what actually happened]
+    CLOSE -->|"decisions, accepted commitments,
+retained concerns, retention"| DRAFT
+    CLOSE --> REP[Report: model prose +
+verbatim record]
+    CLOSE -.->|"if chosen"| DEL[Transcript deleted;
+the record is kept]
+```
 
 Images are served from `outputs/` at `GET /outputs/{filename}`.
 `POST /canva/autofill` is kept as a manual utility (re-push an image to Canva).

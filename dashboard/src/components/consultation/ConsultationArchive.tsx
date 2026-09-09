@@ -24,7 +24,8 @@ export function ConsultationArchive({
         <div>
           <h2 className="font-display text-lg text-slate-100">Consultations</h2>
           <p className="text-sm text-slate-400">
-            Every session is stored on this machine only, and can be deleted outright.
+            Every session is stored on this machine, unencrypted, and can be deleted
+            outright.
           </p>
         </div>
         <Button onClick={onNew} disabled={!canStart}>
@@ -40,8 +41,9 @@ export function ConsultationArchive({
         <Card>
           <CardContent className="py-10 text-center text-sm text-slate-400">
             <Mic className="mx-auto mb-3 h-6 w-6 text-slate-600" />
-            No consultations yet. Abigail sits in, records what was said, keeps a map of
-            the consultation as it develops — and it is never heard by anyone else.
+            No consultations yet. Abigail sits in, keeps a record of what was said and a
+            map of the consultation as it develops. What is spoken goes to OpenAI to be
+            turned into text; the record is kept on this machine.
           </CardContent>
         </Card>
       )}

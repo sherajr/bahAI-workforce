@@ -35,6 +35,12 @@ export interface FloorPolicy {
   permission_timeout_ms: number;
   min_importance: Record<string, number>;
   stale_revisions: number;
+  /** How readily the detector calls a turn finished. Part of the policy because
+   *  it is the biggest single contributor to how long she appears to wait. */
+  vad_eagerness: string;
+  /** The whole code-owned detector block, to be echoed back verbatim on a
+   *  mid-meeting change of presence — never rebuilt here (rule 75). */
+  turn_detection: Record<string, unknown>;
 }
 
 export interface AnalysisPolicy {
@@ -74,6 +80,30 @@ export interface ConsultationCapabilities {
   state_labels: Record<string, string>;
   spend: { month_total: number | null; monthly_ceiling: number; over_ceiling: boolean; known: boolean };
   missing_key_message: string;
+  /** Served rather than duplicated here, for the same reason the floor policy is
+   *  (rule 87): two copies of a list of states disagree eventually. */
+  retention_policies: RetentionPolicy[];
+  default_retention: string;
+  closeout_outcomes: { id: string; label: string }[];
+  /** `human_only` marks a state no model may ever set — the epistemic boundary
+   *  in rules 96 and 95, carried to the UI so it can show which is which. */
+  fact_states: VocabEntry[];
+  item_lifecycle: VocabEntry[];
+  action_statuses: VocabEntry[];
+  map_lists: string[];
+}
+
+export interface RetentionPolicy {
+  id: string;
+  label: string;
+  blurb: string;
+  days: number | null;
+}
+
+export interface VocabEntry {
+  id: string;
+  label: string;
+  human_only: boolean;
 }
 
 export interface ConsultationSession {
@@ -97,6 +127,33 @@ export interface ConsultationSession {
   ended_at: string | null;
   turn_count?: number;
   decision_confirmed?: boolean;
+  /** 0 means the meeting is untimed. */
+  duration_minutes: number;
+  /** How long before the end she gives the spoken time check. */
+  warn_minutes: number;
+  report_md: string | null;
+  report_at: string | null;
+  audio_status: "none" | "pending" | "uploaded" | "transcribing" | "done" | "failed";
+  audio_note: string;
+  retention_policy: string;
+  /** When the host attested that the room had been told. Null means they never
+   *  did — which is why an old session reads as "not attested" rather than as
+   *  consent nobody gave (rule 94). */
+  participants_informed_at: string | null;
+  closeout_outcome: string | null;
+  closeout_note: string;
+  closeout_at: string | null;
+  reflection_at: string | null;
+  transcript_deleted_at: string | null;
+}
+
+export interface ConsultationParticipant {
+  id: string;
+  session_id: string;
+  name: string;
+  /** The diarised voice ("A", "B") this person turned out to be — null until a
+   *  human maps it. Nothing infers it. */
+  speaker_key: string | null;
 }
 
 export interface ConsultationTurn {
@@ -111,6 +168,10 @@ export interface ConsultationTurn {
   started_at: string | null;
   ended_at: string | null;
   created_at: string;
+  /** Set when a human fixed what the transcription misheard. The original is
+   *  deliberately not kept — see `store.correct_turn`. */
+  corrected_at?: string | null;
+  source?: "live" | "diarized";
 }
 
 export interface MapItem {
@@ -122,12 +183,23 @@ export interface MapItem {
   owner?: string | null;
   due?: string | null;
   source_turn_ids?: string[];
+  /** Rules 96/97: what the item's status actually claims, and what happened to
+   *  a concern. Nothing is deleted from the map any more. */
+  lifecycle?: string;
+  resolution_note?: string;
+  resolved_at?: string;
+  evidence_note?: string;
+  /** A person edited the words. The reasoner may not overwrite them (rule 95). */
+  human_edited?: boolean;
+  human_reviewed?: boolean;
 }
 
 export interface ConsultationStateMap {
   question?: string;
   objective?: string;
   summary?: string;
+  /** Short topic labels — what the group has actually talked about. */
+  themes?: MapItem[];
   facts?: MapItem[];
   assumptions?: MapItem[];
   principles?: MapItem[];
@@ -169,7 +241,15 @@ export interface ConsultationDecision {
   status: "candidate" | "confirmed" | "rejected";
   created_at: string;
   confirmed_at: string | null;
+  /** Concerns the group chose to carry forward WITH the decision rather than
+   *  settle. A decision can be confirmed and still leave dissent standing. */
+  retained_concerns: string[];
+  human_edited?: boolean;
+  map_id?: string | null;
 }
+
+export type ActionStatus =
+  | "proposed" | "accepted" | "in_progress" | "blocked" | "completed" | "dropped";
 
 export interface ConsultationAction {
   id: string;
@@ -177,8 +257,21 @@ export interface ConsultationAction {
   action: string;
   owner: string | null;
   due: string | null;
-  status: "open" | "done";
+  status: ActionStatus;
   created_at: string;
+  /** THE distinction (rule 95). `null` = nobody has recorded an answer, which
+   *  is a different and more honest thing than `false` = asked, did not accept.
+   *  A named owner is a proposal until this says otherwise. */
+  owner_accepted: boolean | null;
+  accepted_by: string;
+  accepted_at: string | null;
+  success_criteria: string;
+  support_needed: string;
+  blocker: string;
+  progress_note: string;
+  source_decision_id: string;
+  human_edited?: boolean;
+  map_id?: string | null;
 }
 
 export interface VerifiedWriting {
@@ -210,11 +303,64 @@ export interface ConsultationDetail {
   observations: ConsultationObservation[];
   decisions: ConsultationDecision[];
   confirmed_decision: ConsultationDecision | null;
+  /** A consultation may settle more than one thing; the singular field above is
+   *  kept so every old session and existing caller still reads (rule 98). */
+  confirmed_decisions: ConsultationDecision[];
+  transcript_deleted: boolean;
   action_items: ConsultationAction[];
   writings: VerifiedWriting[];
   speech_events: SpeechEvent[];
   mode_info: Partial<ModeInfo>;
+  participants: ConsultationParticipant[];
+  /** The speaker-separated transcript once it exists, the live one until then.
+   *  `turns` above always stays the live record. */
+  final_turns: ConsultationTurn[];
+  has_diarized: boolean;
+  report: string;
+  open_threads: OpenThreads;
   note?: string;
+}
+
+/** What the record says is still hanging. The same shape the spoken time check
+ *  is built from, so the screen and her voice cannot disagree. */
+export interface OpenThreads {
+  unresolved: string[];
+  questions: string[];
+  unconfirmed: string[];
+  confirmed: boolean;
+  unowned: string[];
+}
+
+export interface DiarizeResult {
+  turns_written: number;
+  turns_labelled: number;
+  speakers: string[];
+  duration: number;
+  cost: number | null;
+  final_turns: ConsultationTurn[];
+  participants: ConsultationParticipant[];
+  session: ConsultationSession;
+}
+
+export interface ReportResult {
+  report: string;
+  note: string;
+  narrated: boolean;
+  session: ConsultationSession;
+}
+
+/** A governor answer that may also carry what to say, and (for the opening) the
+ *  passage to put on screen at the same moment. */
+export interface ScheduledSpeech {
+  allowed: boolean;
+  action: string;
+  code: string;
+  reason: string;
+  retry_after_ms: number | null;
+  instructions?: string;
+  modalities?: string[];
+  passage?: string;
+  passage_source?: string;
 }
 
 export interface AnalysisResult {

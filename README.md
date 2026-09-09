@@ -110,7 +110,7 @@ Sheraj clicking approve. Two real posts are live as of 2026-07-09.
 | Visual layout editor | **Real and working**, exercised in production |
 | Secretary (dashboard + WhatsApp + Google Workspace) | **Real and live** — runs unattended at logon (Phases 1–3; Phase 4 "recovery rhythms" not started) |
 | X giveaway posting | **Real, human-approved** — 2 live posts |
-| Live Consultation (Consultation tab) | **Built 2026-08-21, run once for real.** Abigail sits in: realtime listening, transcript, consultation map, a restrained voice and a presence dial. 296 offline checks pass; the first real session led to the retune in rule 87 |
+| Live Consultation (Consultation tab) | **Built 2026-08-21; two real sessions, and much has changed since.** Abigail sits in: realtime listening, transcript, consultation map, a restrained voice, a presence dial, an opening passage and a clock. Since 2026-09-03 the record is human-owned — the map, the transcript and the commitments can all be corrected, a fact says who established it, a concern is never deleted, and ending a meeting opens a closeout where a person confirms what actually happened (rules 94–99). 510 offline checks pass. **The closeout has not yet been used in a real meeting.** |
 | Etsy publishing | **Built, never connected.** No OAuth ever completed; `POST /etsy/publish` skips gracefully; 0 listings ever created. The listing copy the Scribe writes is currently review-and-display only |
 | Canva autofill | **Built, broken in practice** — connected once, but all 10 autofill attempts failed (API 400s, last tried 2026-07-05); superseded by the native layout editor |
 | Revenue | **$0 so far.** Total AI spend to date ≈ $14 (mostly metered per-call; ceiling $15/month) |
@@ -146,7 +146,8 @@ keys all optional.
 | `docs/consultation-constitution.md` | What the live consultation assistant works under — the half asked of the model, and the half enforced in code |
 | `agents/api.py` | FastAPI backend — all endpoints + both pipeline orchestrations |
 | `agents/consultation.py` | The 3-round, scripture-grounded team consultation (one human pause) — the PRODUCT pipeline's, not the live one |
-| `agents/live_consultation*.py` | Live Consultation: Abigail sitting in on a real meeting over the OpenAI Realtime API — the floor governor, the silent brain, the private store (`private/consultation.db`). In a room she carries none of Sheraj's private data (rule 88) |
+| `agents/live_consultation*.py` | Live Consultation: Abigail sitting in on a real meeting over the OpenAI Realtime API — the floor governor, the silent brain, the private store (`private/consultation.db`), the recording and the end-of-meeting report. In a room she carries none of Sheraj's private data (rule 88) |
+| `scripts/download_consultation_compilation.py`, `ingest_consultation.py` | `Consultation: A Compilation` (bahai.org) as a verified corpus for the live consultation only. Its OWN ChromaDB collection, deliberately not `bahai_texts`, so what a quote card may print is unchanged (rule 11) |
 | `agents/librarian.py` | Vector search over the writings (ChromaDB); citation verification |
 | `agents/artist.py` | Image prompt building + xAI image generation |
 | `agents/scribe.py` | Listing copy writing/revision; `_sanitize_claims` honesty scrub |

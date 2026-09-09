@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Hand, Loader2, MessageCircleQuestion, Mic, MicOff, Play, RefreshCw, Square, Volume2, VolumeX,
+  ChevronDown, ChevronRight, Circle, Clock, Hand, Loader2, MessageCircleQuestion, Mic,
+  MicOff, Play, RefreshCw, Square, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import * as gov from "../../lib/consultationGovernor";
@@ -10,7 +11,8 @@ import type {
   ConsultationCapabilities, ConsultationMode, ConsultationObservation,
   ConsultationPresence,
 } from "../../lib/consultationTypes";
-import { BadgePill, Button, Card, CardContent, ErrorNote, RosterAvatar } from "../ui";
+import { BadgePill, Button, Card, CardContent, ErrorNote, Modal, RosterAvatar } from "../ui";
+import { ConsultationGlance } from "./ConsultationGlance";
 import { ConsultationMap } from "./ConsultationMap";
 import { ConsultationObservations } from "./ConsultationObservations";
 import { LiveTranscript } from "./LiveTranscript";
@@ -27,6 +29,17 @@ export function LiveConsultationSession({
 }) {
   const qc = useQueryClient();
   const [askText, setAskText] = useState("");
+  // The passage is shown in full while she reads it, so the room can follow,
+  // and collapses to one line the moment she finishes. Left expanded it is
+  // ~1000 characters sitting above the transcript, which on a laptop pushed the
+  // transcript clean off the bottom of the screen -- "all I see is the initial
+  // announcement" (2026-08-27).
+  const [passageOpen, setPassageOpen] = useState(true);
+  // Which transcript lines a map item came from, when someone asks. Provenance
+  // proves only what was SAID in this meeting -- never that it is true -- and
+  // the panel says so (rule 95).
+  const [sourceTurns, setSourceTurns] = useState<string[] | null>(null);
+  const wasReadingRef = useRef(false);
   const [now, setNow] = useState(Date.now());
   const autoStarted = useRef(false);
 
@@ -58,6 +71,15 @@ export function LiveConsultationSession({
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!live.passage) { setPassageOpen(true); wasReadingRef.current = false; return; }
+    if (live.floorState === gov.AI_SPEAKING || live.floorState === gov.AI_PREPARING) {
+      wasReadingRef.current = true;
+    } else if (wasReadingRef.current) {
+      setPassageOpen(false);
+    }
+  }, [live.passage, live.floorState]);
 
   const endSession = useMutation({
     mutationFn: async () => {
@@ -116,6 +138,25 @@ export function LiveConsultationSession({
           <div className="flex items-center gap-3">
             <h2 className="truncate font-display text-lg text-slate-100">{session.title}</h2>
             {elapsed && <span className="font-mono text-xs text-slate-500">{elapsed}</span>}
+            {/* The clock, when the group set one. It turns amber inside the
+                warning window, so the screen says the same thing she is about
+                to say rather than the warning arriving out of nowhere. */}
+            {live.minutesLeft !== null && (
+              <span className={`inline-flex items-center gap-1 font-mono text-xs ${
+                live.minutesLeft <= (session.warn_minutes ?? 10)
+                  ? "text-amber-300" : "text-slate-500"
+              }`}>
+                <Clock className="h-3.5 w-3.5" />
+                {live.minutesLeft > 0 ? `${live.minutesLeft} min left` : "time is up"}
+              </span>
+            )}
+            {live.recording && (
+              <span className="inline-flex items-center gap-1 text-xs text-rose-300"
+                    title="This meeting is being recorded so the transcript can name who spoke.">
+                <Circle className="h-2.5 w-2.5 fill-rose-400 text-rose-400" />
+                recording
+              </span>
+            )}
           </div>
           {session.question && (
             <p className="mt-0.5 text-sm text-slate-400">{session.question}</p>
@@ -273,6 +314,70 @@ export function LiveConsultationSession({
         </Button>
       </div>
 
+      {/* The passage she is reading, on screen at the same moment she reads it.
+          The room sees the exact words rather than only hearing them (rule 92). */}
+      {live.passage && (
+        <Card className="border-amber-400/40">
+          <CardContent className="py-3">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                onClick={() => setPassageOpen((v) => !v)}
+                className="flex min-w-0 items-center gap-2 text-left"
+              >
+                {passageOpen
+                  ? <ChevronDown className="h-4 w-4 shrink-0 text-amber-200/70" />
+                  : <ChevronRight className="h-4 w-4 shrink-0 text-amber-200/70" />}
+                <span className="truncate text-xs uppercase tracking-wide text-amber-200/70">
+                  Read at the opening
+                </span>
+                {!passageOpen && (
+                  <span className="truncate text-xs text-slate-500">
+                    &mdash; {live.passage.source}
+                  </span>
+                )}
+              </button>
+              <button onClick={live.dismissPassage} title="Hide this"
+                      className="shrink-0 text-slate-500 hover:text-slate-300">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {passageOpen && (
+              // Capped and scrollable even when open: the transcript below it
+              // must never be pushed off the screen by a long passage.
+              <div className="mt-3 max-h-44 space-y-3 overflow-y-auto pr-1">
+                {live.passage.text.split("\n\n").map((para, i) => (
+                  <p key={i} className="text-sm italic leading-relaxed text-slate-200">{para}</p>
+                ))}
+                {live.passage.source && (
+                  <p className="text-xs text-slate-500">{live.passage.source}</p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {live.recordingNote && <ErrorNote>{live.recordingNote}</ErrorNote>}
+
+      {/* The spend ceiling, with the decision it is actually asking for. */}
+      {live.overCeiling && (
+        <Card className="border-amber-400/40">
+          <CardContent className="flex flex-wrap items-center justify-between gap-4 py-4">
+            <div className="min-w-0">
+              <p className="text-sm text-slate-200">{live.overCeiling}</p>
+              <p className="mt-1 text-xs text-slate-500">
+                The ceiling is a reminder, not a hard limit — it is there so a paid
+                service cannot run up a bill without you seeing it.
+              </p>
+            </div>
+            <Button onClick={() => void live.start(true)}>
+              <Play className="h-4 w-4" />
+              Start anyway
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Body */}
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[1.1fr_1fr]">
         <LiveTranscript
@@ -282,8 +387,14 @@ export function LiveConsultationSession({
           assistantSaying={live.assistantSaying}
           assistantName={live.name}
           onLabelled={refresh}
+          onCorrected={refresh}
         />
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+          <ConsultationGlance
+            state={state}
+            threads={data.open_threads}
+            decided={!!decisions.find((d) => d.status === "confirmed")}
+          />
           <ConsultationObservations
             observations={observations}
             assistantName={live.name}
@@ -307,9 +418,42 @@ export function LiveConsultationSession({
             onToggleAction={(id, status) => {
               void api.setConsultationActionStatus(sessionId, id, status).then(refresh);
             }}
+            /* Human authority over the map (rule 95). A correction made here
+               is protected from the next analysis pass by the server. */
+            onEditItem={(list, id, text) => {
+              void api.editConsultationMapItem(sessionId, list, id, { text }).then(refresh);
+            }}
+            onDeleteItem={(list, id) => {
+              void api.deleteConsultationMapItem(sessionId, list, id).then(refresh);
+            }}
+            onShowSource={setSourceTurns}
           />
         </div>
       </div>
+
+      {sourceTurns && (
+        <Modal open onClose={() => setSourceTurns(null)} title="What was actually said">
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              The lines this came from. It shows what was said in the meeting — not
+              that what was said is correct.
+            </p>
+            {turns.filter((t) => sourceTurns.includes(String(t.id))).map((t) => (
+              <div key={t.id} className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                <p className="text-xs font-semibold text-slate-400">
+                  {t.role === "assistant" ? live.name : t.speaker_label ?? "Participant"}
+                </p>
+                <p className="mt-0.5 text-sm text-slate-200">{t.text}</p>
+              </div>
+            ))}
+            {!turns.some((t) => sourceTurns.includes(String(t.id))) && (
+              <p className="text-sm text-slate-500">
+                Those lines are no longer in the transcript.
+              </p>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

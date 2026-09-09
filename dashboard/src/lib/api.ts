@@ -25,6 +25,8 @@ import type {
   AnalysisResult, ConsultationCapabilities, ConsultationDetail, ConsultationMode,
   ConsultationPresence, ConsultationSession, RealtimeCredential, SpeechDecision,
   VerifiedWriting,
+  ConsultationParticipant, ConsultationTurn, DiarizeResult, ReportResult, ScheduledSpeech,
+  ActionStatus, ConsultationAction, ConsultationDecision, ConsultationStateMap, MapItem,
 } from "./consultationTypes";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -108,6 +110,26 @@ async function request<T>(
 
 const get = <T>(path: string) => request<T>("GET", path);
 const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body);
+
+/** A multipart POST. Separate from `request` because the Content-Type header
+ *  must be left ALONE for FormData — setting it drops the multipart boundary the
+ *  browser generates, and the server then cannot parse the body at all. */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  const started = performance.now();
+  const ts = new Date().toLocaleTimeString();
+  const res = await fetch(`${BASE}${path}`, { method: "POST", body: form });
+  pushActivity({ ts, method: "POST", path, status: res.status,
+                 ms: Math.round(performance.now() - started) });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const data = await res.json();
+      detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data);
+    } catch { /* keep statusText */ }
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return (await res.json()) as T;
+}
 const patch = <T>(path: string, body?: unknown) => request<T>("PATCH", path, body);
 
 // ── Pipeline job progress — turns the backend's step-by-step narration
@@ -1022,6 +1044,8 @@ export const api = {
   createConsultation: (body: {
     title: string; question?: string; context?: string; framework?: string;
     mode?: ConsultationMode; decision_method?: string; presence?: ConsultationPresence;
+    participants?: string[]; duration_minutes?: number; warn_minutes?: number;
+    record_audio?: boolean; retention_policy?: string; participants_informed?: boolean;
   }) => post<ConsultationSession>("/live-consultation/sessions", body),
   getConsultation: (id: string) =>
     get<ConsultationDetail>(`/live-consultation/sessions/${id}`),
@@ -1065,15 +1089,69 @@ export const api = {
     request<{ observation: unknown }>(
       "POST", `/live-consultation/sessions/${id}/observations/${observationId}/status`,
       { status }, { silent: true }),
-  confirmConsultationDecision: (id: string, decisionId: string) =>
+  confirmConsultationDecision: (id: string, decisionId: string,
+                                retained_concerns: string[] = []) =>
     post<Record<string, unknown>>(
-      `/live-consultation/sessions/${id}/decisions/${decisionId}/confirm`),
+      `/live-consultation/sessions/${id}/decisions/${decisionId}/confirm`,
+      { retained_concerns }),
   rejectConsultationDecision: (id: string, decisionId: string) =>
     post<Record<string, unknown>>(
       `/live-consultation/sessions/${id}/decisions/${decisionId}/reject`),
-  setConsultationActionStatus: (id: string, actionId: string, status: "open" | "done") =>
+  setConsultationActionStatus: (id: string, actionId: string, status: ActionStatus) =>
     post<Record<string, unknown>>(
       `/live-consultation/sessions/${id}/actions/${actionId}/status`, { status }),
+
+  // ── Human authority over the map (rules 95-98) ─────────────────────────
+  // Until 2026-09-03 none of this existed: the map was whatever the model last
+  // said, and a mishearing stayed on screen for the rest of the meeting.
+  confirmConsultationInformed: (id: string) =>
+    post<ConsultationDetail>(`/live-consultation/sessions/${id}/inform`),
+  editConsultationMapItem: (id: string, list: string, itemId: string,
+                            body: Record<string, unknown>) =>
+    request<{ item: MapItem; state: ConsultationStateMap }>(
+      "PATCH", `/live-consultation/sessions/${id}/map/${list}/${itemId}`, body),
+  deleteConsultationMapItem: (id: string, list: string, itemId: string) =>
+    request<{ deleted: boolean; state: ConsultationStateMap }>(
+      "DELETE", `/live-consultation/sessions/${id}/map/${list}/${itemId}`),
+  reviewConsultationMapItem: (id: string, list: string, itemId: string, reviewed = true) =>
+    post<{ item: MapItem; state: ConsultationStateMap }>(
+      `/live-consultation/sessions/${id}/map/${list}/${itemId}/review`, { reviewed }),
+  correctConsultationTurn: (id: string, turnId: number, text: string) =>
+    post<{ turn: ConsultationTurn; note: string }>(
+      `/live-consultation/sessions/${id}/turns/${turnId}/text`, { text }),
+
+  // ── Commitments ────────────────────────────────────────────────────────
+  createConsultationAction: (id: string, body: {
+    action: string; owner?: string | null; due?: string | null;
+  }) => post<{ action_item: ConsultationAction }>(
+    `/live-consultation/sessions/${id}/actions`, body),
+  editConsultationAction: (id: string, actionId: string, body: Record<string, unknown>) =>
+    request<{ action_item: ConsultationAction }>(
+      "PATCH", `/live-consultation/sessions/${id}/actions/${actionId}`, body),
+  deleteConsultationAction: (id: string, actionId: string) =>
+    request<{ deleted: boolean }>(
+      "DELETE", `/live-consultation/sessions/${id}/actions/${actionId}`),
+  /** Record that the owner accepted — or explicitly did not. A named owner is
+   *  only ever a proposal until a human calls this (rule 95). */
+  acceptConsultationAction: (id: string, actionId: string,
+                             accepted: boolean | null, accepted_by = "") =>
+    post<{ action_item: ConsultationAction }>(
+      `/live-consultation/sessions/${id}/actions/${actionId}/accept`,
+      { accepted, accepted_by }),
+  editConsultationDecision: (id: string, decisionId: string,
+                             body: Record<string, unknown>) =>
+    request<{ decision: ConsultationDecision }>(
+      "PATCH", `/live-consultation/sessions/${id}/decisions/${decisionId}`, body),
+
+  // ── Closeout and retention (rules 94, 98) ──────────────────────────────
+  closeoutConsultation: (id: string, body: {
+    outcome: string; note?: string; reflection_at?: string | null;
+    retention_policy?: string;
+  }) => post<ConsultationDetail>(`/live-consultation/sessions/${id}/closeout`, body),
+  /** Irreversible. The dashboard says so before it calls this. */
+  deleteConsultationTranscript: (id: string) =>
+    request<ConsultationDetail>(
+      "DELETE", `/live-consultation/sessions/${id}/transcript`),
   findConsultationWritings: (id: string, theme: string) =>
     post<{ theme: string; available: boolean; note: string; passages: VerifiedWriting[] }>(
       `/live-consultation/sessions/${id}/writings`, { theme }),
@@ -1083,6 +1161,47 @@ export const api = {
   recordConsultationUsage: (id: string, usage: Record<string, unknown>, model: string) =>
     request<{ recorded: boolean; cost: number | null; reason?: string }>(
       "POST", `/live-consultation/sessions/${id}/usage`, { usage, model }, { silent: true }),
+  // ── Participants, the clock, the recording and the report ───────────────
+  addConsultationParticipant: (id: string, name: string) =>
+    post<ConsultationParticipant>(`/live-consultation/sessions/${id}/participants`, { name }),
+  removeConsultationParticipant: (id: string, participantId: string) =>
+    request<{ removed: boolean }>(
+      "DELETE", `/live-consultation/sessions/${id}/participants/${participantId}`),
+  mapConsultationSpeaker: (id: string, participantId: string, speaker_key: string | null) =>
+    post<{ participant: ConsultationParticipant; turns_labelled: number;
+           final_turns: ConsultationTurn[] }>(
+      `/live-consultation/sessions/${id}/participants/${participantId}/speaker`,
+      { speaker_key }),
+  consultationOpening: (id: string, body: Record<string, unknown>) =>
+    post<ScheduledSpeech>(`/live-consultation/sessions/${id}/opening`, body),
+  consultationTimeWarning: (id: string, body: Record<string, unknown>) =>
+    post<ScheduledSpeech>(`/live-consultation/sessions/${id}/time-warning`, body),
+  uploadConsultationAudio: (id: string, blob: Blob, filename = "meeting.webm") => {
+    const form = new FormData();
+    form.append("file", blob, filename);
+    return upload<{ saved: boolean; bytes: number }>(
+      `/live-consultation/sessions/${id}/audio`, form);
+  },
+  /** Speech to text for a form field. Session-less: it is used on the setup
+   *  screen, before a consultation exists. */
+  dictate: (blob: Blob, filename = "note.webm") => {
+    const form = new FormData();
+    form.append("file", blob, filename);
+    return upload<{ text: string; cost: number | null }>(
+      "/live-consultation/dictate", form);
+  },
+  diarizeConsultation: (id: string) =>
+    post<DiarizeResult>(`/live-consultation/sessions/${id}/diarize`, {}),
+  makeConsultationReport: (id: string) =>
+    post<ReportResult>(`/live-consultation/sessions/${id}/report`, {}),
+
+  /** Silent on purpose: this reports a fault, and a failure to report one must
+   *  not raise a second banner on top of the first. */
+  reportConsultationClientError: (
+    id: string, body: { message: string; event_type?: string; floor_state?: string },
+  ) =>
+    request<{ recorded: boolean }>(
+      "POST", `/live-consultation/sessions/${id}/client-error`, body, { silent: true }),
   consultationExportUrl: (id: string) => `${BASE}/live-consultation/sessions/${id}/export`,
 
   // Health

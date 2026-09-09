@@ -94,6 +94,12 @@ def retrieve(query: str, n_results: int = 3, collection_name: str = "bahai_texts
             "section": meta.get("section", ""),
             "link": meta.get("link", ""),
             "slug": meta.get("slug", ""),
+            # Only the consultation compilation sets this: guidance addressed
+            # to elected Bahá'í institutions, so a general (non-Bahá'í) meeting
+            # is not handed an Assembly's instructions as though they applied
+            # to it. Absent everywhere else, hence the False default -- adding
+            # the key changes nothing for any existing caller.
+            "institutional": bool(meta.get("institutional", False)),
             "score": round(1 - dist, 4),  # cosine similarity (approximate)
         })
     return passages

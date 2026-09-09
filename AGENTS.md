@@ -25,7 +25,8 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 69 | Junior youth groups |
 | 70–71 | The API's owner gate |
 | 72 | Indirect prompt injection |
-| 73–88 | Live Consultation (the Consultation tab) |
+| 73–93 | Live Consultation (the Consultation tab) |
+| 94–99 | Live Consultation: the record becomes true and human-owned |
 
 ## Working norms
 
@@ -54,7 +55,8 @@ them equally — don't assume your own tool's defaults.
 ## Commands and verification
 
 ```bash
-cd dashboard && npm run dev                # UI on :5173
+cd dashboard && npm run dev                # the whole app (see below); UI on :5173
+cd dashboard && npm run dev:web            # UI only, no backend step (old `vite`)
 cd dashboard && npx tsc --noEmit           # typecheck (no JS test suite exists)
 python -c "import agents.api"              # fast backend sanity check
 python scripts/test_colony.py              # Colony tab: 135 checks
@@ -65,7 +67,7 @@ python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
 python scripts/test_nuclei.py              # Material World (nuclei): 281 checks
 python scripts/test_api_auth.py            # The API's owner gate: 66 checks
 python scripts/test_secretary_injection.py # Prompt-injection hold: 50 checks
-python scripts/test_live_consultation.py   # Live Consultation: 296 checks
+python scripts/test_live_consultation.py   # Live Consultation: 510 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -90,6 +92,27 @@ parent), then either
 `Start-ScheduledTask -TaskName "bahAI Secretary API"` or
 `python -m uvicorn agents.api:app --host 127.0.0.1 --port 8765` (no `--reload`).
 Killing it mid-session is fine — the task only re-triggers at the next logon.
+
+**`npm run dev` now brings the whole app up in order** and is the normal way to
+start work: `dashboard/scripts/dev.mjs` makes the API answer, reports Ollama and
+the tunnel, clears leftover dev servers, then starts Vite.
+`scripts/ensure_backend.ps1` does the API half and is worth running alone when
+the backend needs reviving. Two things it exists for, both real (2026-08-24):
+- **Readiness is `/health`, never a PID or a port.** The API was found alive
+  with its LISTENING SOCKET DEAD — uvicorn's accept loop had exited with
+  WinError 64 while the process stayed up, so the port was empty, the task still
+  said "Ready" (it only triggers at logon) and the dashboard just said the
+  backend was not running. A liveness check by process or by port would have
+  reported everything fine. It clears every match rather than just the listener,
+  because the venv's `pythonw.exe` launches the real interpreter as a CHILD —
+  one API instance is always two processes.
+- **Leftover Vite servers are cleared** (`scripts/clear_stale_dashboards.ps1`,
+  scoped to node processes naming this repo's own Vite binary, so nothing else
+  on the machine can match). Four dev servers from eleven days earlier were
+  holding :5173–:5176 and answering nothing, so the bookmarked
+  `localhost:5173` spun for ever while a new server quietly moved to :5177.
+Ctrl+C stops the dashboard only — the API keeps running on purpose, since
+Abigail answers WhatsApp through it whether or not a browser is open.
 The Cloudflare Tunnel auto-starts the same way ("bahAI Secretary Tunnel"). Both
 run `scripts/start_secretary_server.ps1` / `start_secretary_tunnel.ps1` and log
 to `logs/*.out.log` / `*.err.log` (gitignored), since after a real reboot there
@@ -1222,7 +1245,9 @@ Modules: `live_consultation.py` (modes, state models, the constitution loader),
 speak), `live_consultation_reasoner.py` (the silent brain),
 `live_consultation_realtime.py` (ephemeral credentials, session config, cost),
 `live_consultation_writings.py` (verified passages), `live_consultation_api.py`
-(the APIRouter `api.py` includes in four lines). Client:
+(the APIRouter `api.py` includes in four lines), `live_consultation_audio.py`
+(the recording, diarisation and dictation), `live_consultation_report.py` (the
+end-of-meeting report). Client:
 `dashboard/src/components/consultation/`, `hooks/useRealtimeConsultation.ts`,
 `lib/consultationGovernor.ts`.
 
@@ -1382,6 +1407,19 @@ rarely.**
       FEELS: nothing downstream can start until the detector reports the turn
       has ended. It changes when the detector REPORTS, never whether she may
       speak — `create_response` stays false.
+    - **The detector is ON the dial** (2026-08-24, after "very unresponsive even
+      in the most responsive modes"). It was a single fixed env var while every
+      other number scaled, so `present` moved all the small waits and left the
+      largest one exactly where it was — the preset could not do the one thing
+      that would have been felt. `core.vad_eagerness()` now resolves it per
+      preset (low / medium / high) and `CONSULTATION_VAD_EAGERNESS` demotes to
+      an explicit pin that overrides all three. Because the session is
+      configured once when the credential is minted, a MID-MEETING change also
+      has to be pushed: the hook sends one `session.update`, and it sends the
+      server's `policy.turn_detection` VERBATIM rather than composing one —
+      a browser-built block could omit `create_response`, whose API default is
+      `true`, and rule 75 would be gone with nothing erroring anywhere. That is
+      why the whole block is served, not just the eagerness string.
     - **`presence` is a per-session setting** (`reserved` | `attentive` |
       `present`), changeable mid-meeting, because the moment you notice she is
       too slow is while you are sitting there waiting for her. It scales the
@@ -1412,6 +1450,353 @@ rarely.**
       it, neither of which says the person cannot have a mouth somewhere else.
       Her dashboard chat and WhatsApp are unchanged. The UI says which model is
       speaking rather than leaving it to be assumed.
+
+89. **Never cut off a response that has not started.** (2026-08-24, from "just
+    before she responds it gives an error and she doesn't respond".) Rule 76's
+    barge-in is three events — `response.cancel`, `output_audio_buffer.clear`,
+    `conversation.item.truncate` — and `cutOff` fired all three whenever the
+    floor was `ai_speaking` OR `ai_preparing`. In the preparing window there is
+    by definition no audio and often no response yet, and OpenAI answers each
+    one with an error: cancelling nothing, clearing an empty buffer, truncating
+    past the end of an item. Worse than the noise, the cancel LANDED if the
+    response had just been created, so a stray VAD trigger while she was
+    thinking silently threw her answer away — the room saw an error and then
+    silence. So the client now tracks what is TRUE on the wire
+    (`responseActiveRef` from `response.created`/`response.done`,
+    `audioPlayingRef` from `output_audio_buffer.started`/`stopped`) and sends
+    each event only when the thing it acts on exists. **Barge-in is unchanged**:
+    interrupted mid-sentence, all three still fire, and the suite pins that.
+    `audio_end_ms` is measured from when audio actually BEGAN, not from when the
+    response was requested, and a sliver below `TRUNCATE_FLOOR_MS` is not
+    truncated at all — wall-clock elapsed can briefly exceed the audio that
+    exists, and truncating past the end is itself an error.
+    - **A wait that carries a retry is honoured at that moment.** Both governors
+      already answered "wait, and try again in N ms"; the client threw N away
+      and held every queued ask until the floor-open timer. That made a FAST
+      transcript slower than a slow one — arriving inside the invitation grace
+      meant waiting the whole floor-open window instead of ~200ms. Only the
+      grace waits carry a retry and it shrinks each time, so it cannot loop;
+      "someone is speaking" carries none and still falls through to floor-open.
+    - **A realtime error is recorded, not just displayed.**
+      `POST /live-consultation/sessions/{id}/client-error` writes it to the
+      private DB as a `realtime_error` speech event. This bug had to be
+      diagnosed from four words because the banner died with the page and the
+      backend log was all 200s — the failing exchange never touches this API at
+      all. The row is inert for the floor: `last_allowed_speech` and the denial
+      scan both filter by kind, so a fault can never quietly extend a cooldown.
+      A `response.done` with status `failed` is surfaced the same way; it used
+      to be silent, leaving a gap in the transcript where an answer should be.
+
+90. **The map is what she thinks with; the REPORT is what a person reads.**
+    (Owner verdict 2026-08-25 on the consultation map: "far too long to read.")
+    Ten lists of fragments — facts, assumptions, principles, ideas, syntheses,
+    questions to investigate — are a good working structure for the reasoner and
+    a bad screen for someone sitting in a meeting. The mistake was assuming the
+    thing the model thinks with and the thing a human reads are the same object.
+    They are now separated in three places:
+    - **The live map is four things**: where the group agrees, what is still
+      unresolved, what has been decided, what happens next. "Unresolved" merges
+      `tensions` and `unresolved_questions`, because that distinction matters to
+      the reasoner and to nobody in the room. Everything else moved to the
+      Detail tab; nothing was deleted.
+    - **Decision candidates stopped shouting.** They sit BELOW the decision,
+      quietly, instead of being the loudest thing on screen. Rule 81 is
+      untouched — a human still confirms — but adjudicating the assistant's
+      guesses mid-meeting was a job the tool was giving the room, not doing for
+      it.
+    - **The report is HYBRID, and the split is load-bearing**
+      (`live_consultation_report.py`). The NARRATIVE — in short, how the group
+      got there, what is still open — is written by the reasoning model, which
+      condenses. The RECORD — the confirmed decision, the action items, their
+      owners and deadlines, the verified passages — is copied VERBATIM from the
+      store and no model is even asked for it. `_narrative` takes only three
+      prose fields off the reply and drops everything else on the floor, so a
+      model that returns a `decision` or an `action_items` list (they do) cannot
+      have it printed. This is where rules 81 and 83 would otherwise be quietly
+      undone: a model asked to write a decisions section will smooth "we were
+      leaning towards Saturday" into "the group decided Saturday", and will give
+      an unowned action a plausible owner. The suite feeds it exactly that reply
+      and requires both to be absent.
+    - **A dead model costs the prose, never the report.** The deterministic half
+      is assembled first and stands alone, with a visible note. Same discipline
+      as rule 79.
+    - It is written automatically when the meeting ends, AFTER the final
+      analysis pass, and can be rewritten by hand. Copy and Download are the
+      point of the whole thing (owner ask: "downloaded and/or copied for
+      sharing"). It renders through `Markdown.tsx`, a hand-written renderer that
+      never produces an HTML string, because the report contains model-written
+      prose and words spoken in a private meeting.
+91. **Names come from a human; voices come from a recording; the two are joined
+    by hand.** (Owner ask 2026-08-25: "an option to fill in participants names
+    so the transcript can have who is talking. Will the openai api know how to
+    detect who is who?" — no, it will not.) Checked against OpenAI's own model
+    page: `gpt-4o-transcribe-diarize` lists realtime transcription as **NOT
+    supported**, so nothing during a live session can tell one voice from
+    another. It works on a finished file. Hence:
+    - **Rule 80 is amended, not repealed.** During the meeting every turn is
+      still "Participant" and nothing is inferred. Diarisation is an explicit,
+      manual, after-the-fact pass.
+    - **Diarisation is not recognition.** The model returns "A", "B", "C" —
+      voices it can separate, not people it knows. A human maps a name onto a
+      letter once (`set_participant_speaker` → `apply_speaker_names`). The API
+      accepts voice REFERENCE clips that would skip that step;
+      `live_consultation_audio.py` does not use them and must never start. That
+      is biometric enrolment of Sheraj's friends, the original spec ruled it
+      out, and the suite asserts the parameter appears nowhere in the module.
+    - **The diarised transcript never destroys the live one.** It is stored
+      beside it (`turns.source` = `live` | `diarized`); `list_turns(source=)`
+      defaults to `live` so every existing caller reads exactly what it always
+      read, and `"best"` prefers the diarised pass when one exists. Re-running
+      it replaces only the diarised rows. `unanalyzed_turns` filters to `live`,
+      so a diarised pass can never make the brain re-read and re-bill a meeting.
+    - **Recording is a real choice now, and the honesty moved rather than went
+      away.** `record_audio` used to be refused outright and rule 86 said so —
+      correctly, because no recorder existed and a checkbox that reads as "you
+      are being recorded" must be true or refused, never decorative. There is a
+      recorder now, so the setup screen states it plainly, the live header shows
+      a recording light, and the privacy paragraph changes wording when it is
+      on. Without an API key it is still refused, because nothing could come of
+      it. Audio lives in `private/consultation_audio/`, is sent to OpenAI once,
+      and is deleted with the session (rule 73).
+    - The browser records the MICROPHONE stream only — her own voice arrives
+      over WebRTC and is not in it, which is what makes the recording useful for
+      separating the humans. It records in timeslices, so a crash costs seconds
+      rather than the meeting.
+91b. **Dictation is not a recording, and nothing about it is kept.** (Owner ask
+    2026-08-25: a mic on each setup box, "so I can just say it rather than type
+    it".) `audio.transcribe_plain` holds the bytes in memory for one request and
+    never touches disk — a meeting recording is a record and lives under
+    `private/consultation_audio/`; this is a passing utterance on its way to
+    becoming a sentence in a form, so there is no file to delete and nothing to
+    leak. `POST /live-consultation/dictate` is session-less because it is used
+    before a consultation exists, and it is behind the owner gate like
+    everything else (rule 70): it is Sheraj's own microphone, not an open
+    transcription service. Three things worth keeping:
+    - **A third model id** (`DICTATE_MODEL`), because it is a third job. The
+      live model runs inside a realtime session and the diarising one separates
+      voices in a finished meeting; neither transcribes ten seconds of one
+      person on demand.
+    - **Deliberately NOT the browser's built-in speech recognition.** In Chrome
+      that ships the audio to Google, a party nothing else in this repo talks
+      to, and it is markedly worse at names. Staying on the account already in
+      use keeps the data path to one provider the owner has already chosen.
+    - **A press too short to be speech is discarded before it is sent.** Handed
+      near-silence, the transcription model does not return nothing — it returns
+      a plausible short word (one second of digital silence came back as
+      "Sijainti." on 2026-08-25), which would appear in the box as if someone
+      had said it. `MIN_DICTATION_MS` catches the mis-tap; text always APPENDS,
+      so nothing already typed can be destroyed by pressing the button.
+92. **She opens the meeting, and she keeps the time — both are SCHEDULED
+    speech.** (Owner ask 2026-08-25.) A new governor family: `opening` and
+    `time_warning` join the invited kinds rather than the unsolicited ones,
+    because a human asked for them in advance when setting the meeting up. They
+    skip the warmup, the cooldowns and the importance bar; they do NOT skip
+    scribe mode, muted, paused, or a human holding the floor. **Neither is ever
+    reached by silence** (rule 75) — one fires on the meeting starting, the
+    other on a clock a person set — and the suite asserts every refusal at both.
+    - **The opening passage is code-owned and verbatim**, which is what makes
+      reading it aloud safe under rule 84. That rule exists so a model can never
+      paraphrase something sacred into something that merely sounds like it; it
+      was never a ban on scripture being heard. Sheraj supplied the text, it is
+      a fixed string in `core.CONSULTATION_PASSAGE`, she is told she may not
+      alter a word, and the exact text goes ON SCREEN while she reads it.
+      Citation verified against bahai.org: 'Abdu'l-Bahá, quoted by Shoghi
+      Effendi in Bahá'í Administration, pp. 21-22. Never "tidy" the wording, the
+      diacritics or the elision.
+    - **The framework decides the opening.** `bahai` gets the passage in full;
+      `general` gets her own words commending the same qualities, with an
+      explicit instruction to quote no scripture and name no religion, because
+      the people in that room may not share one.
+    - **The opening fires once, guarded by the stored record**, not by a flag in
+      the browser — a page reload cannot make her open the meeting twice.
+    - **The time check is twice at most**, once at the warning point and once
+      when the time runs out, each recorded so it cannot repeat. What she says
+      is built from the map (`_open_threads`): unconfirmed decisions, open
+      questions, unresolved tensions, actions with nobody against them. She may
+      put AT MOST TWO of them to the group **as questions**, and a meeting with
+      nothing outstanding gets the time and nothing else — inventing a loose end
+      to sound useful is worse than saying little.
+    - The clock is POLLED, not scheduled with one long `setTimeout`: a laptop
+      that sleeps mid-meeting would sail straight past a timeout and never warn
+      anybody. Elapsed time is recomputed from the start on every tick.
+
+93. **A refusal has to carry its own way through, and a race is not a fault.**
+    (Both found in one screenshot, 2026-08-27.)
+    - **The spend ceiling was a dead end.** `POST /realtime/client-secret`
+      refuses over the Steward's monthly ceiling unless the caller accepts it
+      (rule 85, and that is right) -- but the message said "start anyway from
+      the setup screen" and was read on the LIVE screen, which is the only place
+      it can appear, and which the owner reaches by leaving the setup screen. He
+      sat in front of a started, recording session that could not connect and had
+      no button to press. The detail is now a plain statement of fact, `start()`
+      takes `acceptOverCeiling`, and the dashboard puts **Start anyway** directly
+      under the message. The ceiling is still explicit and still his decision;
+      it just stopped naming a door somewhere else.
+    - **"Cancellation failed: no active response found" is BENIGN and must not
+      be shown.** Cutting her off is a race that cannot be won cleanly: the
+      cancel is already on the wire when her response ends by itself, and OpenAI
+      correctly says there was nothing to cancel. `BENIGN_ERRORS` in the hook
+      keeps them out of the banner while rule 89 still RECORDS them, so a real
+      pattern would still be visible in the session's speech events. This was
+      caught by that recorder, which is the first time it earned its place.
+    - **The opening passage collapses once she has read it.** Expanded it is
+      ~1000 characters above the transcript, which on a laptop pushed the
+      transcript off the bottom of the screen -- "all I see is the initial
+      announcement". It opens while she reads (the room should be able to
+      follow), collapses to one line when she stops, and is capped and
+      scrollable even when open. A thing that is only interesting for ninety
+      seconds must not hold the screen for the rest of the meeting.
+    - **The glance panel is the visual aid** (`ConsultationGlance.tsx`, owner ask
+      the same day): a proportional bar of agreed / unresolved / questions, the
+      subjects touched as chips (a new `themes` list on the state -- two or three
+      words each, not more sentences), and what is still to address. That last
+      list is built from `_open_threads`, **the same function the spoken time
+      check reads**, so the screen and her voice can never disagree about what
+      is outstanding. It shows counts, never a completeness percentage: how far
+      through a consultation a group is is not a quantity, and a number would
+      invite them to chase it (rule 61's instinct, applied to a meeting).
+
+## Rules 94–99 — the record becomes true, and human-owned
+
+Added 2026-09-03. Live Consultation could hear a meeting and structure it, but
+the record it produced was not trustworthy and no human could correct it. Six
+rules, each from something measured on the owner's own database rather than
+imagined. Verify with `scripts/test_live_consultation.py`.
+
+94. **Every privacy claim is literally true, and the room is told before the
+    microphone opens.** Two sentences on screen were simply false — "Everything
+    said here stays on this machine" (`ConsultationPanel`) and "it is never
+    heard by anyone else" (`ConsultationArchive`) — while live audio goes to
+    OpenAI to be transcribed. A third panel still said "There is no recorder in
+    this version, so there is nothing to switch on" **eighty lines above the
+    working Record the meeting checkbox**. The distinction the UI must always
+    draw is between where audio is PROCESSED (OpenAI, under their terms) and
+    where the record is STORED (this machine, in `private/`), and it must say
+    that local storage is **not** encryption — anyone who can use the computer
+    can read the file.
+    - **Starting is gated on a host attestation**, enforced at
+      `POST /sessions/{id}/start` and not only by a disabled button: a page can
+      be reloaded, and what deserves guarding is the moment the microphone
+      opens. It is worded as an attestation — the host's word that they told
+      the room — because this application cannot know whether anyone consented,
+      and claiming it could would be worse than claiming nothing.
+      `participants_informed_at` is NULL on every pre-existing session, which
+      is the truth about them.
+    - **Retention is a per-session choice** (`RETENTION_POLICIES`: keep /
+      until_closeout / 7 days / 30 days) and deletes the TRANSCRIPT only. The
+      approved record — report, decisions, accepted commitments, retained
+      concerns — survives, because that is what the meeting was for. A timed
+      deletion fires when the application next looks, not on the day: a machine
+      switched off through the seventh day deletes on the next start, and the
+      UI says so rather than implying a guarantee it cannot make.
+    - **A full export is REFUSED (409) once the transcript is deleted**, never
+      quietly returned with its largest part missing. `scope=outcomes` still
+      works, because that is the thing a person actually sends to someone who
+      was not there.
+    - Encryption at rest is deliberately NOT implemented. Saying so plainly on
+      screen is honest; a flag called "encrypted" that scrambles nothing would
+      be the Canva-autofill failure applied to privacy.
+95. **Identity is the map's own id, and a human edit is never overwritten by a
+    model.** `upsert_action_item` and `upsert_decision_candidate` found an
+    existing row by normalised TEXT and returned it untouched — so an action
+    first heard without an owner and heard again *with* one kept `owner=None`
+    for ever, and a REWORDED action became a second row. Measured on
+    `private/consultation.db` before the fix: **203 action items carrying 3
+    owners and 0 due dates**, one meeting alone holding 102 near-identical
+    actions, and 116 decision candidates with one meeting at 58. (Re-measured
+    2026-09-09; it was 169/2/0 six days earlier, and the real meeting held in
+    between added 34 more actions under the same defect.)
+    - The map has always assigned stable ids (`action_3`); they were thrown
+      away at the store boundary. `_find_row` now matches on `map_id` first and
+      text second, and a text match ADOPTS the map id so identity is stable
+      from then on — which is what lets the six pre-existing meetings' rows
+      match instead of silently doubling.
+    - **Refinement only ever adds.** A later pass that has forgotten the owner
+      must not clear the one already recorded.
+    - `human_edited` is set by every human write and checked by
+      `reasoner.merge` and by both upserts. The model may go on noticing an
+      item; it does not get to put its own words back over a correction
+      somebody made on purpose.
+    - **A named owner is a PROPOSAL, not a commitment.** `owner_accepted` is
+      tri-state on purpose: `None` (nobody has recorded an answer) is a
+      different and more honest fact than `False` (asked, did not accept), and
+      the report prints all three differently. Only a human endpoint sets it;
+      `merge` forces it to `None` on anything a model produces.
+    - **Provenance is in the schema, not in a trailing sentence.**
+      `source_turn_ids` reached **28 of 2624** real map items because the field
+      was asked for in prose and never appeared in the JSON shape the model was
+      shown. `_validate_provenance` then drops any id that is not a real turn
+      in THIS session — a citation that opens nothing is worse than none,
+      because it reads as corroboration. It is evidence of what was SAID, never
+      that what was said is true, and the UI says so.
+    - Correcting a transcript line stamps `corrected_at` and does NOT keep the
+      original: a person corrects a line precisely because the machine wrote
+      down something that was not said, most painfully a name. It corrects the
+      transcript and says plainly that the map is not rebuilt — an incremental
+      pass cannot reliably undo what it already read, and pretending otherwise
+      would be worse than the mishearing.
+96. **A fact's status says WHO established it, and only a human can claim more
+    than "reported".** The old `confirmed | uncertain | disputed` let a model's
+    classification read on screen as objective truth. The states are now
+    `reported | group_established | disputed | externally_verified |
+    superseded | withdrawn`; `MODEL_FACT_STATES` is the whole of what the
+    reasoner may set, enforced in `normalize_fact_status(model_written=True)`
+    rather than asked for in the prompt. `externally_verified` carries an
+    `evidence_note` a PERSON recorded — this application has not checked
+    anything and must never say it has. Legacy `confirmed` migrates to
+    `reported`, **never** to `group_established`: promoting an old model guess
+    into a group finding would manufacture the exact authority this removes.
+97. **A concern is never deleted — it is given a lifecycle.** `merge`'s
+    `resolve` used to REMOVE tensions and questions from the map, so a minority
+    concern could vanish because a model decided it had been dealt with, taking
+    the route by which understanding developed with it. `ITEM_LIFECYCLE` is
+    `open | addressed | resolved | deferred | accepted_risk | superseded`; the
+    model may propose `addressed` and nothing further, because deciding
+    something is genuinely resolved, deferrable, or a knowingly accepted risk
+    is the group's judgement. The old `resolve` key is refused out loud and the
+    refusal is reported, since a model prompted from the previous schema will
+    keep sending it. A human may reopen anything. Everything that reads "what
+    is still outstanding" — the glance panel and the spoken time check, from
+    the one `_open_threads` — filters on `OPEN_LIFECYCLE`, so the screen and
+    her voice cannot disagree.
+98. **Ending a meeting is a review, and "no decision" is a first-class
+    outcome.** End session used to go straight to the archive, silently turning
+    whatever the model last wrote into the record. It now enters a closeout
+    (`ConsultationCloseout.tsx`, `POST /sessions/{id}/closeout`) where a human
+    reviews the summary, the apparent agreements, the concerns still standing,
+    the candidates, the commitments and their acceptance, the retention choice
+    and a reflection date. `CLOSEOUT_OUTCOMES` includes `no_decision` and
+    `consultation_only`, offered as plainly as the rest and never blocked — a
+    meeting that decided nothing and a meeting whose decision was never
+    recorded look identical otherwise. A decision may be confirmed WITH
+    `retained_concerns` attached, printed beside it in the report rather than
+    in a footnote: using "unity" to bury dissent is the specific failure this
+    feature exists to prevent. More than one decision may be confirmed;
+    `confirmed_decision` stays singular beside `confirmed_decisions` so every
+    old session and existing caller still reads. Nothing here confirms a
+    decision — that is still rule 81's single human press.
+99. **The offline suite proves it is offline, with a tripwire ahead of every
+    import.** It called itself "free and fast: no LLM calls… no network and no
+    keys" while making **three real, authenticated calls on the owner's own
+    key** on every run: `check_model` via `/capabilities`, `create_client_secret`
+    (which genuinely MINTED a live realtime credential), and a **billable chat
+    completion** through `end_session` → `build_report`. It still printed "408
+    passed" because each sat behind an `except Exception`, and the charge was
+    invisible because the suite redirects `state.DB_PATH` to a temp file, so
+    `record_spend` wrote it into a database thrown away at exit.
+    - **Setting `os.environ` is not a defence and must never again be treated
+      as one.** The suite DID set a fake key; `agents/api.py` calls
+      `load_dotenv(..., override=True)` at import and put the real one straight
+      back. The guarantee is therefore at the SOCKET, before any import, where
+      no later import or env reload can undo it.
+    - **`_NetworkAttempted` derives from `BaseException`** — exactly rule 55's
+      reasoning. Every `except Exception` in this repo would swallow it;
+      `check_model`'s does precisely that, turning a blocked call into "the
+      model is fine", which is how three paid calls hid in a green suite.
+    - Loopback stays open (the TestClient needs it), the three call sites are
+      stubbed in a way that preserves the tests injecting their own senders,
+      and the run asserts at the end that `_OUTBOUND` is empty and the tripwire
+      is still armed.
 
 ## Gotchas
 

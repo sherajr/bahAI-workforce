@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui";
  * nothing (rule 80).
  */
 export function LiveTranscript({
-  sessionId, turns, partials, assistantSaying, assistantName, onLabelled,
+  sessionId, turns, partials, assistantSaying, assistantName, onLabelled, onCorrected,
 }: {
   sessionId: string;
   turns: ConsultationTurn[];
@@ -21,10 +21,15 @@ export function LiveTranscript({
   assistantSaying: string;
   assistantName: string;
   onLabelled: () => void;
+  /** Correct a misheard line. Optional: the read-only Detail view passes none,
+   *  and the pencil simply does not appear. */
+  onCorrected?: () => void;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
   const [editing, setEditing] = useState<number | null>(null);
+  const [fixing, setFixing] = useState<number | null>(null);
+  const [textDraft, setTextDraft] = useState("");
   const [draft, setDraft] = useState("");
 
   const partialList = Object.entries(partials).filter(([, text]) => text.trim());
@@ -47,6 +52,18 @@ export function LiveTranscript({
     setEditing(null);
     setDraft("");
     onLabelled();
+  };
+
+  const saveText = async (turnId: number) => {
+    const text = textDraft.trim();
+    setFixing(null);
+    const original = turns.find((t) => t.id === turnId)?.text ?? "";
+    // An empty correction is a no-op, not a way to blank a line: the server
+    // refuses it too, and deleting the meeting is the deliberate way to remove
+    // what was said.
+    if (!text || text === original) return;
+    await api.correctConsultationTurn(sessionId, turnId, text);
+    onCorrected?.();
   };
 
   return (
@@ -111,11 +128,41 @@ export function LiveTranscript({
                 )}
                 <span className="text-slate-600">{(turn.created_at ?? "").slice(11, 16)}</span>
               </div>
-              <p className={`mt-0.5 text-sm leading-relaxed ${
-                turn.role === "assistant" ? "text-amber-100/90" : "text-slate-200"
-              }`}>
-                {turn.text}
-              </p>
+              {/* A misheard line can be fixed (rule 95). The original is not kept:
+                  a person corrects a line precisely because the machine wrote
+                  down something that was not said -- most painfully, a name. */}
+              {fixing === turn.id ? (
+                <textarea
+                  autoFocus value={textDraft} rows={2}
+                  onChange={(e) => setTextDraft(e.target.value)}
+                  onBlur={() => void saveText(turn.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void saveText(turn.id); }
+                    if (e.key === "Escape") setFixing(null);
+                  }}
+                  className="mt-0.5 w-full rounded border border-slate-700 bg-slate-950 px-2
+                             py-1 text-sm text-slate-100 focus:border-amber-400/50
+                             focus:outline-none"
+                />
+              ) : (
+                <p className={`mt-0.5 text-sm leading-relaxed ${
+                  turn.role === "assistant" ? "text-amber-100/90" : "text-slate-200"
+                }`}>
+                  {turn.text}
+                  {turn.corrected_at && (
+                    <span className="ml-1.5 text-xs text-emerald-400/70">(corrected)</span>
+                  )}
+                  {turn.role !== "assistant" && onCorrected && (
+                    <button
+                      onClick={() => { setFixing(turn.id); setTextDraft(turn.text); }}
+                      title="She misheard this"
+                      className="ml-1.5 align-middle text-slate-600 opacity-0
+                                 transition-opacity hover:text-slate-300 group-hover:opacity-100">
+                      <Pencil className="inline h-3 w-3" />
+                    </button>
+                  )}
+                </p>
+              )}
             </div>
           ))}
 

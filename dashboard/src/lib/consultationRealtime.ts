@@ -213,3 +213,15 @@ export const events = {
     };
   },
 };
+
+/**
+ * How much played audio is worth truncating.
+ *
+ * Not a policy number — nothing about who may speak is decided here; it is a
+ * jitter allowance. `output_audio_buffer.started` fires when the server begins
+ * SENDING audio, and the element plays it a moment later, so wall-clock elapsed
+ * can briefly exceed the audio that actually exists. Truncating past the end of
+ * an item is an error, and in the first instant there is nothing worth
+ * truncating anyway.
+ */
+export const TRUNCATE_FLOOR_MS = 200;

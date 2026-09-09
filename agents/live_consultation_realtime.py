@@ -30,8 +30,8 @@ from typing import Optional
 import requests
 
 from agents.live_consultation import (
-    DEFAULT_FRAMEWORK, DEFAULT_MODE, MODES, REALTIME_MODEL, TRANSCRIBE_MODEL, VOICE,
-    session_instructions,
+    DEFAULT_FRAMEWORK, DEFAULT_MODE, DEFAULT_PRESENCE, MODES, REALTIME_MODEL,
+    TRANSCRIBE_MODEL, VOICE, session_instructions, turn_detection, vad_eagerness,
 )
 
 OPENAI_BASE = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -51,12 +51,17 @@ SECRET_TTL_S = int(os.getenv("CONSULTATION_SECRET_TTL_S", "600"))
 # because nothing downstream can start until the turn is reported as over.
 #
 # `low` was the first default and it was the main reason Sheraj found her
-# unresponsive (2026-08-21). `medium` is the default now. Note what this
-# setting can and cannot do: it changes when the detector REPORTS, never
-# whether she may speak — `create_response` stays false and the governor still
-# decides (rule 75). Turning it up makes her quicker to answer; it can never
-# make her interrupt.
-VAD_EAGERNESS = os.getenv("CONSULTATION_VAD_EAGERNESS", "medium")
+# unresponsive (2026-08-21). It then sat at a fixed `medium` for every preset,
+# which is why "Present" still felt slow (2026-08-24) -- so it now comes from
+# the presence dial (`core.vad_eagerness`), and `CONSULTATION_VAD_EAGERNESS`
+# is an explicit pin that overrides every preset.
+#
+# Note what this setting can and cannot do: it changes when the detector
+# REPORTS, never whether she may speak — `create_response` stays false and the
+# governor still decides (rule 75). Turning it up makes her quicker to answer;
+# it can never make her interrupt.
+def VAD_EAGERNESS(presence: str = DEFAULT_PRESENCE) -> str:  # noqa: N802 (kept as a name)
+    return vad_eagerness(presence)
 
 
 def _key() -> str:
@@ -158,13 +163,9 @@ def session_config(session: dict, instructions: Optional[str] = None) -> dict:
                 "transcription": {
                     "model": session.get("transcribe_model") or TRANSCRIBE_MODEL,
                 },
-                "turn_detection": {
-                    "type": "semantic_vad",
-                    "eagerness": VAD_EAGERNESS,
-                    # Rule 75, in the one place a mistake would be invisible.
-                    "create_response": False,
-                    "interrupt_response": True,
-                },
+                # Code-owned, and built in exactly one place (rule 75).
+                "turn_detection": turn_detection(
+                    session.get("presence") or DEFAULT_PRESENCE),
             },
             "output": {
                 "voice": session.get("voice") or VOICE,

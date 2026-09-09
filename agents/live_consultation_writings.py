@@ -31,6 +31,27 @@ MAX_RESULTS = 3
 # spoken intervention; the caller decides, this is only a hint.
 LONG_PASSAGE_CHARS = 600
 
+# `Consultation: A Compilation` (bahai.org), ingested by
+# `scripts/ingest_consultation.py` into a collection of its OWN.
+#
+# Not in `bahai_texts` on purpose: that index is what a quote card may print
+# from via `lib:<slug>` (rule 11), and widening the printable sources as a side
+# effect of improving the consultation tab is exactly the silent widening that
+# rule forbids. Live Consultation is allowed the broader library because it is
+# not making a product (rule 84); the product pipelines cannot see this
+# collection at all.
+#
+# It is searched FIRST because it is the on-topic corpus: 46 passages that are
+# specifically about consultation, against 6,342 general chunks. A general
+# search for "detachment from one's own opinion" will find Gleanings before it
+# finds the compilation, which is not what a room consulting together needs.
+COMPILATION_COLLECTION = "consultation_compilation"
+
+
+def _hits(collection: str, theme: str, n_results: int) -> list[dict]:
+    from agents.librarian import retrieve
+    return retrieve(theme, n_results=n_results, collection_name=collection) or []
+
 
 def _normalize(text: str) -> str:
     """Compare on shape, not on typography: curly and straight apostrophes,
@@ -43,9 +64,21 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-def search(theme: str, n_results: int = MAX_RESULTS) -> dict:
+def search(theme: str, n_results: int = MAX_RESULTS,
+           framework: str = "bahai") -> dict:
     """
     Find passages on a theme in the verified corpus.
+
+    Searches the consultation compilation first, then the general 7-text index,
+    and returns whatever it actually found — never a paraphrase, never a
+    "close enough" match.
+
+    `framework` is not cosmetic. Much of the compilation is addressed to
+    elected Bahá'í institutions, and handing an Assembly's guidance to a school
+    board or a family as though it applied to them would be exactly the
+    over-generalisation this feature must not commit. In a `general`
+    consultation those passages are left out; in a Bahá'í one they are kept and
+    labelled.
 
     Returns {"available", "passages", "note"}. Never raises: a live meeting must
     not fall over because the index is missing or Ollama is not running — it is
@@ -54,20 +87,44 @@ def search(theme: str, n_results: int = MAX_RESULTS) -> dict:
     theme = (theme or "").strip()
     if not theme:
         return {"available": False, "passages": [], "note": "No theme was given to look up."}
+    want = max(1, min(int(n_results or 1), MAX_RESULTS))
+    hits: list[dict] = []
+    reached = False
     try:
-        from agents.librarian import retrieve
-        hits = retrieve(theme, n_results=max(1, min(int(n_results or 1), MAX_RESULTS)))
-    except Exception as e:
-        return {"available": False, "passages": [],
-                "note": f"The verified writings index could not be reached ({type(e).__name__}). "
-                        "No quotation is shown rather than an unverified one."}
-    if not hits:
-        return {"available": True, "passages": [],
-                "note": "No verified passage in the library matched that closely enough."}
+        hits = _hits(COMPILATION_COLLECTION, theme, want)
+        reached = True
+    except Exception:
+        # A missing compilation collection is not a failure: this installation
+        # may simply never have run the ingest. Fall through to the general
+        # index rather than reporting the whole library as unreachable.
+        hits = []
+    for hit in hits:
+        hit["_from_compilation"] = True
+
+    if len(hits) < want:
+        try:
+            general = _hits("bahai_texts", theme, want - len(hits))
+            reached = True
+            hits.extend(general)
+        except Exception as e:
+            if not reached:
+                return {"available": False, "passages": [],
+                        "note": f"The verified writings index could not be reached "
+                                f"({type(e).__name__}). No quotation is shown rather "
+                                "than an unverified one."}
+
     passages = []
+    skipped_institutional = 0
     for hit in hits:
         text = (hit.get("text") or "").strip()
         if not text:
+            continue
+        institutional = bool(hit.get("institutional"))
+        if institutional and framework != "bahai":
+            # Guidance written for a Spiritual Assembly is not guidance for
+            # every gathering. Dropped rather than shown with a caveat, because
+            # a caveat under a passage is not read.
+            skipped_institutional += 1
             continue
         passages.append({
             "text": text,
@@ -77,10 +134,15 @@ def search(theme: str, n_results: int = MAX_RESULTS) -> dict:
             "score": hit.get("score", 0.0),
             "verified": True,
             "long": len(text) > LONG_PASSAGE_CHARS,
+            "institutional": institutional,
+            "from_compilation": bool(hit.get("_from_compilation")),
         })
     if not passages:
-        return {"available": True, "passages": [],
-                "note": "No verified passage in the library matched that closely enough."}
+        note = "No verified passage in the library matched that closely enough."
+        if skipped_institutional:
+            note = ("The passages that matched are addressed to Bahá'í institutions, "
+                    "so they were not shown in a general consultation.")
+        return {"available": True, "passages": [], "note": note}
     return {"available": True, "passages": passages, "note": ""}
 
 

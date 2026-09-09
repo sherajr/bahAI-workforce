@@ -34,8 +34,9 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.live_consultation import (
-    ITEM_LISTS, REASONING_MODEL, ConsultationState, DECISION_METHODS, FRAMEWORKS,
-    Observation, constitution_text, principles_section,
+    DEFAULT_LIFECYCLE, ITEM_LISTS, REASONING_MODEL, ConsultationState, DECISION_METHODS,
+    FRAMEWORKS, OPEN_LIFECYCLE, Observation, constitution_text, normalize_action_status,
+    normalize_fact_status, principles_section,
 )
 
 # ── Debounce policy (rule 79) ───────────────────────────────────────────────
@@ -103,22 +104,23 @@ _SCHEMA = """{
   "objective": "what the group is actually trying to achieve, if it has become clear",
   "summary": "a rolling narrative summary of the consultation so far, <= %(words)d words",
   "add": {
-    "facts": [{"text": "...", "status": "confirmed|uncertain|disputed"}],
-    "assumptions": [{"text": "..."}],
-    "principles": [{"text": "...", "note": "why it bears on this consultation"}],
-    "needs_and_concerns": [{"text": "..."}],
-    "ideas": [{"text": "..."}],
-    "agreements": [{"text": "..."}],
-    "tensions": [{"text": "..."}],
-    "unresolved_questions": [{"text": "..."}],
-    "questions_to_investigate": [{"text": "..."}],
-    "possible_syntheses": [{"text": "...", "note": "which concerns it holds together"}],
+    "themes": [{"text": "two or three words naming a subject the group has actually discussed", "source_turn_ids": ["12"]}],
+    "facts": [{"text": "...", "status": "reported|disputed", "source_turn_ids": ["12", "14"]}],
+    "assumptions": [{"text": "...", "source_turn_ids": ["12"]}],
+    "principles": [{"text": "...", "note": "why it bears on this consultation", "source_turn_ids": ["12"]}],
+    "needs_and_concerns": [{"text": "...", "source_turn_ids": ["12"]}],
+    "ideas": [{"text": "...", "source_turn_ids": ["12"]}],
+    "agreements": [{"text": "...", "source_turn_ids": ["12"]}],
+    "tensions": [{"text": "...", "source_turn_ids": ["12"]}],
+    "unresolved_questions": [{"text": "...", "source_turn_ids": ["12"]}],
+    "questions_to_investigate": [{"text": "...", "source_turn_ids": ["12"]}],
+    "possible_syntheses": [{"text": "...", "note": "which concerns it holds together", "source_turn_ids": ["12"]}],
     "decision_candidates": [{"text": "...", "rationale": "...", "support": "...",
-                             "concerns": ["..."]}],
-    "action_items": [{"action": "...", "owner": null, "due": null}]
+                             "concerns": ["..."], "source_turn_ids": ["12"]}],
+    "action_items": [{"action": "...", "owner": null, "due": null, "source_turn_ids": ["12"]}]
   },
-  "update": [{"id": "fact_3", "text": "...", "status": "disputed"}],
-  "resolve": ["tension_2"],
+  "update": [{"id": "fact_3", "text": "...", "status": "disputed", "source_turn_ids": ["18"]}],
+  "addressed": [{"id": "tension_2", "note": "why it now appears addressed"}],
   "observations": [{
     "kind": "possible_synthesis|unaddressed_assumption|unrepresented_concern|convergence|"
             "term_used_differently|means_before_ends|open_question|note",
@@ -139,9 +141,12 @@ system may occasionally be given the floor, and it is not you who decides that.
 Your job is to keep an accurate structured picture of the consultation.
 
 WHAT TO PUT WHERE
-- facts: things asserted as descriptions of reality. Mark them confirmed only if
-  the group actually established them; uncertain if they were merely stated;
-  disputed if participants disagree.
+- facts: things asserted as descriptions of reality. You may only ever mark a
+  fact "reported" (somebody stated it) or "disputed" (the group disagrees about
+  it). You may NOT mark anything as established or verified: whether the group
+  has actually established something is theirs to say, and the application will
+  not accept any other status from you. Recording something as merely reported
+  is not a failure — it is usually the honest answer.
 - assumptions: things the discussion is relying on WITHOUT having established.
   These are among the most valuable things you can notice.
 - principles: values, spiritual or moral or practical, that genuinely bear on
@@ -161,8 +166,31 @@ WHAT TO PUT WHERE
 - decision_candidates: a decision the discussion seems to be moving toward. This
   is NOT a decision and must never be written as one. Only the people in the room
   decide, by hand, in the application.
-- action_items: concrete steps. Set owner or due ONLY if a person actually said
-  them. Otherwise leave them null. Never invent a plausible owner or deadline.
+- action_items: concrete steps somebody PROPOSED. Set owner or due ONLY if a
+  person actually said them; otherwise leave them null. Never invent a
+  plausible owner or deadline. Naming somebody is not the same as that person
+  agreeing: an action is a proposal until a human records that its owner
+  accepted it, and you cannot record that.
+  If you are refining an action already in the map — because an owner or a date
+  has since been said aloud, or the wording has firmed up — put it in "update"
+  with its existing id. Do NOT add it again with different words: that is how
+  one meeting ended up with a hundred and two near-identical actions.
+
+KEEPING THE MAP SMALL AND TRUE
+Prefer UPDATING an existing item to adding a near-duplicate. The map is read by
+people in the middle of a meeting; forty overlapping fragments are worse than
+twelve accurate ones. Cite the transcript turn ids you actually relied on in
+"source_turn_ids" — the numbers in square brackets at the start of each line —
+so a person can go and read what was really said. Never cite a turn you were
+not given.
+
+WHEN A CONCERN APPEARS TO HAVE BEEN DEALT WITH
+Put its id in "addressed", with a short note saying why. That marks it, and the
+group can see it and disagree. You cannot delete a tension, a concern or an
+open question, and you should not want to: a minority concern that quietly
+disappears from the record is the specific failure this whole application
+exists to prevent. Deciding something is genuinely RESOLVED, or may be
+DEFERRED, or is a risk the group knowingly accepts, is theirs alone.
 
 OBSERVATIONS
 Separately from the map, you may note things worth the group's attention:
@@ -215,10 +243,24 @@ def _state_for_prompt(state: dict) -> dict:
             if name == "action_items":
                 entry["action"] = item.get("action", "")
                 entry["owner"] = item.get("owner")
+                # `due` and `status` were missing here, and their absence was
+                # expensive: the model could not see the deadline it had
+                # already recorded, so it had no way to tell a refinement from
+                # a new action and simply proposed it again. One real meeting
+                # accumulated 102 near-identical action items.
+                entry["due"] = item.get("due")
+                entry["status"] = item.get("status", "proposed")
             else:
                 entry["text"] = item.get("text", "")
             if name == "facts":
-                entry["status"] = item.get("status", "uncertain")
+                entry["status"] = item.get("status", "reported")
+            lifecycle = item.get("lifecycle")
+            if lifecycle and lifecycle != "open":
+                entry["lifecycle"] = lifecycle
+            # So the model can see what it must not overwrite (rule 95) and
+            # does not waste a pass trying.
+            if item.get("human_edited"):
+                entry["human_edited"] = True
             slim.append(entry)
         if slim:
             out[name] = slim
@@ -343,11 +385,30 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", "", (text or "").lower()).strip()
 
 
+def _clean_turn_ids(raw) -> list[str]:
+    """Turn ids as strings, deduplicated and capped.
+
+    Whether they belong to THIS session is checked at the API boundary, where
+    the session's turns are actually known; this only guarantees the shape.
+    Provenance was effectively absent before 2026-09-03 -- 28 of 2110 real map
+    items carried any -- because the field was asked for in one trailing
+    sentence and never appeared in the schema the model was shown.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out[:8]
+
+
 # Ids are short, stable and readable — they appear in the map, in
 # source_turn_ids and in an `update` instruction, so "possible_synthese_2"
 # would be a small permanent annoyance.
 ID_PREFIX = {
-    "facts": "fact", "assumptions": "assumption", "principles": "principle",
+    "themes": "theme", "facts": "fact", "assumptions": "assumption", "principles": "principle",
     "needs_and_concerns": "concern", "ideas": "idea", "agreements": "agreement",
     "tensions": "tension", "unresolved_questions": "question",
     "questions_to_investigate": "investigate", "possible_syntheses": "synthesis",
@@ -401,19 +462,35 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
                 seen.add(key)
                 entry = dict(raw)
                 entry["id"] = _next_id(ID_PREFIX.get(name, name), current)
-                if name == "facts" and entry.get("status") not in (
-                        "confirmed", "uncertain", "disputed"):
-                    entry["status"] = "uncertain"
-                if name == "action_items":
+                entry["source_turn_ids"] = _clean_turn_ids(raw.get("source_turn_ids"))
+                # Nothing arriving from a model is human-touched, whatever the
+                # reply claims about itself (rule 95).
+                entry["human_edited"] = False
+                entry["human_reviewed"] = False
+                if name == "facts":
+                    # model_written=True: "group_established" and
+                    # "externally_verified" are REFUSED here, not merely
+                    # discouraged in the prompt (rule 96).
+                    entry["status"] = normalize_fact_status(entry.get("status", ""),
+                                                            model_written=True)
+                    entry.setdefault("evidence_note", "")
+                elif name == "action_items":
                     # An owner or a due date is only ever what someone said
                     # (rule 83). An empty string is not an assignment.
                     entry["owner"] = (entry.get("owner") or None) or None
                     entry["due"] = (entry.get("due") or None) or None
-                    entry.setdefault("status", "open")
-                if name == "decision_candidates":
+                    entry["status"] = normalize_action_status(entry.get("status", ""),
+                                                              model_written=True)
+                    # A model can never record that a person agreed to do a thing.
+                    entry["owner_accepted"] = None
+                elif name == "decision_candidates":
                     entry["status"] = "candidate"
                     concerns = entry.get("concerns")
                     entry["concerns"] = [str(c) for c in concerns] if isinstance(concerns, list) else []
+                    entry.setdefault("retained_concerns", [])
+                else:
+                    entry["lifecycle"] = DEFAULT_LIFECYCLE
+                    entry.setdefault("resolution_note", "")
                 current.append(entry)
 
     for change in (patch.get("update") or []):
@@ -421,19 +498,60 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
             continue
         for name in ITEM_LISTS:
             for item in out.get(name, []):
-                if isinstance(item, dict) and item.get("id") == change["id"]:
-                    for field in ("text", "note", "status", "action", "owner", "due"):
-                        if field in change and change[field] is not None:
-                            item[field] = change[field]
+                if not (isinstance(item, dict) and item.get("id") == change["id"]):
+                    continue
+                # A human has been here. The model may go on noticing the item;
+                # it does not get to put its own words back over a correction
+                # somebody made on purpose (rule 95).
+                if item.get("human_edited"):
+                    notes.append("kept the human wording of " + str(item.get("id")))
+                    continue
+                for field in ("text", "note", "action", "owner", "due"):
+                    if field in change and change[field] is not None:
+                        item[field] = change[field]
+                if change.get("status") is not None:
+                    if name == "facts":
+                        item["status"] = normalize_fact_status(change["status"],
+                                                               model_written=True)
+                    elif name == "action_items":
+                        item["status"] = normalize_action_status(change["status"],
+                                                                 model_written=True)
+                ids = _clean_turn_ids(change.get("source_turn_ids"))
+                if ids:
+                    item["source_turn_ids"] = sorted(
+                        set(item.get("source_turn_ids") or []) | set(ids))
 
-    resolved = [r for r in (patch.get("resolve") or []) if isinstance(r, str)]
-    if resolved:
-        for name in ("tensions", "unresolved_questions", "questions_to_investigate"):
-            before = len(out.get(name, []))
-            out[name] = [i for i in out.get(name, [])
-                         if not (isinstance(i, dict) and i.get("id") in resolved)]
-            if before != len(out.get(name, [])):
-                notes.append(f"{before - len(out[name])} {name.replace('_', ' ')} resolved")
+    # A concern is NEVER deleted (rule 97). The model may mark one as appearing
+    # addressed, and that is all: the item stays in the map with a note, the
+    # group can see it, and a human can reopen it or decide it is genuinely
+    # resolved. The old "resolve" key removed the item outright, so a minority
+    # concern could vanish from the record because a model thought it had been
+    # dealt with -- taking with it the route by which understanding developed.
+    marked = 0
+    for raw in (patch.get("addressed") or []):
+        if isinstance(raw, str):
+            raw = {"id": raw}
+        if not isinstance(raw, dict) or not raw.get("id"):
+            continue
+        for name in ITEM_LISTS:
+            for item in out.get(name, []):
+                if not (isinstance(item, dict) and item.get("id") == raw["id"]):
+                    continue
+                if item.get("human_reviewed") or item.get("human_edited"):
+                    continue    # a person has already ruled on this one
+                if item.get("lifecycle", DEFAULT_LIFECYCLE) != DEFAULT_LIFECYCLE:
+                    continue    # already moved on; not the model's to move again
+                item["lifecycle"] = "addressed"
+                item["resolution_note"] = str(raw.get("note") or "").strip()[:400]
+                marked += 1
+    if marked:
+        notes.append(str(marked) + " item(s) marked as appearing addressed, none deleted")
+
+    # The old key, refused out loud rather than silently. A model prompted from
+    # the previous schema will keep sending it, and honouring it would delete
+    # exactly what rule 97 exists to keep.
+    if patch.get("resolve"):
+        notes.append("ignored a request to delete items; concerns are never deleted")
 
     # Never writable by a patch. The only path to a confirmed decision is a
     # person pressing Confirm in the dashboard.
@@ -444,6 +562,13 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
 def validate_state(state: dict) -> tuple[dict, Optional[str]]:
     """Run the merged map through the domain models. On a validation failure the
     CALLER keeps the previous state; this only reports."""
+    from agents.live_consultation import normalize_state
+    # Normalise BEFORE validating. The vocabulary changed under eight meetings
+    # of stored data, so an unknown status has to become the honest default
+    # rather than making a real session unreadable -- the guarantee that
+    # matters is that a MODEL cannot claim more than "reported" (enforced in
+    # `merge`), not that odd input raises here.
+    state = normalize_state(state)
     try:
         return ConsultationState(**{k: v for k, v in state.items()
                                     if k in ConsultationState.model_fields}).model_dump(), None
@@ -565,8 +690,13 @@ def speech_context(state: dict, question: str = "", max_chars: int = 2200) -> st
         ("questions_to_investigate", "Needs information rather than argument"),
     ]
     for key, label in labels:
+        # Only what is still live. Reading out a concern the group has already
+        # settled wastes her one intervention and sounds like she was not
+        # listening (rule 97 gave these a lifecycle precisely so this could be
+        # told apart).
         items = [i.get("text", "") for i in (state.get(key) or [])
-                 if isinstance(i, dict) and i.get("text")]
+                 if isinstance(i, dict) and i.get("text")
+                 and i.get("lifecycle", "open") in OPEN_LIFECYCLE]
         if items:
             lines.append(f"{label}: " + "; ".join(items[-5:]))
     decided = state.get("confirmed_decision")

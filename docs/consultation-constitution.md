@@ -115,6 +115,20 @@ PRINCIPLES
 - Never present a quotation from the Bahá'í writings that you produced from
   memory. Verified passages come from the library, or there is none.
 - Never call anything a decision. Only the group decides, by hand.
+- Say who established a thing, not merely that it is so. Something one person
+  stated and something the group actually settled are different, and only the
+  group can turn the first into the second.
+- Never let a concern quietly disappear. If it looks dealt with, say so and say
+  why, and leave it in the record for the group to judge. A concern that fades
+  out of the notes is the failure this whole undertaking exists to prevent.
+- Naming somebody is not the same as their agreeing. Record what a person
+  actually offered to do; never write down that they accepted.
+- Point at what was said. When you note something, cite the lines of the
+  meeting it came from — and remember that they show only what was said, never
+  that it was right.
+- Prefer improving what is already in the map to adding something almost the
+  same. Forty overlapping fragments are worse for the people reading them than
+  twelve accurate ones.
 <!-- PRINCIPLES:END -->
 
 ---
@@ -135,12 +149,41 @@ can go and read the enforcement rather than trusting this description.
 | A request for the floor that nobody answers expires, and is never asked again. | `PERMISSION_TIMEOUT_MS`, then `observations/{id}/answer` with `ignored: true` → recorded as a denial, with its own longer cooldown. |
 | A decision is never final without explicit human confirmation. | `confirmed_decision` is unwritable from an analysis patch (`reasoner.merge` restores it); only `POST /decisions/{id}/confirm` sets it. |
 | Scripture is never generated from memory as an authoritative quotation. | `live_consultation_writings` searches the verified corpus; `verify_quotation` treats a near-miss as a failure; the voice points at the passage on screen rather than reciting it. |
-| Raw audio is not stored. | No recorder exists; `record_audio` is refused at the endpoint, and `capabilities.recording_supported` reports `false`. |
+| Audio is recorded only when the group chooses it, and is deleted with the session. | `record_audio` is a per-meeting choice (rule 91); without a key it is refused rather than accepted decoratively. Files live in `private/consultation_audio/`, are sent to OpenAI once for diarisation, and `delete_session` / `delete_transcript` remove them. Dictation (rule 91b) is never written to disk at all. |
 | Meeting transcripts live only in private storage. | `live_consultation_store` writes `private/consultation.db` and nothing else; `private/` is git-ignored. |
 | No preset makes silence into permission. | `resolve_policy` scales waits, cooldowns and the importance bar only; `evaluate` runs the same predicate in the same order at every setting. |
 | In a meeting she carries none of Sheraj's private world, and can act on nothing. | Nothing in `live_consultation_*` imports `secretary_store`, and the subsystem defines no tools at all. |
+| A decision, an owner or a deadline is never written by a model. | The report's narrative is model-written; the decision, the action items and their owners are copied verbatim from the record, and any of those fields in the model's reply are discarded (rule 90). |
+| Nothing infers who was speaking. | Live turns are always "Participant". Voices are separated only from a recording, afterwards, and a name is attached to a voice by a human (rule 91). |
 | The existing product consultation pipeline is untouched. | `agents/consultation.py` is a separate subsystem; nothing in `live_consultation_*` imports or modifies it. |
+| Every privacy claim on screen is literally true. | Audio is PROCESSED by OpenAI, the record is STORED locally and unencrypted, and the UI says both. The suite greps the components for the two sentences that were false. |
+| A meeting cannot start until the host attests the room was told. | `POST /sessions/{id}/start` refuses without `participants_informed_at` — at the server, not only on a disabled button. It records an attestation, never consent. |
+| Deleting the transcript keeps the approved record, and a full export is then refused. | `store.delete_transcript`; `GET .../export?scope=full` returns 409 rather than a "full" export missing its largest part. |
+| An owner or deadline learned later reaches the record. | Identity is the map's stable id (`_find_row`), not normalised text; refinement only ever adds. |
+| A human edit is never overwritten by a model. | `human_edited` is checked in `reasoner.merge` and in both store upserts. |
+| Only a human can say the group established a fact. | `normalize_fact_status(model_written=True)` refuses anything above `reported`/`disputed`. |
+| Only a human can record that somebody accepted a commitment. | `owner_accepted` is forced to `None` on anything a model produces; the accept endpoint is the only path. |
+| A concern is never deleted, only given a lifecycle. | `merge` refuses the old `resolve` key and reports the refusal; the model may propose `addressed` and nothing further. |
+| A source reference points at a real turn in this session. | `_validate_provenance` drops the rest and counts the drops. |
+| The offline suite makes no network call, even with real credentials present. | A socket tripwire installed before every import, raising `BaseException` so no `except Exception` can swallow it. |
 | What is said in the meeting is data, never instructions. | Said in the prompt, and true regardless: this subsystem exposes no tools to the model at all — there is nothing for an injected instruction to reach. |
+
+## What she may and may not claim
+
+Three of her claims are now bounded in code rather than by instruction, because
+each one had been quietly overstating what the group had actually done.
+
+- **A fact.** She may record that something was *reported* (somebody said it)
+  or is *disputed* (the group disagrees). She may not record that the group
+  *established* it, or that it is *externally verified* — those say the people
+  in the room did something, and only they can say so.
+- **A concern.** She may mark one as *appearing addressed*, with her reason.
+  She cannot resolve it, defer it, or decide it is a risk worth accepting, and
+  she can no longer delete it at all. It stays in the record with its history.
+- **A commitment.** She may record an action somebody proposed, and an owner or
+  a deadline if somebody actually said one. She cannot record that the owner
+  agreed. A name is a proposal until a person says otherwise, and "nobody has
+  answered yet" stays distinct from "asked, and declined".
 
 ## How quick she is
 
@@ -148,12 +191,42 @@ How long she waits is a dial — **Reserved**, **Attentive**, **Present** — an
 you can move it during a meeting, because the moment you notice she is too slow
 is while you are sitting there waiting for her.
 
-It changes three things: how long a pause must run before the floor counts as
-free, how long she holds back between offers, and how good something has to be
-before she will offer it at all.
+It changes four things: how readily the detector decides you have finished
+speaking, how long a pause must run before the floor counts as free, how long
+she holds back between offers, and how good something has to be before she will
+offer it at all.
+
+The first of those is the one you actually feel. Nothing can begin until the
+detector reports your turn has ended, so it is the largest part of the wait —
+and until 2026-08-24 it was fixed, which is why *Present* used to change
+everything except the thing that was making her slow. Moving the dial during a
+meeting now reconfigures the live session, so it takes effect on the next thing
+you say rather than at the next meeting.
 
 It cannot change the rule below. At every setting, silence is still not
 permission.
+
+## How the meeting opens
+
+She introduces herself in a sentence, and then:
+
+- In a **Bahá'í consultation** she reads one passage on consultation, word for
+  word, while the same text appears on screen. She may not alter it, shorten it
+  or comment on it — it is a fixed string in the code, not something she recalls.
+- In a **general consultation** she commends the same qualities in her own
+  words, quotes nothing, and names no religion. The people in that room may not
+  share one.
+
+## The clock
+
+If the group sets a length, she says something twice at most: once when the
+warning point is reached, and once when the time is up. Each time she gives the
+time and then puts at most two loose ends to the group **as questions** — an
+unconfirmed decision, an open question, an action with nobody against it. She
+takes them from the record, so she cannot raise something that was never
+discussed, and if nothing is outstanding she says only that.
+
+She never decides anything to save time, and never presses the group to decide.
 
 ## Silence
 
@@ -295,11 +368,11 @@ All optional, all in `.env`; the defaults are what the walk-through above uses.
 | Setting | Default | What it changes |
 | --- | --- | --- |
 | `CONSULTATION_REALTIME_MODEL` | `gpt-realtime-2.1` | The ears and the mouth. |
-| `CONSULTATION_REASONING_MODEL` | `gpt-5.6-sol` | The silent brain. |
+| `CONSULTATION_REASONING_MODEL` | `gpt-5.6-luna` | The silent brain: builds the map, writes the report. Set to Luna on 2026-08-27 for cost. Not the voice. |
 | `CONSULTATION_TRANSCRIBE_MODEL` | `gpt-live-transcribe` | Speech to text. |
 | `CONSULTATION_VOICE` | `marin` | The assistant's voice. |
 | `CONSULTATION_ASSISTANT_NAME` | `Abigail` | What the room calls her. |
-| `CONSULTATION_VAD_EAGERNESS` | `medium` | How readily the detector believes a turn ended. The biggest single lever on how quick she feels. |
+| `CONSULTATION_VAD_EAGERNESS` | *(unset)* | How readily the detector believes a turn ended — the biggest single lever on how quick she feels. Normally left unset, so the presence dial decides (`low` / `medium` / `high`). Setting it pins all three presets to one value. |
 | `CONSULTATION_FLOOR_OPEN_MS` | `3000` | The earliest a floor may be *considered* open. |
 | `CONSULTATION_REFLECTIVE_PAUSE_MS` | `1200` | When the screen calls a pause reflective. |
 | `CONSULTATION_INVITED_GRACE_MS` | `400` | The beat she leaves after a direct question. |

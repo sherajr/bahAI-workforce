@@ -5,11 +5,12 @@ import { api } from "../../lib/api";
 import { getConsultationUi, patchConsultationUi } from "../../lib/settings";
 import { Card, CardContent, ErrorNote } from "../ui";
 import { ConsultationArchive } from "./ConsultationArchive";
+import { ConsultationCloseout } from "./ConsultationCloseout";
 import { ConsultationSetup } from "./ConsultationSetup";
 import { ConsultationSummary } from "./ConsultationSummary";
 import { LiveConsultationSession } from "./LiveConsultationSession";
 
-type View = "archive" | "setup" | "live" | "summary";
+type View = "archive" | "setup" | "live" | "closeout" | "summary";
 
 /**
  * The Consultation tab.
@@ -22,7 +23,8 @@ type View = "archive" | "setup" | "live" | "summary";
 export function ConsultationPanel() {
   const saved = getConsultationUi();
   const [view, setView] = useState<View>(
-    saved.view === "setup" || saved.view === "summary" ? (saved.view as View) : "archive");
+    saved.view === "setup" || saved.view === "summary" || saved.view === "closeout"
+      ? (saved.view as View) : "archive");
   const [sessionId, setSessionId] = useState<string | null>(saved.sessionId);
   const [autoStart, setAutoStart] = useState(false);
 
@@ -95,7 +97,7 @@ export function ConsultationPanel() {
           sessionId={sessionId}
           capabilities={capabilities}
           autoStart={autoStart}
-          onEnded={() => { setAutoStart(false); setView("summary"); }}
+          onEnded={() => { setAutoStart(false); setView("closeout"); }}
           onBack={() => setView("archive")}
         />
       )}
@@ -108,7 +110,16 @@ export function ConsultationPanel() {
         />
       )}
 
-      {(view === "live" || view === "summary") && !sessionId && (
+      {view === "closeout" && sessionId && (
+        <ConsultationCloseout
+          sessionId={sessionId}
+          capabilities={capabilities}
+          onDone={() => setView("summary")}
+          onSkip={() => setView("summary")}
+        />
+      )}
+
+      {(view === "live" || view === "summary" || view === "closeout") && !sessionId && (
         <ConsultationArchive
           canStart={canStart}
           onNew={() => setView("setup")}
@@ -119,8 +130,13 @@ export function ConsultationPanel() {
       <p className="pt-2 text-[11px] leading-relaxed text-slate-600">
         {capabilities.assistant_name} listens constantly, understands continuously and
         speaks rarely. She is not the chairman, she never records a decision the group has
-        not confirmed, and in a meeting she knows nothing of your private world. Everything
-        said here stays on this machine.
+        not confirmed, and in a meeting she knows nothing of your private world.{" "}
+        {/* This sentence used to claim everything said here never left the
+            machine, which was simply untrue: the microphone goes to OpenAI to be
+            transcribed. The distinction that matters is between where audio is
+            PROCESSED and where the record is STORED, and it is now drawn
+            everywhere it is made (rule 94). */}
+        Speech is sent to OpenAI to be transcribed; the record is stored on this machine.
       </p>
     </div>
   );

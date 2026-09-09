@@ -34,7 +34,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from agents.live_consultation import DEFAULT_PRESENCE, MODES, PRESENCE_LEVELS
+from agents.live_consultation import (
+    DEFAULT_PRESENCE, MODES, PRESENCE_LEVELS, turn_detection, vad_eagerness,
+)
 
 # ── Floor states ────────────────────────────────────────────────────────────
 
@@ -152,10 +154,28 @@ def resolve_policy(presence: str = DEFAULT_PRESENCE) -> dict:
         "min_importance": {mode: max(0.0, min(1.0, base + shift))
                            for mode, base in MIN_IMPORTANCE.items()},
         "stale_revisions": STALE_REVISIONS,
+        # The detector's own setting travels WITH the policy, because it is the
+        # biggest single contributor to how long she appears to wait and it has
+        # to move when the dial moves. `turn_detection` is the whole code-owned
+        # block, served so the browser can apply a mid-meeting change by
+        # echoing it back rather than composing one of its own (rule 75).
+        "vad_eagerness": vad_eagerness(presence),
+        "turn_detection": turn_detection(presence),
     }
 
 
-REQUEST_KINDS = ("invited", "queued_ask", "unsolicited", "permission_granted")
+# `opening` and `time_warning` are SCHEDULED speech (owner ask 2026-08-25): the
+# group asked for an opening when they set the meeting up, and asked to be told
+# when time was running out when they set a duration. That is an invitation made
+# in advance, so they join the invited family rather than the unsolicited one —
+# no warmup, no cooldown, no importance bar. What they do NOT get is any relief
+# from the checks that protect the room: scribe mode, muted and paused refuse
+# them outright, and a human holding the floor makes them wait like anything
+# else. Neither is ever triggered by silence (rule 75): one fires on the meeting
+# starting, the other on a clock the humans set.
+REQUEST_KINDS = ("invited", "queued_ask", "unsolicited", "permission_granted",
+                 "opening", "time_warning")
+SCHEDULED_KINDS = ("opening", "time_warning")
 
 
 def policy(presence: str = DEFAULT_PRESENCE) -> dict:
@@ -266,9 +286,9 @@ def evaluate(req: SpeechRequest | dict) -> Decision:
 
     # 3. An answer to an invitation, or to a granted permission. The person
     #    asked; the only question left is whether the floor is actually free.
-    if kind in ("invited", "queued_ask", "permission_granted"):
+    if kind in ("invited", "queued_ask", "permission_granted") + SCHEDULED_KINDS:
         grace = pol["invited_grace_ms"] if kind == "invited" else pol["queued_ask_grace_ms"]
-        if kind == "permission_granted":
+        if kind in ("permission_granted",) + SCHEDULED_KINDS:
             grace = pol["invited_grace_ms"]
         if since_human is not None and since_human < grace:
             return _wait("grace", "Waiting a moment in case the speaker continues.",
@@ -279,6 +299,13 @@ def evaluate(req: SpeechRequest | dict) -> Decision:
             return _wait("invitation_grace",
                          "Waiting a moment after the invitation in case they carry on.",
                          checks, pol["invited_grace_ms"] - req.ms_since_invitation)
+        if kind == "opening":
+            return Decision(True, "speak", "opening",
+                            "The group asked her to open the meeting.", None, checks)
+        if kind == "time_warning":
+            return Decision(True, "speak", "time_warning",
+                            "The group set a time for this meeting and it is nearly up.",
+                            None, checks)
         return Decision(True, "speak", "invited",
                         "A person asked her to speak.", None, checks)
 

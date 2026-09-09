@@ -1,11 +1,19 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, Trash2 } from "lucide-react";
+import { Copy, Download, FileText, Loader2, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
-import { Button, Card, CardContent, CardHeader, CardTitle, ErrorNote, Modal } from "../ui";
-import { ConsultationMap } from "./ConsultationMap";
+import { Button, Card, CardContent, ErrorNote, Modal } from "../ui";
+import { ConsultationDetailPanel } from "./ConsultationDetail";
+import { Markdown } from "./Markdown";
 
-/** The record of a finished consultation. */
+/**
+ * The record of a finished consultation.
+ *
+ * The REPORT is the front page — one readable thing you can send to someone who
+ * was not there. The working map and the transcript are behind the Detail tab
+ * (owner ask 2026-08-25: "far too long to read"). Nothing was thrown away; it
+ * stopped being the first thing you see.
+ */
 export function ConsultationSummary({
   sessionId, onDeleted, onBack,
 }: {
@@ -16,6 +24,7 @@ export function ConsultationSummary({
   const qc = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [view, setView] = useState<"report" | "detail">("report");
 
   const { data, error } = useQuery({
     queryKey: ["consultation", sessionId],
@@ -32,18 +41,47 @@ export function ConsultationSummary({
     },
   });
 
-  const copySummary = async () => {
-    const res = await fetch(api.consultationExportUrl(sessionId));
-    await navigator.clipboard.writeText(await res.text());
+  const buildReport = useMutation({
+    mutationFn: () => api.makeConsultationReport(sessionId),
+    onSuccess: () => refresh(),
+  });
+
+  const diarize = useMutation({
+    mutationFn: () => api.diarizeConsultation(sessionId),
+    onSuccess: () => refresh(),
+  });
+
+  const mapSpeaker = useMutation({
+    mutationFn: ({ id, key }: { id: string; key: string | null }) =>
+      api.mapConsultationSpeaker(sessionId, id, key),
+    onSuccess: () => refresh(),
+  });
+
+  const copyReport = async (text: string) => {
+    await navigator.clipboard.writeText(text);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  const download = (text: string, title: string) => {
+    // A Blob URL rather than a data: URI so a long report is not capped by URL
+    // length, and revoked straight after so the page does not leak object URLs.
+    const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${title.replace(/[^\w \-]+/g, "").trim() || "consultation"}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   if (error) return <ErrorNote>{(error as Error).message}</ErrorNote>;
   if (!data) return <p className="text-sm text-slate-400">Loading…</p>;
 
-  const { session, state, turns, decisions, action_items, writings } = data;
-  const confirmed = decisions.find((d) => d.status === "confirmed");
+  const { session, turns, final_turns } = data;
+  const report = data.report || "";
 
   return (
     <div className="space-y-4 pb-8">
@@ -54,21 +92,23 @@ export function ConsultationSummary({
           <p className="mt-1 text-xs text-slate-500">
             {(session.started_at ?? session.created_at ?? "").slice(0, 16)}
             {session.ended_at ? ` — ended ${session.ended_at.slice(11, 16)}` : ""}
-            {" · "}{turns.length} turns
+            {" · "}{(final_turns ?? turns).length} turns
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={onBack}>Back</Button>
-          <Button variant="secondary" onClick={() => void copySummary()}>
-            <Copy className="h-4 w-4" />
-            {copied ? "Copied" : "Copy summary"}
-          </Button>
-          <a href={api.consultationExportUrl(sessionId)} target="_blank" rel="noreferrer">
-            <Button variant="secondary">
-              <Download className="h-4 w-4" />
-              Markdown
-            </Button>
-          </a>
+          {report && (
+            <>
+              <Button variant="secondary" onClick={() => void copyReport(report)}>
+                <Copy className="h-4 w-4" />
+                {copied ? "Copied" : "Copy report"}
+              </Button>
+              <Button variant="secondary" onClick={() => download(report, session.title)}>
+                <Download className="h-4 w-4" />
+                Download
+              </Button>
+            </>
+          )}
           <Button variant="danger" onClick={() => setConfirmDelete(true)}>
             <Trash2 className="h-4 w-4" />
             Delete session
@@ -76,60 +116,82 @@ export function ConsultationSummary({
         </div>
       </div>
 
-      {data.note && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-400">
-          {data.note}
+      <div className="flex gap-1 border-b border-slate-800">
+        {(["report", "detail"] as const).map((v) => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            className={`px-3 py-2 text-sm capitalize transition ${
+              view === v
+                ? "border-b-2 border-amber-400 text-slate-100"
+                : "text-slate-500 hover:text-slate-300"
+            }`}
+          >
+            {v === "report" ? "Report" : "Everything else"}
+          </button>
+        ))}
+      </div>
+
+      {view === "report" && (
+        <div className="space-y-3">
+          {buildReport.error && <ErrorNote>{(buildReport.error as Error).message}</ErrorNote>}
+          {!report && (
+            <Card>
+              <CardContent className="space-y-3 py-6 text-center">
+                <FileText className="mx-auto h-8 w-8 text-slate-600" />
+                <p className="text-sm text-slate-400">
+                  No report has been written for this consultation yet.
+                </p>
+                <Button onClick={() => buildReport.mutate()} disabled={buildReport.isPending}>
+                  {buildReport.isPending ? (
+                    <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Writing it…</>
+                  ) : "Write the report"}
+                </Button>
+                <p className="mx-auto max-w-md text-xs text-slate-500">
+                  The decision, the action items and any passages are copied exactly from
+                  the record. The summarising parts are written from the working notes.
+                </p>
+              </CardContent>
+            </Card>
+          )}
+          {report && (
+            <>
+              <Card>
+                <CardContent className="py-5">
+                  <Markdown text={report} />
+                </CardContent>
+              </Card>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-slate-500">
+                  {session.report_at ? `Written ${session.report_at.slice(0, 16)}.` : ""}
+                </p>
+                <Button variant="ghost" onClick={() => buildReport.mutate()}
+                        disabled={buildReport.isPending} className="text-xs">
+                  {buildReport.isPending ? "Rewriting…" : "Write it again"}
+                </Button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
-      {!confirmed && (
-        <Card className="border-slate-700">
-          <CardContent className="py-4 text-sm text-slate-300">
-            <span className="font-medium text-slate-100">No final decision was confirmed.</span>{" "}
-            That is recorded as it happened; nothing was inferred.
-          </CardContent>
-        </Card>
+      {view === "detail" && (
+        <ConsultationDetailPanel
+          detail={data}
+          diarizing={diarize.isPending}
+          error={diarize.error ? (diarize.error as Error).message : undefined}
+          onDiarize={() => diarize.mutate()}
+          onMapSpeaker={(id, key) => mapSpeaker.mutate({ id, key })}
+        />
       )}
-
-      <ConsultationMap
-        state={state}
-        decisions={decisions}
-        actions={action_items}
-        writings={writings}
-        onConfirmDecision={(id) => {
-          void api.confirmConsultationDecision(sessionId, id).then(refresh);
-        }}
-        onRejectDecision={(id) => {
-          void api.rejectConsultationDecision(sessionId, id).then(refresh);
-        }}
-        onToggleAction={(id, status) => {
-          void api.setConsultationActionStatus(sessionId, id, status).then(refresh);
-        }}
-      />
-
-      <Card>
-        <CardHeader><CardTitle>Transcript</CardTitle></CardHeader>
-        <CardContent className="max-h-[28rem] space-y-3 overflow-y-auto">
-          {turns.length === 0 && <p className="text-sm text-slate-500">Nothing was recorded.</p>}
-          {turns.map((t) => (
-            <div key={t.id}>
-              <div className={`text-xs font-semibold ${
-                t.role === "assistant" ? "text-amber-300" : "text-slate-400"
-              }`}>
-                {t.role === "assistant" ? "Abigail" : t.speaker_label ?? "Participant"}
-              </div>
-              <p className="text-sm leading-relaxed text-slate-300">{t.text}</p>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)}
              title="Delete this consultation?">
         <div className="space-y-4 text-sm text-slate-300">
           <p>
             This removes the transcript, the consultation map, everything the assistant
-            noticed, the decisions and the action items. There is no copy anywhere else.
+            noticed, the decisions, the action items, the report and any recording. There
+            is no copy anywhere else.
           </p>
           {remove.error && <ErrorNote>{(remove.error as Error).message}</ErrorNote>}
           <div className="flex justify-end gap-2">

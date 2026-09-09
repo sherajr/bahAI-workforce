@@ -22,8 +22,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import * as gov from "../lib/consultationGovernor";
 import {
-  ConnectionError, MicrophoneError, connectRealtime, events, requestMicrophone,
-  type RealtimeConnection, type RealtimeEvent,
+  ConnectionError, MicrophoneError, TRUNCATE_FLOOR_MS, connectRealtime, events,
+  requestMicrophone, type RealtimeConnection, type RealtimeEvent,
 } from "../lib/consultationRealtime";
 import type {
   ConsultationCapabilities, ConsultationDetail, ConsultationMode, ConsultationObservation,
@@ -47,6 +47,26 @@ interface Options {
 
 const RECONNECT_ATTEMPTS = 2;
 
+/**
+ * Errors that mean "you were a moment late", not "something is broken".
+ *
+ * Cutting her off is a race we cannot win cleanly: the cancel is already on the
+ * wire when her response finishes by itself, and OpenAI quite correctly says
+ * there was nothing to cancel. Caught for real on 2026-08-27 — the recorded
+ * message was "Cancellation failed: no active response found" while the floor
+ * had already gone back to idle. Nothing went wrong, and putting a red banner
+ * over the meeting for it is worse than saying nothing. They are still RECORDED
+ * (rule 89) so a real pattern would still be visible in the session's events.
+ */
+const BENIGN_ERRORS = [
+  "no active response",
+  "buffer is empty",
+  "already has an active response",
+];
+
+const isBenign = (message: string) =>
+  BENIGN_ERRORS.some((m) => message.toLowerCase().includes(m));
+
 export function useRealtimeConsultation({ session, capabilities, onRecordChanged }: Options) {
   const [connection, setConnection] = useState<ConnectionState>("idle");
   const [floorState, setFloorState] = useState<gov.FloorState>(gov.DISCONNECTED);
@@ -61,6 +81,15 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const [lastDecision, setLastDecision] = useState<string>("");
   const [analysisNote, setAnalysisNote] = useState<string>("");
   const [analyzing, setAnalyzing] = useState(false);
+  /** The passage she is reading, shown on screen at the same moment (rule 92). */
+  const [passage, setPassage] = useState<{ text: string; source: string } | null>(null);
+  const [minutesLeft, setMinutesLeft] = useState<number | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [recordingNote, setRecordingNote] = useState("");
+  /** Set when the Steward's monthly ceiling refused the session (rule 85). Held
+   *  separately from `error` because it is a QUESTION for the owner, not a
+   *  fault: the only thing that clears it is him deciding to go ahead. */
+  const [overCeiling, setOverCeiling] = useState<string>("");
 
   const sessionId = session?.id ?? "";
   const conn = useRef<RealtimeConnection | null>(null);
@@ -72,7 +101,14 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const humanSpeechEndedRef = useRef<number | null>(null);
   const responseIdRef = useRef<string | null>(null);
   const responseItemRef = useRef<string | null>(null);
-  const responseStartRef = useRef<number>(0);
+  // What is actually TRUE on the wire right now, as opposed to what the floor
+  // state says we intend. Cancelling a response that does not exist, or
+  // clearing an audio buffer that is empty, is an error from OpenAI — see
+  // cutOff.
+  const responseActiveRef = useRef(false);
+  const audioPlayingRef = useRef(false);
+  const audioStartedAtRef = useRef<number>(0);
+  const appliedEagernessRef = useRef<string | null>(null);
   const pendingRef = useRef<PendingPermission | null>(null);
   const askQueuedRef = useRef<string | null>(null);
   const timers = useRef<number[]>([]);
@@ -81,6 +117,10 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const modeRef = useRef<ConsultationMode>(session?.mode ?? "facilitator");
   const turnsSinceAnalysis = useRef(0);
   const consideredRef = useRef<Set<string>>(new Set());
+  const openedRef = useRef(false);
+  const warnedRef = useRef<{ warn: boolean; final: boolean }>({ warn: false, final: false });
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   // The timings for THIS session's presence, resolved on the server (rule 87).
   // Falling back to the generic policy rather than to numbers written here, so
@@ -91,6 +131,14 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     : undefined;
   const policyRef = useRef(policy);
   useEffect(() => { policyRef.current = policy; }, [policy]);
+
+  useEffect(() => {
+    openedRef.current = false;
+    warnedRef.current = { warn: false, final: false };
+    setPassage(null);
+    setMinutesLeft(null);
+    setRecordingNote("");
+  }, [sessionId]);
 
   useEffect(() => { modeRef.current = session?.mode ?? "facilitator"; }, [session?.mode]);
   useEffect(() => { revisionRef.current = session?.state_revision ?? revisionRef.current; },
@@ -124,11 +172,25 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
    */
   const cutOff = useCallback(() => {
     if (floorRef.current !== gov.AI_SPEAKING && floorRef.current !== gov.AI_PREPARING) return;
-    send(events.cancelResponse());
-    send(events.clearOutputAudio());
-    if (responseItemRef.current) {
-      send(events.truncate(responseItemRef.current, Date.now() - responseStartRef.current));
+    // Each event is sent only when the thing it acts on actually exists.
+    //
+    // All three still fire on a real barge-in mid-sentence — that is the
+    // guarantee (rule 76) and it is unchanged. What is gone is sending them
+    // into a void: cutting off a response that has been REQUESTED but has not
+    // begun (the ai_preparing window) used to emit all three regardless, and
+    // OpenAI answers each one with an error. That is the error Sheraj saw
+    // "just before she responds", and the cancel took her answer with it
+    // (2026-08-24).
+    if (responseActiveRef.current) send(events.cancelResponse());
+    if (audioPlayingRef.current) {
+      send(events.clearOutputAudio());
+      const heard = Date.now() - audioStartedAtRef.current;
+      if (responseItemRef.current && heard > TRUNCATE_FLOOR_MS) {
+        send(events.truncate(responseItemRef.current, heard));
+      }
     }
+    responseActiveRef.current = false;
+    audioPlayingRef.current = false;
     responseIdRef.current = null;
     responseItemRef.current = null;
     setAssistantSaying("");
@@ -166,9 +228,36 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
 
   const speak = useCallback((instructions: string, modalities: string[] = ["audio"]) => {
     setFloor("ai_preparing");
-    responseStartRef.current = Date.now();
+    // A new attempt clears the last complaint: an error banner that outlives
+    // the thing it described reads as "still broken" when she is answering
+    // perfectly well.
+    setError("");
     send(events.createResponse(instructions, modalities));
   }, [send, setFloor]);
+
+  /**
+   * Hold a question until the governor's own stated moment.
+   *
+   * Both governors already answer "wait, and try again in N ms" — and N was
+   * being thrown away. A queued ask sat until the floor-open timer instead,
+   * which produced a perverse cliff: a transcript that arrived FAST (inside the
+   * 400ms invitation grace) was refused and then waited the full floor-open
+   * window, so the quicker the transcription, the longer she took to answer
+   * (2026-08-24). Only the grace waits carry a retry, and it shrinks each time,
+   * so this cannot loop — "someone is speaking" carries none and still falls
+   * through to the floor-open path.
+   */
+  const holdAsk = useCallback((text: string, byVoice: boolean, retryAfterMs: number | null) => {
+    askQueuedRef.current = text;
+    setAskQueued(text);
+    setFloor("ask_queued");
+    if (retryAfterMs !== null && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+      later(() => {
+        if (askQueuedRef.current !== text) return;
+        void askRef.current?.(text, byVoice);
+      }, Math.max(50, retryAfterMs));
+    }
+  }, [later, setFloor]);
 
   /** Ask AI — by button, or because someone said "AI, ...". */
   const ask = useCallback(async (text: string, byVoice = false) => {
@@ -177,11 +266,9 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     if (local && !local.allowed) {
       setLastDecision(local.reason);
       if (local.action === "wait") {
-        // Queue rather than interrupt. The screen says so; it is answered when
-        // the floor is genuinely free.
-        askQueuedRef.current = text;
-        setAskQueued(text);
-        setFloor("ask_queued");
+        // Queue rather than interrupt. The screen says so; it is answered at
+        // the governor's own moment, or when the floor is genuinely free.
+        holdAsk(text, byVoice, local.retryAfterMs);
         return;
       }
       return;
@@ -199,17 +286,18 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     });
     setLastDecision(decision.reason);
     if (!decision.allowed) {
-      if (decision.action === "wait") {
-        askQueuedRef.current = text;
-        setAskQueued(text);
-        setFloor("ask_queued");
-      }
+      if (decision.action === "wait") holdAsk(text, byVoice, decision.retry_after_ms);
       return;
     }
     askQueuedRef.current = null;
     setAskQueued(null);
     speak(decision.instructions ?? "", decision.modalities ?? ["audio"]);
-  }, [session, localRequest, speak, setFloor]);
+  }, [session, localRequest, speak, setFloor, holdAsk]);
+
+  // `holdAsk` schedules a retry of `ask`, which is defined after it. The ref
+  // keeps that from being a stale closure over this render's session.
+  const askRef = useRef(ask);
+  useEffect(() => { askRef.current = ask; }, [ask]);
 
   /**
    * Consider an observation. Almost always refused, and that is the design:
@@ -249,7 +337,7 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     pendingRef.current = pending;
     setPendingPermission(pending);
     setFloor("permission_requested");
-    responseStartRef.current = Date.now();
+    setError("");
     send(events.createExactResponse(decision.say));
     onRecordChanged();
 
@@ -274,6 +362,107 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     onRecordChanged();
     if (granted && result.instructions) speak(result.instructions);
   }, [session, setFloor, speak, onRecordChanged]);
+
+  /**
+   * Apply a mid-meeting change of presence to the live session.
+   *
+   * The dial's biggest lever is how readily the detector calls a turn finished,
+   * and that lives in the realtime session, not in this hook's timers — so
+   * without this, moving to Present changed the waiting and left the longest
+   * wait exactly where it was. The session is configured once when the
+   * credential is minted; this is the only thing that ever re-configures it.
+   *
+   * The block sent is the SERVER's, verbatim (`policy.turn_detection`). It is
+   * not assembled here on purpose: `create_response: false` is what stops the
+   * detector starting her by itself, and a browser that built its own object
+   * could omit it — the API's default is true, and rule 75 would be gone with
+   * nothing raising an error anywhere.
+   */
+  useEffect(() => {
+    if (connection !== "live" || !policy?.turn_detection) return;
+    const wanted = policy.vad_eagerness ?? null;
+    if (appliedEagernessRef.current === null || appliedEagernessRef.current === wanted) return;
+    if (send(events.sessionUpdate({ audio: { input: { turn_detection: policy.turn_detection } } }))) {
+      appliedEagernessRef.current = wanted;
+    }
+  }, [connection, policy, send]);
+
+  /** The room state both scheduled interventions are judged against. */
+  const roomState = useCallback(() => ({
+    floor_state: floorRef.current,
+    human_speaking: floorRef.current === gov.HUMAN_SPEAKING,
+    ms_since_human_speech_ended: humanSpeechEndedRef.current === null
+      ? null : Date.now() - humanSpeechEndedRef.current,
+    muted: mutedRef.current,
+    listening_paused: pausedRef.current,
+    connected: !!conn.current,
+  }), []);
+
+  /**
+   * Open the meeting.
+   *
+   * Fires once, when the connection first goes live. The server refuses a second
+   * one from its own record, so a page reload cannot make her open the meeting
+   * twice — this ref only saves a round trip.
+   */
+  const openMeeting = useCallback(async () => {
+    if (!session || openedRef.current) return;
+    openedRef.current = true;
+    try {
+      const decision = await api.consultationOpening(session.id, roomState());
+      setLastDecision(decision.reason);
+      if (!decision.allowed || !decision.instructions) return;
+      if (decision.passage) {
+        setPassage({ text: decision.passage, source: decision.passage_source ?? "" });
+      }
+      speak(decision.instructions, decision.modalities ?? ["audio"]);
+    } catch {
+      // An opening that does not happen is a small loss; taking the meeting
+      // down over it would be a large one.
+      openedRef.current = false;
+    }
+  }, [session, roomState, speak]);
+
+  /**
+   * The clock (owner ask 2026-08-25).
+   *
+   * Polled rather than scheduled with one long timeout, because a laptop that
+   * sleeps mid-meeting would sail straight past a `setTimeout` and never warn
+   * anybody. Elapsed time is recomputed from the start on every tick, so waking
+   * up late still produces the warning rather than silence.
+   */
+  const checkClock = useCallback(() => {
+    if (!session) return;
+    const total = session.duration_minutes ?? 0;
+    if (!total) { setMinutesLeft(null); return; }
+    const elapsedMin = (Date.now() - sessionStartRef.current) / 60000;
+    const left = Math.max(0, Math.ceil(total - elapsedMin));
+    setMinutesLeft(left);
+    const warnAt = Math.max(0, total - (session.warn_minutes ?? 10));
+    const due = elapsedMin >= total ? "final" : elapsedMin >= warnAt ? "warn" : null;
+    if (!due) return;
+    if (due === "warn" && warnedRef.current.warn) return;
+    if (due === "final" && warnedRef.current.final) return;
+    // A meeting that runs past the warning point before anyone connects should
+    // not fire both at once; the final one supersedes.
+    if (due === "final") warnedRef.current = { warn: true, final: true };
+    else warnedRef.current.warn = true;
+    void api.consultationTimeWarning(session.id, {
+      ...roomState(), minutes_left: left, final: due === "final",
+    }).then((decision) => {
+      setLastDecision(decision.reason);
+      if (decision.allowed && decision.instructions) {
+        speak(decision.instructions, decision.modalities ?? ["audio"]);
+      }
+    }).catch(() => undefined);
+  }, [session, roomState, speak]);
+
+  useEffect(() => {
+    if (connection !== "live") return;
+    checkClock();
+    const id = window.setInterval(checkClock, 15000);
+    return () => window.clearInterval(id);
+  }, [connection, checkClock]);
 
   // ── Analysis ──────────────────────────────────────────────────────────────
 
@@ -354,6 +543,7 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
       }
       case "response.created": {
         responseIdRef.current = String((event.response as { id?: string })?.id ?? "");
+        responseActiveRef.current = true;
         break;
       }
       case "response.output_item.added": {
@@ -361,7 +551,8 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
         break;
       }
       case "output_audio_buffer.started": {
-        responseStartRef.current = Date.now();
+        audioPlayingRef.current = true;
+        audioStartedAtRef.current = Date.now();
         setFloor("ai_speech_started");
         break;
       }
@@ -371,6 +562,7 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
       }
       case "output_audio_buffer.stopped":
       case "output_audio_buffer.cleared": {
+        audioPlayingRef.current = false;
         setFloor("ai_speech_done");
         break;
       }
@@ -378,9 +570,26 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
         const response = (event.response ?? {}) as {
           usage?: Record<string, unknown>;
           status?: string;
+          status_details?: { error?: { message?: string } };
           output?: { content?: { transcript?: string; text?: string }[] }[];
         };
+        responseActiveRef.current = false;
+        audioPlayingRef.current = false;
         setFloor("ai_speech_done");
+        // A response can end without a word having been said. "cancelled" is
+        // normal (someone spoke over her); "failed" is not, and used to be
+        // silent — the transcript simply had a gap where an answer should be.
+        if (response.status === "failed") {
+          const detail = response.status_details?.error?.message
+            ?? "The realtime model could not produce an answer.";
+          setError(detail);
+          if (session) {
+            void api.reportConsultationClientError(session.id, {
+              message: detail, event_type: "response.failed",
+              floor_state: floorRef.current,
+            }).catch(() => undefined);
+          }
+        }
         const spoken = (response.output ?? [])
           .flatMap((item) => item.content ?? [])
           .map((c) => c.transcript ?? c.text ?? "")
@@ -400,9 +609,18 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
         break;
       }
       case "error": {
-        const message = ((event.error ?? {}) as { message?: string }).message
-          ?? "The realtime service reported an error.";
-        setError(message);
+        const err = (event.error ?? {}) as { message?: string; type?: string };
+        const message = err.message ?? "The realtime service reported an error.";
+        if (!isBenign(message)) setError(message);
+        // Recorded, not just displayed. This whole class of bug was diagnosed
+        // once from "it gives an error" and nothing else, because the banner
+        // vanished with the page and the backend log was all 200s — the failing
+        // exchange never touches this API (2026-08-24).
+        if (session) {
+          void api.reportConsultationClientError(session.id, {
+            message, event_type: err.type ?? "error", floor_state: floorRef.current,
+          }).catch(() => undefined);
+        }
         break;
       }
       default:
@@ -419,8 +637,39 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const handleEventRef = useRef(handleEvent);
   useEffect(() => { handleEventRef.current = handleEvent; }, [handleEvent]);
 
+  // `start`'s onOpen fires the opening, which is defined above it but recreated
+  // on every session change; the ref keeps the connection callback current.
+  const openMeetingRef = useRef(openMeeting);
+  useEffect(() => { openMeetingRef.current = openMeeting; }, [openMeeting]);
+
+  /** Close the recording and hand it to the API. Awaited by `stop`. */
+  const finishRecording = useCallback(async (sessionId: string) => {
+    const rec = recorderRef.current;
+    recorderRef.current = null;
+    if (!rec) return;
+    setRecording(false);
+    const done = new Promise<void>((resolve) => {
+      rec.onstop = () => resolve();
+    });
+    try { rec.stop(); } catch { return; }
+    await done;
+    const chunks = chunksRef.current;
+    chunksRef.current = [];
+    if (!chunks.length) return;
+    const blob = new Blob(chunks, { type: chunks[0].type || "audio/webm" });
+    try {
+      await api.uploadConsultationAudio(sessionId, blob);
+    } catch (e) {
+      setRecordingNote(
+        `The recording could not be saved (${(e as Error).message}). The transcript and ` +
+        "the report are unaffected; only the speaker names are lost."
+      );
+    }
+  }, []);
+
   const stop = useCallback(() => {
     clearTimers();
+    if (sessionId) void finishRecording(sessionId);
     // Null the ref BEFORE closing: close() reports a close, and onClose treats
     // "there is still a connection" as a drop worth reconnecting from. A
     // deliberate stop must not reconnect itself.
@@ -435,14 +684,18 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     setAssistantSaying("");
     pendingRef.current = null;
     setPendingPermission(null);
-  }, [clearTimers]);
+    responseActiveRef.current = false;
+    audioPlayingRef.current = false;
+    appliedEagernessRef.current = null;
+  }, [clearTimers, sessionId, finishRecording]);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (acceptOverCeiling = false) => {
     if (!session || !capabilities) return;
     if (startedRef.current) return;            // StrictMode remount, or a double click
     startedRef.current = true;
     setError("");
     setMicError("");
+    setOverCeiling("");
     setConnection("starting");
     let stream: MediaStream;
     try {
@@ -453,9 +706,35 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
       setConnection("error");
       return;
     }
+    // Record the room, if this meeting was set up for it. The MICROPHONE
+    // stream only: her own voice arrives over WebRTC and is not in it, which is
+    // exactly right -- the recording exists so the humans' voices can be told
+    // apart afterwards (rule 91).
+    if (session.record_audio) {
+      try {
+        const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+          .find((m) => MediaRecorder.isTypeSupported(m));
+        const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+        chunksRef.current = [];
+        rec.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
+        // A timeslice means a crash costs the last few seconds rather than the
+        // whole meeting -- the chunks already delivered are still in hand.
+        rec.start(5000);
+        recorderRef.current = rec;
+        setRecording(true);
+        setRecordingNote("");
+      } catch (e) {
+        // Never fatal: a meeting that runs without a recording is a meeting
+        // without speaker names, not a failed meeting. It says so on screen.
+        setRecordingNote(
+          `This meeting is not being recorded (${(e as Error).message}). Everything else works; ` +
+          "the transcript just will not say who was speaking."
+        );
+      }
+    }
     try {
       setConnection("connecting");
-      const credential = await api.consultationClientSecret(session.id);
+      const credential = await api.consultationClientSecret(session.id, acceptOverCeiling);
       const connected = await connectRealtime({
         clientSecret: credential.client_secret,
         callsUrl: credential.calls_url,
@@ -469,6 +748,12 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
             : Date.now();
           setFloor("connected");
           attemptsRef.current = 0;
+          // The credential was minted with this session's presence already in
+          // it, so nothing needs sending yet — only a LATER change does.
+          appliedEagernessRef.current = policyRef.current?.vad_eagerness ?? null;
+          responseActiveRef.current = false;
+          audioPlayingRef.current = false;
+          void openMeetingRef.current?.();
         },
         onClose: (reason) => {
           if (!conn.current) return;           // a deliberate stop
@@ -494,6 +779,17 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
       startedRef.current = false;
       stream.getTracks().forEach((t) => t.stop());
       setConnection("error");
+      // 402 is the spend ceiling, and it is the one refusal with a way through.
+      // It used to surface as a plain error saying "start anyway from the setup
+      // screen" — from the live screen, which he had already left the setup
+      // screen to reach. A dead end that names a door somewhere else is worse
+      // than no door (2026-08-27).
+      const message = (e as Error).message ?? "";
+      if (message.startsWith("402:")) {
+        setOverCeiling(message.replace(/^402:\s*/, "")
+          .replace(/Start anyway from the setup screen[^.]*\./i, "").trim());
+        return;
+      }
       setError(e instanceof ConnectionError
         ? e.message
         : `The consultation could not be started (${(e as Error).message}).`);
@@ -573,8 +869,10 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     connection, floorState, stateLabel, muted, listeningPaused, name, presence,
     error, micError, partials, assistantSaying, pendingPermission, askQueued,
     lastDecision, analysisNote, analyzing,
+    passage, minutesLeft, recording, recordingNote, overCeiling,
     start, stop, ask, toggleMute, togglePause, openFloor,
     runAnalysis, answerPermission, considerObservation,
+    dismissPassage: () => setPassage(null),
     clearAskQueue: () => { askQueuedRef.current = null; setAskQueued(null); },
   };
 }
