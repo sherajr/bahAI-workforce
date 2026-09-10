@@ -6,7 +6,9 @@ import type {
   AgentStatus, CanvaStatus, CardLanguage, Contact, EditProductPayload, EditProductResult,
   EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobBase, JobStep, JobSummary, PipelineResult,
   GoogleStatus, LayoutOptions, LayoutRenderResult, NoteRow, PendingApproval, PendingXPost,
-  ProductLayout, ProductRow, RegenerateCardImageResult,
+  AvailableOutcomes, GatheringDetail, GatheringStage, GatheringSummary,
+  HomeSummary,
+  ProductLayout, ProductRow, ProductsPage, RegenerateCardImageResult,
   RegenerateCardQuoteResult, RegenerateImageResult, RegenerateQuoteResult, ReminderRow,
   SecretaryChatResult, SecretaryMessage, SecretaryNotification, SecretaryStatus, SecretaryUpcoming,
   StewardReport, TaskRow, TrustReport, WhatsAppStatus, XPostApproveResult, XPostEditResult,
@@ -23,6 +25,7 @@ import type {
 } from "./types";
 import type {
   AnalysisResult, ConsultationCapabilities, ConsultationDetail, ConsultationMode,
+  ConsultationUpdates,
   ConsultationPresence, ConsultationSession, RealtimeCredential, SpeechDecision,
   VerifiedWriting,
   ConsultationParticipant, ConsultationTurn, DiarizeResult, ReportResult, ScheduledSpeech,
@@ -107,6 +110,66 @@ async function request<T>(
     throw err;
   }
 }
+
+
+/**
+ * Fetch a file through the API proxy and hand it to the browser to save.
+ *
+ * Shared, because the failure it gets right is easy to get wrong twice: an
+ * error response is JSON, not a PDF, so it has to be read as an error BEFORE a
+ * Blob is made — otherwise the browser cheerfully saves a file containing
+ * `{"detail": "..."}` and the person opens a broken PDF instead of reading
+ * what went wrong. The object URL is revoked either way.
+ */
+async function downloadFile(
+  path: string, method: "GET" | "POST", body: unknown, filename: string,
+): Promise<void> {
+  const started = performance.now();
+  const ts = new Date().toLocaleTimeString();
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const data = await res.json();
+      detail = typeof data.detail === "string"
+        ? data.detail : JSON.stringify(data.detail ?? data);
+    } catch {
+      /* keep statusText */
+    }
+    pushActivity({ ts, method, path, status: res.status,
+                   ms: Math.round(performance.now() - started) });
+    throw new Error(detail);
+  }
+  // Any warning the builder wants the person to see travels in a header rather
+  // than inside the file — a programme whose reading could not be found still
+  // downloads, and still says so (rule 119).
+  const warnings = res.headers.get("X-Program-Warnings") || "";
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+  pushActivity({
+    ts, method: "PRINT", path, status: "OK",
+    ms: Math.round(performance.now() - started),
+    detail: `Downloaded ${filename}.${warnings ? " " + warnings : ""}`,
+  });
+  if (warnings) throw new DownloadWarning(warnings);
+}
+
+/** Not a failure: the file downloaded AND there is something to tell you. */
+export class DownloadWarning extends Error {}
 
 const get = <T>(path: string) => request<T>("GET", path);
 const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body);
@@ -300,7 +363,72 @@ export const api = {
 
   // Products
   getProducts: () => get<ProductRow[]>("/products"),
+  /** One bounded page of the shelf, with search, filters, sort and counts
+   *  applied to the WHOLE shelf rather than to the page (rule 116). */
+  getProductsPage: (params: {
+    limit: number; offset: number; kind: string; search: string;
+    sort: string; badge?: string;
+  }) => {
+    const q = new URLSearchParams({
+      limit: String(params.limit), offset: String(params.offset),
+      kind: params.kind, search: params.search, sort: params.sort,
+    });
+    if (params.badge && params.badge !== "all") q.set("badge", params.badge);
+    return get<ProductsPage>(`/products/summary?${q.toString()}`);
+  },
   getProduct: (id: string) => get<ProductRow>(`/products/${id}`),
+
+  // ── Gatherings (rules 117-119) and Home (rule 120) ──────────────────────
+  getHome: () => get<HomeSummary>("/home/summary"),
+  listGatherings: () =>
+    get<{ projects: GatheringSummary[]; stages: Record<string, GatheringStage> }>(
+      "/gatherings"),
+  createGathering: (body: {
+    title: string; purpose?: string; gathering_at?: string | null; timezone?: string;
+  }) => post<GatheringDetail>("/gatherings", body),
+  getGathering: (id: string) => get<GatheringDetail>(`/gatherings/${id}`),
+  patchGathering: (id: string, body: Record<string, unknown>) =>
+    request<GatheringDetail>("PATCH", `/gatherings/${id}`, body),
+  deleteGathering: (id: string) =>
+    request<{ deleted: boolean; note: string }>("DELETE", `/gatherings/${id}`),
+  linkGatheringSession: (id: string, sessionId: string) =>
+    post<GatheringDetail>(`/gatherings/${id}/sessions`, { session_id: sessionId }),
+  unlinkGatheringSession: (id: string, sessionId: string) =>
+    request<GatheringDetail>("DELETE", `/gatherings/${id}/sessions/${sessionId}`),
+  gatheringAvailableOutcomes: (id: string) =>
+    get<AvailableOutcomes>(`/gatherings/${id}/available-outcomes`),
+  addGatheringOutcome: (id: string, body: {
+    kind: string; text: string; session_id?: string; ref_id?: string; note?: string;
+  }) => post<GatheringDetail>(`/gatherings/${id}/outcomes`, body),
+  removeGatheringOutcome: (id: string, outcomeId: string) =>
+    request<GatheringDetail>("DELETE", `/gatherings/${id}/outcomes/${outcomeId}`),
+  addGatheringItem: (id: string, productId: string) =>
+    post<GatheringDetail>(`/gatherings/${id}/items`, { product_id: productId }),
+  removeGatheringItem: (id: string, productId: string) =>
+    request<GatheringDetail>("DELETE", `/gatherings/${id}/items/${productId}`),
+  addProgramItem: (id: string, body: {
+    kind: string; title?: string; body?: string; minutes?: number | null;
+    writing_id?: string;
+  }) => post<GatheringDetail>(`/gatherings/${id}/program`, body),
+  patchProgramItem: (id: string, itemId: string, body: Record<string, unknown>) =>
+    request<GatheringDetail>("PATCH", `/gatherings/${id}/program/${itemId}`, body),
+  removeProgramItem: (id: string, itemId: string) =>
+    request<GatheringDetail>("DELETE", `/gatherings/${id}/program/${itemId}`),
+  reorderProgram: (id: string, itemIds: string[]) =>
+    post<GatheringDetail>(`/gatherings/${id}/program/reorder`, { item_ids: itemIds }),
+  /**
+   * The programme and the cards are two SEPARATE downloads, on purpose: the card
+   * sheet is a duplex grid whose page 2 has to line up with page 1 through the
+   * printer's flip, and a programme page inside it shifts every back face by a
+   * page (rule 119).
+   */
+  downloadProgram: (id: string, name = "programme") =>
+    downloadFile(`/gatherings/${id}/program.pdf`, "GET", undefined,
+                 `${name} - programme.pdf`),
+  downloadGatheringCards: (id: string, duplex: boolean, name = "gathering") =>
+    downloadFile(`/gatherings/${id}/cards.pdf`, "POST", { duplex },
+                 `${name} - cards.pdf`),
+
   improveProduct: async (id: string, humanNotes = "") => {
     const res = await post<ImproveResult>(`/products/${id}/improve`, {
       human_notes: humanNotes,
@@ -1049,6 +1177,18 @@ export const api = {
   }) => post<ConsultationSession>("/live-consultation/sessions", body),
   getConsultation: (id: string) =>
     get<ConsultationDetail>(`/live-consultation/sessions/${id}`),
+  /** What has CHANGED since the cursors we hold (rule 115). An unchanged poll
+   *  answers with the cursors and nothing else, so the cost of listening stops
+   *  growing with the length of the meeting. */
+  consultationUpdates: (
+    id: string,
+    cursors: { turns_rev: number; state_revision: number; record_revision: number },
+  ) =>
+    get<ConsultationUpdates>(
+      `/live-consultation/sessions/${id}/updates` +
+      `?turns_rev=${cursors.turns_rev}` +
+      `&state_revision=${cursors.state_revision}` +
+      `&record_revision=${cursors.record_revision}`),
   patchConsultation: (id: string, body: Record<string, unknown>) =>
     request<ConsultationDetail>("PATCH", `/live-consultation/sessions/${id}`, body),
   deleteConsultation: (id: string) =>
@@ -1182,6 +1322,25 @@ export const api = {
     return upload<{ saved: boolean; bytes: number }>(
       `/live-consultation/sessions/${id}/audio`, form);
   },
+  /** One piece of a recording, saved while the meeting is still running.
+   *  Order is the container (rule 113): these are not interchangeable files. */
+  uploadConsultationAudioChunk: (
+    id: string, recordingId: string, seq: number, blob: Blob,
+  ) => {
+    const form = new FormData();
+    form.append("file", blob, `chunk-${seq}.webm`);
+    return upload<{ saved: boolean; duplicate: boolean; next_seq: number; bytes: number }>(
+      `/live-consultation/sessions/${id}/audio/chunk` +
+      `?recording_id=${encodeURIComponent(recordingId)}&seq=${seq}`, form);
+  },
+  finalizeConsultationAudio: (id: string, recordingId: string) =>
+    post<{ saved: boolean; bytes: number }>(
+      `/live-consultation/sessions/${id}/audio/finalize` +
+      `?recording_id=${encodeURIComponent(recordingId)}`, {}),
+  consultationAudioProgress: (id: string, recordingId: string) =>
+    get<{ next_seq: number; bytes: number; finalized: boolean }>(
+      `/live-consultation/sessions/${id}/audio/progress` +
+      `?recording_id=${encodeURIComponent(recordingId)}`),
   /** Speech to text for a form field. Session-less: it is used on the setup
    *  screen, before a consultation exists. */
   dictate: (blob: Blob, filename = "note.webm") => {

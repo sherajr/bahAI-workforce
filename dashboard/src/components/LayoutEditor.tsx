@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RotateCcw } from "lucide-react";
 import { api, imageUrl } from "../lib/api";
 import type { LayoutOptions, ProductLayout, ProductRow } from "../lib/types";
-import { isQuoteCard } from "../lib/utils";
+import { invalidateProducts, isQuoteCard } from "../lib/utils";
 import { Button, Card, CardContent, ErrorNote } from "./ui";
 
 /**
@@ -66,7 +66,7 @@ export function LayoutEditor({ product }: { product: ProductRow }) {
   const save = useMutation({
     mutationFn: () => api.saveLayout(product.id, lay as ProductLayout),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
       // Keep the cached layout options honest: reopening the editor re-seeds
       // from this cache, so "current" must reflect what was just saved.
       if (lay) {

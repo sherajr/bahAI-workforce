@@ -47,6 +47,11 @@ interface Options {
 
 const RECONNECT_ATTEMPTS = 2;
 
+// How often the recorder hands over a piece of audio to be SAVED. Five seconds
+// is what a crash can cost; it is not what a crash used to cost, because
+// nothing was saved until the meeting ended (rule 113).
+const RECORD_TIMESLICE_MS = 5000;
+
 /**
  * Errors that mean "you were a moment late", not "something is broken".
  *
@@ -86,6 +91,12 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const [minutesLeft, setMinutesLeft] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingNote, setRecordingNote] = useState("");
+  // What the SERVER has acknowledged, not what the browser has emitted. The
+  // difference is the whole point: a claim about crash safety has to be a claim
+  // about bytes that left the browser (rule 113).
+  const [savedBytes, setSavedBytes] = useState(0);
+  const [savePending, setSavePending] = useState(0);
+  const [saveFailed, setSaveFailed] = useState("");
   /** Set when the Steward's monthly ceiling refused the session (rule 85). Held
    *  separately from `error` because it is a QUESTION for the owner, not a
    *  fault: the only thing that clears it is him deciding to go ahead. */
@@ -120,7 +131,22 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const openedRef = useRef(false);
   const warnedRef = useRef<{ warn: boolean; final: boolean }>({ warn: false, final: false });
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  // Chunks WAITING to go, never chunks being kept. What has been acknowledged
+  // by the server is gone from here, which is what stops memory growing with
+  // the length of the meeting (rule 113).
+  const queueRef = useRef<Blob[]>([]);
+  const recordingIdRef = useRef<string>("");
+  const nextSeqRef = useRef(0);
+  const uploadingRef = useRef(false);
+  const recorderStoppedRef = useRef<Promise<void> | null>(null);
+  // Every asynchronous step of `start` checks this against the value it began
+  // with. A microphone permission or a credential that resolves after the panel
+  // has gone must release what it produced instead of attaching it to nothing
+  // (rule 114).
+  const captureGenRef = useRef(0);
+  // The live microphone stream, held so Stop can release it even when the peer
+  // connection never came up or has already gone.
+  const micStreamRef = useRef<MediaStream | null>(null);
 
   // The timings for THIS session's presence, resolved on the server (rule 87).
   // Falling back to the generic policy rather than to numbers written here, so
@@ -642,39 +668,115 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
   const openMeetingRef = useRef(openMeeting);
   useEffect(() => { openMeetingRef.current = openMeeting; }, [openMeeting]);
 
-  /** Close the recording and hand it to the API. Awaited by `stop`. */
-  const finishRecording = useCallback(async (sessionId: string) => {
+  /**
+   * Drain the queue of recorded chunks to the server, in order (rule 113).
+   *
+   * In ORDER because a WebM stream is a header followed by continuation
+   * clusters: the pieces are not interchangeable files, and one written out of
+   * place makes the whole recording undecodable. One uploader at a time, for
+   * the same reason.
+   *
+   * A failure keeps the chunk at the head of the queue and SHOWS the failure;
+   * it does not drop audio quietly and it does not spin. The next timeslice
+   * retries it, so a network that comes back recovers on its own.
+   */
+  const drainQueue = useCallback(async (id: string) => {
+    if (uploadingRef.current) return;
+    uploadingRef.current = true;
+    try {
+      while (queueRef.current.length) {
+        const chunk = queueRef.current[0];
+        const seq = nextSeqRef.current;
+        try {
+          const res = await api.uploadConsultationAudioChunk(
+            id, recordingIdRef.current, seq, chunk);
+          queueRef.current.shift();
+          nextSeqRef.current = res.next_seq;
+          setSavedBytes(res.bytes);
+          setSavePending(queueRef.current.length);
+          setSaveFailed("");
+        } catch (e) {
+          // Kept, not dropped. Visible, not swallowed.
+          setSavePending(queueRef.current.length);
+          setSaveFailed(
+            `The recording is not being saved right now (${(e as Error).message}). ` +
+            "It will try again with the next few seconds of audio; the meeting and " +
+            "the transcript are unaffected."
+          );
+          return;
+        }
+      }
+    } finally {
+      uploadingRef.current = false;
+    }
+  }, []);
+
+  /**
+   * Close the recording and finalise it. AWAITED by everything that ends a
+   * meeting (rule 113/114).
+   *
+   * It used to be fired and forgotten -- `void finishRecording(...)` -- while
+   * the UI moved straight on to closeout, so the last seconds of audio raced
+   * the navigation and an upload failure appeared after the screen had already
+   * said the meeting was done.
+   */
+  const finishRecording = useCallback(async (id: string) => {
     const rec = recorderRef.current;
     recorderRef.current = null;
     if (!rec) return;
     setRecording(false);
-    const done = new Promise<void>((resolve) => {
-      rec.onstop = () => resolve();
-    });
-    try { rec.stop(); } catch { return; }
-    await done;
-    const chunks = chunksRef.current;
-    chunksRef.current = [];
-    if (!chunks.length) return;
-    const blob = new Blob(chunks, { type: chunks[0].type || "audio/webm" });
     try {
-      await api.uploadConsultationAudio(sessionId, blob);
+      if (rec.state !== "inactive") {
+        const stopped = new Promise<void>((resolve) => { rec.onstop = () => resolve(); });
+        recorderStoppedRef.current = stopped;
+        rec.stop();
+        await stopped;
+      }
+    } catch {
+      /* a recorder that will not stop still has whatever it already delivered */
+    }
+    await drainQueue(id);
+    if (queueRef.current.length) {
+      setSaveFailed(
+        `${queueRef.current.length} piece(s) of the recording could not be saved, so the ` +
+        "speakers cannot be worked out from it. Everything said is still in the " +
+        "transcript, and the record is unaffected."
+      );
+      return;
+    }
+    if (nextSeqRef.current === 0) return;      // nothing was ever recorded
+    try {
+      const done = await api.finalizeConsultationAudio(id, recordingIdRef.current);
+      setSavedBytes(done.bytes);
+      setSaveFailed("");
     } catch (e) {
-      setRecordingNote(
-        `The recording could not be saved (${(e as Error).message}). The transcript and ` +
-        "the report are unaffected; only the speaker names are lost."
+      setSaveFailed(
+        `The recording was saved but could not be closed off (${(e as Error).message}). ` +
+        "It can be finished from the session; nothing said has been lost."
       );
     }
-  }, []);
+  }, [drainQueue]);
 
-  const stop = useCallback(() => {
+  const stop = useCallback((): Promise<void> => {
     clearTimers();
-    if (sessionId) void finishRecording(sessionId);
+    // A new generation: anything still in flight from the last start -- a
+    // microphone permission the person has not answered yet, a credential, a
+    // half-open peer connection -- now belongs to a capture that is over, and
+    // will release itself rather than attaching to a panel that has gone
+    // (rule 114).
+    captureGenRef.current += 1;
+    const finishing = sessionId ? finishRecording(sessionId) : Promise.resolve();
     // Null the ref BEFORE closing: close() reports a close, and onClose treats
     // "there is still a connection" as a drop worth reconnecting from. A
     // deliberate stop must not reconnect itself.
     const open = conn.current;
     conn.current = null;
+    // The microphone tracks are released HERE and unconditionally. Leaving them
+    // to the peer connection's own teardown left the browser's recording
+    // indicator lit after Stop on a connection that had already dropped.
+    try { open?.stream.getTracks().forEach((t) => t.stop()); } catch { /* gone */ }
+    try { micStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch { /* gone */ }
+    micStreamRef.current = null;
     open?.close();
     startedRef.current = false;
     floorRef.current = gov.DISCONNECTED;
@@ -687,6 +789,9 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     responseActiveRef.current = false;
     audioPlayingRef.current = false;
     appliedEagernessRef.current = null;
+    // Handed back so a caller that is about to navigate, close out or unmount
+    // can WAIT for the last of the audio instead of racing it.
+    return finishing;
   }, [clearTimers, sessionId, finishRecording]);
 
   const start = useCallback(async (acceptOverCeiling = false) => {
@@ -697,15 +802,31 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     setMicError("");
     setOverCeiling("");
     setConnection("starting");
+    // Everything below is asynchronous, and the panel can go away during any of
+    // it. `myGen` is what a late success checks itself against before touching
+    // anything (rule 114): without it, a permission prompt answered after the
+    // tab was switched left a live microphone attached to nothing, and the
+    // browser's recording indicator stayed lit.
+    const myGen = captureGenRef.current;
+    const stale = () => captureGenRef.current !== myGen;
+
     let stream: MediaStream;
     try {
       stream = await requestMicrophone();
     } catch (e) {
       startedRef.current = false;
+      if (stale()) return;
       setMicError((e as MicrophoneError).message);
       setConnection("error");
       return;
     }
+    if (stale()) {
+      // The person left, or pressed Stop, while the permission prompt was open.
+      stream.getTracks().forEach((t) => t.stop());
+      startedRef.current = false;
+      return;
+    }
+    micStreamRef.current = stream;
     // Record the room, if this meeting was set up for it. The MICROPHONE
     // stream only: her own voice arrives over WebRTC and is not in it, which is
     // exactly right -- the recording exists so the humans' voices can be told
@@ -715,11 +836,25 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
         const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
           .find((m) => MediaRecorder.isTypeSupported(m));
         const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-        chunksRef.current = [];
-        rec.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
-        // A timeslice means a crash costs the last few seconds rather than the
-        // whole meeting -- the chunks already delivered are still in hand.
-        rec.start(5000);
+        // One recording, one id, one sequence. A reconnect inside the same
+        // meeting keeps them, so it appends rather than replacing what is
+        // already saved (rule 113).
+        if (!recordingIdRef.current) {
+          recordingIdRef.current = `${session.id}-${Date.now().toString(36)}`;
+          nextSeqRef.current = 0;
+          queueRef.current = [];
+        }
+        const meetingId = session.id;
+        rec.ondataavailable = (e) => {
+          if (!e.data.size) return;
+          if (captureGenRef.current !== myGen) return;   // a capture that is over
+          queueRef.current.push(e.data);
+          setSavePending(queueRef.current.length);
+          // Sent NOW, not held until the end. This is the difference between a
+          // crash costing five seconds and costing the whole meeting.
+          void drainQueue(meetingId);
+        };
+        rec.start(RECORD_TIMESLICE_MS);
         recorderRef.current = rec;
         setRecording(true);
         setRecordingNote("");
@@ -774,10 +909,21 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
           }
         },
       });
+      if (stale()) {
+        // Connected to a meeting nobody is looking at any more. Close it rather
+        // than leaving a paid realtime session open off-screen (rule 114).
+        connected.close();
+        stream.getTracks().forEach((t) => t.stop());
+        micStreamRef.current = null;
+        startedRef.current = false;
+        return;
+      }
       conn.current = connected;
     } catch (e) {
       startedRef.current = false;
       stream.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+      if (stale()) return;
       setConnection("error");
       // 402 is the spend ceiling, and it is the one refusal with a way through.
       // It used to surface as a plain error saying "start anyway from the setup
@@ -841,14 +987,53 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     return () => window.clearInterval(interval);
   }, [connection, sessionId, analysisEveryMs]);
 
-  // Nothing survives unmount: no zombie peer connection, no live microphone.
-  useEffect(() => () => {
-    clearTimers();
-    const open = conn.current;
-    conn.current = null;
-    open?.close();
-    startedRef.current = false;
-  }, [clearTimers]);
+  // Nothing survives unmount: no zombie peer connection, no live microphone,
+  // no recorder, and no pending start that can attach one after the fact
+  // (rules 113/114).
+  //
+  // The comment above this effect used to promise "no live microphone" while
+  // the code closed the peer connection and nothing else. A recorder held the
+  // stream, a `getUserMedia` still awaiting an answer would resolve into
+  // nowhere, and the browser's recording indicator stayed lit after the panel
+  // was gone.
+  useEffect(() => {
+    const sid = sessionId;
+    return () => {
+      clearTimers();
+      // Invalidate anything still in flight FIRST, so a late success releases
+      // itself instead of connecting to an unmounted panel.
+      captureGenRef.current += 1;
+      const open = conn.current;
+      conn.current = null;
+      try { open?.stream.getTracks().forEach((t) => t.stop()); } catch { /* gone */ }
+      open?.close();
+      try { micStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch { /* gone */ }
+      micStreamRef.current = null;
+      startedRef.current = false;
+      // The recording is finished OUTSIDE this component's lifetime: leaving
+      // the screen must not silently discard the last few seconds of audio, and
+      // whatever has already been acknowledged is on the server regardless.
+      const rec = recorderRef.current;
+      recorderRef.current = null;
+      if (rec && rec.state !== "inactive") {
+        try { rec.stop(); } catch { /* already stopping */ }
+      }
+      if (sid && (queueRef.current.length || nextSeqRef.current > 0)) {
+        void (async () => {
+          try {
+            await drainQueue(sid);
+            if (!queueRef.current.length && nextSeqRef.current > 0) {
+              await api.finalizeConsultationAudio(sid, recordingIdRef.current);
+            }
+          } catch {
+            // Whatever was acknowledged is saved; the session shows the gap and
+            // it can be finished from there. Never a thrown error into a
+            // component that no longer exists.
+          }
+        })();
+      }
+    };
+  }, [clearTimers, sessionId, drainQueue]);
 
   const name = capabilities?.assistant_name ?? "Abigail";
   const stateLabel = useMemo(() => {
@@ -870,6 +1055,10 @@ export function useRealtimeConsultation({ session, capabilities, onRecordChanged
     error, micError, partials, assistantSaying, pendingPermission, askQueued,
     lastDecision, analysisNote, analyzing,
     passage, minutesLeft, recording, recordingNote, overCeiling,
+    // What the server has actually acknowledged, what is still waiting, and
+    // what would not save. A recording indicator that reflects only what the
+    // browser emitted is not a claim about safety (rule 113).
+    savedBytes, savePending, saveFailed,
     start, stop, ask, toggleMute, togglePause, openFloor,
     runAnalysis, answerPermission, considerObservation,
     dismissPassage: () => setPassage(null),

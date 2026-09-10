@@ -188,10 +188,17 @@ export function ConsultationSummary({
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)}
              title="Delete this consultation?">
         <div className="space-y-4 text-sm text-slate-300">
+          {/* Literally true, and no more than that (rule 94). "There is no copy
+              anywhere else" was not something this application could know: it
+              cannot reach a report somebody downloaded, a page somebody copied,
+              or anything OpenAI holds under its own terms. What it can promise
+              is what it manages itself, so that is what it says. */}
           <p>
-            This removes the transcript, the consultation map, everything the assistant
-            noticed, the decisions, the action items, the report and any recording. There
-            is no copy anywhere else.
+            This removes everything this app holds for this consultation — the transcript,
+            the consultation map, everything the assistant noticed, the decisions, the
+            action items, the report and any recording. It cannot remove a copy you have
+            already downloaded or shared, and it cannot erase anything the transcription
+            service holds under its own terms.
           </p>
           {remove.error && <ErrorNote>{(remove.error as Error).message}</ErrorNote>}
           <div className="flex justify-end gap-2">

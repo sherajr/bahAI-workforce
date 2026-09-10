@@ -317,8 +317,68 @@ export interface ConsultationDetail {
   final_turns: ConsultationTurn[];
   has_diarized: boolean;
   report: string;
+  /** The record a person reviewed and approved, which is a different thing from
+   *  the draft above (rule 102). */
+  approved_report?: string;
+  record?: RecordStatus;
+  /** Recording files a deletion could not remove, so it can be retried and
+   *  SEEN rather than swallowed (rule 103). */
+  cleanup_pending?: string;
+  /** Cursors a delta poll starts from (rule 115). */
+  turns_rev?: number;
+  record_revision?: number;
+  deletion_generation?: number;
   open_threads: OpenThreads;
   note?: string;
+  deleted?: TranscriptDeletion;
+}
+
+/** Is what you would export the thing somebody actually approved? */
+export interface RecordStatus {
+  approved: boolean;
+  stale: boolean;
+  revision: number;
+  approved_revision: number;
+  approved_at: string | null;
+  note: string;
+}
+
+/** What a transcript deletion actually removed and actually kept (rule 103). */
+export interface TranscriptDeletion {
+  deleted: boolean;
+  turns: number;
+  audio_files: number;
+  observations: number;
+  map_items_removed: number;
+  map_items_kept: number;
+  cleanup_failed: string[];
+  kept: string[];
+  removed: string[];
+}
+
+/** A bounded poll: only what changed (rule 115). */
+export interface ConsultationUpdates {
+  resync: boolean;
+  reason?: string;
+  changed: boolean;
+  turns_rev: number;
+  turns_total: number;
+  turns_source: string;
+  turns: ConsultationTurn[];
+  more: boolean;
+  state_revision: number;
+  record_revision: number;
+  deletion_generation: number;
+  transcript_deleted: boolean;
+  has_diarized: boolean;
+  state?: ConsultationStateMap;
+  open_threads?: OpenThreads;
+  decisions?: ConsultationDecision[];
+  confirmed_decisions?: ConsultationDecision[];
+  action_items?: ConsultationAction[];
+  participants?: ConsultationParticipant[];
+  writings?: VerifiedWriting[];
+  record?: RecordStatus;
 }
 
 /** What the record says is still hanging. The same shape the spoken time check

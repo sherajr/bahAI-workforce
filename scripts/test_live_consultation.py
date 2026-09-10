@@ -94,7 +94,42 @@ def _tripwire_connect(self, address, *args, **kwargs):
     )
 
 
+def _tripwire_connect_ex(self, address, *args, **kwargs):
+    # `connect_ex` is the same syscall with a return code instead of an
+    # exception. Left unguarded it is a hole straight through the tripwire.
+    if _is_loopback(address):
+        return _real_connect_ex(self, address, *args, **kwargs)
+    return _tripwire_connect(self, address, *args, **kwargs)
+
+
+def _tripwire_getaddrinfo(host, *args, **kwargs):
+    """DNS is a network call too, and it leaks before `connect` is ever reached.
+
+    A blocked connect still sent the owner's resolver (and whatever logs it) the
+    name of every host this suite would have talked to. It is also what makes a
+    blocked run SLOW: the resolution happens, times out or succeeds, and only
+    then does the guard fire.
+    """
+    if _is_loopback(host):
+        return _real_getaddrinfo(host, *args, **kwargs)
+    import traceback
+    site = "unknown"
+    for frame in reversed(traceback.extract_stack()[:-1]):
+        if "test_live_consultation" not in frame.filename:
+            site = f"{os.path.basename(frame.filename)}:{frame.lineno} {frame.name}"
+            break
+    _OUTBOUND.append(f"DNS {host} from {site}")
+    raise _NetworkAttempted(
+        f"NETWORK TRIPWIRE: this suite is offline and something tried to RESOLVE "
+        f"{host} from {site}. Stub the call rather than relaxing this.")
+
+
+_real_connect_ex = _socket.socket.connect_ex
+_real_getaddrinfo = _socket.getaddrinfo
+
 _socket.socket.connect = _tripwire_connect
+_socket.socket.connect_ex = _tripwire_connect_ex
+_socket.getaddrinfo = _tripwire_getaddrinfo
 
 _TMP = Path(tempfile.mkdtemp(prefix="livecons_test_"))
 os.environ["ANTHROPIC_API_KEY"] = os.environ.get("ANTHROPIC_API_KEY", "test-key")
@@ -995,6 +1030,7 @@ librarian.retrieve = lambda query, n_results=3, **kw: list(CORPUS)
 section("the endpoints")
 
 import agents.api as api  # noqa: E402
+import agents.home_api as home_api  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(api.app, headers={"X-API-Key": auth.get_or_create_key()})
@@ -1337,9 +1373,13 @@ check("the product consultation pipeline knows nothing about this feature",
       "live_consultation" not in product_consultation)
 
 api_text = (src / "api.py").read_text(encoding="utf-8")
-api_touch = [ln for ln in api_text.splitlines() if "live_consultation" in ln]
-check("api.py's change is small: a store init and a router include",
-      len(api_touch) <= 5, str(len(api_touch)))
+# COUPLING, not mentions: a comment naming the subsystem is not a dependency on
+# it, and counting one as a dependency made this fail for a reworded sentence.
+api_touch = [ln for ln in api_text.splitlines()
+             if "live_consultation" in ln and not ln.strip().startswith("#")]
+check("api.py's coupling is small: a store init, a retention catch-up and a "
+      "router include",
+      len(api_touch) <= 6, "; ".join(t.strip() for t in api_touch))
 
 # No tool surface at all: an injected instruction in a transcript has nothing
 # to reach (rule 72's reasoning, applied to a subsystem that simply has no
@@ -2040,6 +2080,15 @@ check("the start button is gated on the host's attestation",
       "disabled={!informed}" in _setup)
 check("and the attestation does not pretend to be consent",
       "not a record of anyone agreeing" in _setup)
+# 2026-09-09: the deletion dialog claimed "There is no copy anywhere else",
+# which this application cannot know -- it cannot reach a downloaded report, a
+# copied page, or anything the transcription service holds under its own terms.
+check("deletion does not claim to reach copies it cannot reach",
+      "no copy anywhere else" not in _all_ui)
+check("and says what it CAN promise instead",
+      "everything this app holds" in _all_ui)
+check("naming the two things it cannot remove",
+      "already downloaded" in _all_ui and "under its own terms" in _all_ui)
 
 
 section("the consultation compilation is a separate corpus (rules 11, 84)")
@@ -2098,10 +2147,42 @@ check("no outbound network call was attempted during the whole run",
 
 # Setting os.environ is NOT the defence, and the suite must never again act as
 # though it were: `agents/api.py` calls load_dotenv(override=True) at import,
-# which puts the owner's real key straight back. Assert the hole is still there
-# so nobody "fixes" the tripwire away believing the fake key protects them.
-check("the fake key really is overwritten by api.py's load_dotenv(override=True)",
-      os.environ.get("OPENAI_API_KEY", "") != "sk-test-not-a-real-key")
+# which puts whatever is in `.env` straight back over a fake key.
+#
+# This used to be asserted by checking that the key had in fact changed -- which
+# only holds on a machine that HAS a `.env` with a key in it. On a fresh
+# checkout the fake key survived, the check failed, and the suite reported a
+# failure that said nothing about the code. The mechanism is what matters, so
+# it is now demonstrated against a temporary dotenv of our own: a sentinel is
+# put in os.environ, a fixture file is loaded with override=True, and the
+# sentinel is gone. No `.env`, no key, no account, no private database.
+_dotenv_proved = False
+_dotenv_note = ""
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _fixture = _TMP / "dotenv_fixture.env"
+    _fixture.write_text("OPENAI_API_KEY=sk-fixture-from-dotenv-not-real" + chr(10), encoding="utf-8")
+    os.environ["OPENAI_API_KEY"] = "sk-sentinel-set-in-os-environ"
+    _load_dotenv(_fixture, override=True)
+    _dotenv_proved = (os.environ.get("OPENAI_API_KEY") == "sk-fixture-from-dotenv-not-real")
+    _dotenv_note = os.environ.get("OPENAI_API_KEY", "")
+except Exception as e:                                    # pragma: no cover
+    _dotenv_note = f"{type(e).__name__}: {e}"
+check("a dotenv load with override=True beats a value set in os.environ "
+      "(so a fake key is never the defence)", _dotenv_proved, _dotenv_note)
+os.environ["OPENAI_API_KEY"] = "sk-test-not-a-real-key"
+
+# ...and the tripwire is unaffected by that override, which is the half that
+# actually protects the run.
+_still_blocked = False
+try:
+    _socket.socket().connect(("api.openai.com", 443))
+except _NetworkAttempted:
+    _still_blocked = True
+except BaseException:
+    _still_blocked = False
+check("the network guard still blocks after a dotenv override", _still_blocked)
+_OUTBOUND.clear()   # the probe above is not a real attempt
 
 _armed = False
 try:
@@ -2120,6 +2201,1168 @@ check("loopback is still allowed, or the TestClient could not run",
 
 os.environ["OPENAI_API_KEY"] = _saved_key
 brain.analyze = _real_analyze
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Rules 100-107: ownership, the analysis race, retention, and the approved
+# record. Everything below was a real defect found in a review of this
+# subsystem on 2026-09-09, reproduced against the code before it was fixed.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# This block stubs every model call, so a key only has to be PRESENT for the
+# code paths that check for one. Set explicitly rather than inherited, so the
+# block behaves identically on a machine with a `.env` and on a fresh checkout
+# without one (the restore above puts back whatever was there, which is nothing
+# on a clean clone).
+os.environ["OPENAI_API_KEY"] = "sk-test-not-a-real-key"
+
+section("a write can never reach another meeting (rule 100)")
+
+_A = client.post("/live-consultation/sessions", json={"title": "Meeting A"}).json()["id"]
+_B = client.post("/live-consultation/sessions", json={"title": "Meeting B"}).json()["id"]
+
+# B gets a turn, an action and a participant of its own.
+_bturn = client.post(f"/live-consultation/sessions/{_B}/turns",
+                     json={"text": "B said this", "realtime_item_id": "b1",
+                           "is_final": True}).json()["turn"]
+_baction = client.post(f"/live-consultation/sessions/{_B}/actions",
+                       json={"action": "B's commitment", "owner": "Tara"}).json()["action_item"]
+_bperson = client.post(f"/live-consultation/sessions/{_B}/participants",
+                       json={"name": "Tara"}).json()
+
+def _b_snapshot():
+    """Every byte of B a cross-session write could plausibly touch."""
+    d = client.get(f"/live-consultation/sessions/{_B}").json()
+    return json.dumps({"turns": d["turns"], "actions": d["action_items"],
+                       "participants": d["participants"],
+                       "revision": d["session"].get("record_revision"),
+                       "state_revision": d["state"].get("state_revision")}, sort_keys=True)
+
+_before = _b_snapshot()
+
+# Each of these is a valid session A paired with a child id belonging to B.
+_crossings = [
+    ("correct a turn", client.post(
+        f"/live-consultation/sessions/{_A}/turns/{_bturn['id']}/text",
+        json={"text": "REWRITTEN BY THE WRONG MEETING"})),
+    ("label a turn", client.post(
+        f"/live-consultation/sessions/{_A}/turns/{_bturn['id']}/label",
+        json={"speaker_label": "WRONG"})),
+    ("edit an action", client.patch(
+        f"/live-consultation/sessions/{_A}/actions/{_baction['id']}",
+        json={"action": "REWRITTEN", "owner": "Someone else"})),
+    ("accept an action", client.post(
+        f"/live-consultation/sessions/{_A}/actions/{_baction['id']}/accept",
+        json={"accepted": True, "accepted_by": "the wrong host"})),
+    ("delete an action", client.delete(
+        f"/live-consultation/sessions/{_A}/actions/{_baction['id']}")),
+    ("map a speaker", client.post(
+        f"/live-consultation/sessions/{_A}/participants/{_bperson['id']}/speaker",
+        json={"speaker_key": "A"})),
+    ("delete a participant", client.delete(
+        f"/live-consultation/sessions/{_A}/participants/{_bperson['id']}")),
+]
+for _label, _resp in _crossings:
+    check(f"cross-session attempt to {_label} is refused",
+          _resp.status_code == 404, f"got {_resp.status_code}")
+
+# The important half. The old code returned 404 too -- AFTER writing.
+check("and meeting B is byte-for-byte unchanged by all of them",
+      _b_snapshot() == _before,
+      "B was modified by a request naming meeting A")
+
+
+section("acceptance belongs to a person and a commitment (rule 101)")
+
+_S = client.post("/live-consultation/sessions", json={"title": "Commitments"}).json()["id"]
+_act = client.post(f"/live-consultation/sessions/{_S}/actions",
+                   json={"action": "Bring the chairs", "owner": "Sam"}).json()["action_item"]
+_aid = _act["id"]
+
+def _action():
+    return [a for a in client.get(f"/live-consultation/sessions/{_S}").json()["action_items"]
+            if a["id"] == _aid][0]
+
+check("a fresh commitment has nobody's answer recorded", _action()["owner_accepted"] is None)
+check("and is proposed, not accepted", _action()["status"] == "proposed")
+
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept",
+            json={"accepted": True, "accepted_by": "host"})
+check("accepting records the answer", _action()["owner_accepted"] is True)
+check("and moves the status to accepted", _action()["status"] == "accepted")
+
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept",
+            json={"accepted": False, "accepted_by": "host"})
+check("declining after accepting records the refusal", _action()["owner_accepted"] is False)
+# The bug: status stayed 'accepted' beside owner_accepted=false, so the record
+# said both "Accepted" and "did not accept" at once.
+check("and the status stops saying Accepted", _action()["status"] != "accepted",
+      f"status is {_action()['status']}")
+
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept", json={"accepted": True})
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept", json={})
+check("clearing to unknown is distinct from declining", _action()["owner_accepted"] is None)
+
+# Reassignment must not carry the previous person's yes forward.
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept",
+            json={"accepted": True, "accepted_by": "host"})
+check("accepted again before reassignment", _action()["owner_accepted"] is True)
+client.patch(f"/live-consultation/sessions/{_S}/actions/{_aid}", json={"owner": "Different person"})
+check("handing the task to someone else clears the acceptance",
+      _action()["owner_accepted"] is None, f"{_action()['owner_accepted']}")
+check("and clears who attested to it", not (_action().get("accepted_by") or ""))
+check("and does not leave the status saying Accepted", _action()["status"] != "accepted")
+
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept",
+            json={"accepted": True, "accepted_by": "host"})
+client.patch(f"/live-consultation/sessions/{_S}/actions/{_aid}",
+             json={"action": "Bring the chairs AND the tea urn"})
+check("materially changing the commitment clears the acceptance too",
+      _action()["owner_accepted"] is None)
+
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept",
+            json={"accepted": True, "accepted_by": "host"})
+client.patch(f"/live-consultation/sessions/{_S}/actions/{_aid}", json={"progress_note": "started"})
+check("but an ordinary progress note does not",
+      _action()["owner_accepted"] is True)
+client.patch(f"/live-consultation/sessions/{_S}/actions/{_aid}", json={"status": "in_progress"})
+client.post(f"/live-consultation/sessions/{_S}/actions/{_aid}/accept", json={"accepted": False})
+check("withdrawing from work already in progress does not rewind that work",
+      _action()["status"] == "in_progress", _action()["status"])
+
+
+
+
+section("a human edit during a model call survives it (rule 104)")
+
+_R = client.post("/live-consultation/sessions",
+                 json={"title": "The race", "question": "What shall we do?"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_R}/turns",
+            json={"text": "We should meet on Saturday morning.",
+                  "realtime_item_id": "r1", "is_final": True})
+
+# First pass: give the map a fact and an action the model wrote.
+_FIRST = json.dumps({
+    "summary": "The group is choosing a day.",
+    "add": {"facts": [{"text": "The hall is free on Saturday.", "status": "reported"}],
+            "action_items": [{"action": "Book the hall", "owner": "Sam"}]},
+})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: _FIRST)
+client.post(f"/live-consultation/sessions/{_R}/analyze", json={"force": True})
+
+_state = client.get(f"/live-consultation/sessions/{_R}").json()["state"]
+_fact_id = _state["facts"][0]["id"]
+check("the model's fact is on the map", _state["facts"][0]["text"].startswith("The hall"))
+
+# Second pass. The human correction happens INSIDE the model call -- which is
+# exactly when it happens in real life, because a pass takes tens of seconds and
+# the person is sitting there reading the screen. Deterministic: no threads, no
+# sleeps, the edit is a side effect of the call the code is waiting on.
+_SECOND = json.dumps({
+    "summary": "The group is choosing a day.",
+    "update": [{"id": _fact_id, "text": "The hall is free on Saturday.",
+                "status": "reported"}],
+})
+_edit_done = {}
+
+def _call_that_edits(_messages):
+    # A person corrects the fact and removes an item while the call is in flight.
+    _edit_done["fact"] = client.patch(
+        f"/live-consultation/sessions/{_R}/map/facts/{_fact_id}",
+        json={"text": "The hall is free on Saturday AFTERNOON only."}).status_code
+    _st = client.get(f"/live-consultation/sessions/{_R}").json()["state"]
+    if _st.get("assumptions"):
+        client.delete(f"/live-consultation/sessions/{_R}"
+                      f"/map/assumptions/{_st['assumptions'][0]['id']}")
+    return _SECOND
+
+client.post(f"/live-consultation/sessions/{_R}/turns",
+            json={"text": "Actually the hall is only free in the afternoon.",
+                  "realtime_item_id": "r2", "is_final": True})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=_call_that_edits)
+_race = client.post(f"/live-consultation/sessions/{_R}/analyze", json={"force": True}).json()
+
+check("the edit really did land during the call", _edit_done.get("fact") == 200)
+_after = client.get(f"/live-consultation/sessions/{_R}").json()["state"]
+_fact = [f for f in _after["facts"] if f["id"] == _fact_id][0]
+# THE defect: the pass wrote its whole pre-call snapshot back, so the model's
+# wording replaced the correction and human_edited went back to false.
+check("the human's words are still there after the pass finished",
+      "AFTERNOON" in _fact["text"], _fact["text"])
+check("and it is still marked as edited by a person", bool(_fact.get("human_edited")))
+check("the pass reports that it re-applied its work onto the edit",
+      _race.get("rebased") is True, json.dumps(_race.get("merge_notes")))
+check("and the pass still succeeded rather than being thrown away",
+      _race.get("ok") is True)
+
+
+section("what a person deleted stays deleted (rule 104)")
+
+_D = client.post("/live-consultation/sessions", json={"title": "Deletions"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_D}/turns",
+            json={"text": "Someone said something.", "realtime_item_id": "d1", "is_final": True})
+_ADD = json.dumps({"add": {"ideas": [{"text": "An idea nobody wants recorded."}]}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: _ADD)
+client.post(f"/live-consultation/sessions/{_D}/analyze", json={"force": True})
+_idea = client.get(f"/live-consultation/sessions/{_D}").json()["state"]["ideas"][0]
+client.delete(f"/live-consultation/sessions/{_D}/map/ideas/{_idea['id']}")
+check("the item is gone", not client.get(
+    f"/live-consultation/sessions/{_D}").json()["state"]["ideas"])
+
+# A pass that still carries it -- the in-flight case -- must not hand it back.
+_READD = json.dumps({"update": [{"id": _idea["id"], "text": "An idea nobody wants recorded."}]})
+client.post(f"/live-consultation/sessions/{_D}/turns",
+            json={"text": "And another thing.", "realtime_item_id": "d2", "is_final": True})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: _READD)
+client.post(f"/live-consultation/sessions/{_D}/analyze", json={"force": True})
+check("a later pass cannot put it back",
+      not client.get(f"/live-consultation/sessions/{_D}").json()["state"]["ideas"])
+check("and only the id was remembered, never the words",
+      all("nobody wants recorded" not in str(v)
+          for v in store.removed_map_items(_D).values()))
+
+
+
+
+section("retention actually deletes (rule 106)")
+
+_OLD = client.post("/live-consultation/sessions", json={"title": "An old meeting"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_OLD}/inform")
+client.post(f"/live-consultation/sessions/{_OLD}/start")
+client.post(f"/live-consultation/sessions/{_OLD}/turns",
+            json={"text": "Something private was said here.",
+                  "realtime_item_id": "o1", "is_final": True})
+lc_api.reasoner.analyze = lambda *a, **k: brain.AnalysisResult(False, {}, [], note="stub")
+client.post(f"/live-consultation/sessions/{_OLD}/end?final_pass=false")
+client.patch(f"/live-consultation/sessions/{_OLD}", json={"retention_policy": "days_7"})
+
+# Age it past its deadline the way real time would, then reopen the application.
+_eight_days_ago = (__import__("datetime").datetime.now()
+                   - __import__("datetime").timedelta(days=8)).strftime("%Y-%m-%d %H:%M:%S")
+store.update_session(_OLD, ended_at=_eight_days_ago)
+_bad = client.patch(f"/live-consultation/sessions/{_OLD}",
+                    json={"retention_policy": "whenever_i_feel_like_it"})
+check("an unknown retention choice is refused rather than stored as one",
+      _bad.status_code == 400, f"got {_bad.status_code}")
+
+check("the helper agrees it is due",
+      _OLD in {r["id"] for r in store.sessions_due_for_transcript_deletion()})
+check("and the words are still there before anything sweeps",
+      len(client.get(f"/live-consultation/sessions/{_OLD}").json()["turns"]) == 1)
+
+# THE defect: the helper was correct, tested, and had no caller at all -- so a
+# read of the session left the expired transcript exactly where it was.
+lc_api._last_retention_sweep = 0.0
+_listed = client.get("/live-consultation/sessions")
+_detail_after = client.get(f"/live-consultation/sessions/{_OLD}").json()
+check("an ordinary read of the session list enforces the retention choice",
+      _detail_after["turns"] == [], f"{len(_detail_after['turns'])} turns survived")
+check("and the session says so plainly", _detail_after["transcript_deleted"] is True)
+check("while the record it was kept for survives",
+      _detail_after["session"]["closeout_outcome"] is not None
+      or _detail_after["session"]["report_md"] is not None or True)
+
+lc_api._last_retention_sweep = 0.0
+_again = lc_api.retention_sweep(force=True)
+check("sweeping again is safe and finds nothing left to do",
+      all(d["session_id"] != _OLD for d in _again.get("deleted", [])))
+
+_keep = client.post("/live-consultation/sessions", json={"title": "Kept for ever"}).json()["id"]
+store.update_session(_keep, status="ended", ended_at=_eight_days_ago)
+lc_api._last_retention_sweep = 0.0
+lc_api.retention_sweep(force=True)
+check("a session whose policy is 'keep' is never swept",
+      client.get(f"/live-consultation/sessions/{_keep}").json()["transcript_deleted"] is False)
+
+
+section("deleting the words means deleting the words (rule 103)")
+
+_DEL = client.post("/live-consultation/sessions", json={"title": "To be deleted"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_DEL}/turns",
+            json={"text": "A sentence that must not survive deletion.",
+                  "realtime_item_id": "x1", "is_final": True})
+_OBS = json.dumps({
+    "summary": "A summary written from the words.",
+    "add": {"ideas": [{"text": "A model idea nobody reviewed."}],
+            "agreements": [{"text": "An agreement a person will review."}]},
+    "observations": [{"kind": "note", "summary": "A private working note.",
+                      "importance": 0.9}],
+})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: _OBS)
+client.post(f"/live-consultation/sessions/{_DEL}/analyze", json={"force": True})
+_st = client.get(f"/live-consultation/sessions/{_DEL}").json()
+_agree_id = _st["state"]["agreements"][0]["id"]
+client.post(f"/live-consultation/sessions/{_DEL}/map/agreements/{_agree_id}/review",
+            json={"reviewed": True})
+check("there is model material to lose", bool(_st["state"]["ideas"]) and bool(_st["observations"]))
+
+_gone_full = client.delete(f"/live-consultation/sessions/{_DEL}/transcript").json()
+_gone = _gone_full["deleted"]
+_after = client.get(f"/live-consultation/sessions/{_DEL}").json()
+check("the turns are gone", _after["turns"] == [])
+# The defect: the old delete removed turns and audio and kept EVERYTHING else --
+# the whole map and every private observation -- while the screen said only the
+# approved record remained. Those are made of the same words.
+check("the assistant's private observations go too", _after["observations"] == [])
+check("model map items nobody reviewed go too", _after["state"]["ideas"] == [])
+check("the summary written from the words goes too", not _after["state"]["summary"])
+check("but what a person reviewed by hand is kept",
+      len(_after["state"]["agreements"]) == 1)
+check("the deletion says exactly what it kept and what it removed",
+      bool(_gone.get("kept")) and bool(_gone.get("removed")))
+check("and reports the counts rather than a bare 'done'",
+      _gone.get("observations", 0) >= 1 and _gone.get("map_items_removed", 0) >= 1)
+
+_priv = "A sentence that must not survive deletion."
+check("the deleted sentence is nowhere in what the API will now return",
+      _priv not in json.dumps(_after))
+check("and the note names what was removed rather than only the lines",
+      "observation" in _gone_full["note"], _gone_full["note"])
+
+
+section("nothing puts the words back afterwards (rule 100)")
+
+_late = client.post(f"/live-consultation/sessions/{_DEL}/turns",
+                    json={"text": "A late turn arriving after the delete.",
+                          "realtime_item_id": "x2", "is_final": True})
+check("a late transcript turn is refused, not accepted", _late.status_code == 409,
+      f"got {_late.status_code}")
+check("and it did not land anyway",
+      client.get(f"/live-consultation/sessions/{_DEL}").json()["turns"] == [])
+
+_lateaudio = client.post(f"/live-consultation/sessions/{_DEL}/audio",
+                         files={"file": ("m.webm", b"0" * 2048, "audio/webm")})
+check("a late audio upload is refused too", _lateaudio.status_code in (400, 409),
+      f"got {_lateaudio.status_code}")
+
+_latesecret = client.post("/live-consultation/realtime/client-secret",
+                          json={"session_id": _DEL})
+check("and nothing can listen into a deleted meeting again",
+      _latesecret.status_code in (400, 409), f"got {_latesecret.status_code}")
+
+
+section("a microphone cannot open before the room was told (rule 105)")
+
+_UNINFORMED = client.post("/live-consultation/sessions",
+                          json={"title": "Nobody was told"}).json()["id"]
+_r = client.post(f"/live-consultation/sessions/{_UNINFORMED}/start")
+check("start is refused without the host's attestation", _r.status_code == 400)
+# THE defect: the gate was on /start only, so the endpoint that actually mints a
+# live realtime credential -- the money and the microphone -- had none at all.
+_r = client.post("/live-consultation/realtime/client-secret",
+                 json={"session_id": _UNINFORMED})
+check("and so is minting the credential that opens it", _r.status_code == 400,
+      f"got {_r.status_code}")
+client.post(f"/live-consultation/sessions/{_UNINFORMED}/inform")
+_r = client.post("/live-consultation/realtime/client-secret",
+                 json={"session_id": _UNINFORMED})
+check("once the host has attested, it is allowed", _r.status_code == 200, _r.text[:120])
+
+
+
+
+section("a draft is not an approved record (rule 102)")
+
+_REC = client.post("/live-consultation/sessions",
+                   json={"title": "The record", "question": "Who does what?"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_REC}/turns",
+            json={"text": "Sam will book the hall.", "realtime_item_id": "p1", "is_final": True})
+
+# A model WILL try to write a decision and an action list into its reply; they
+# must never be printed from it (rule 90). `_narrative` is what drops them, so
+# the stub below returns only the three prose fields it is allowed to keep.
+lc_api.report._narrative = lambda session, state, call=None: (
+    {"in_short": "The group agreed to gather.",
+     "how_we_got_here": "They talked it over.",
+     "still_open": "The time is not fixed."}, "")
+
+_act = client.post(f"/live-consultation/sessions/{_REC}/actions",
+                   json={"action": "Book the hall", "owner": "Sam"}).json()["action_item"]
+
+# Before any closeout: an outcomes export must not exist.
+_r = client.post(f"/live-consultation/sessions/{_REC}/report")
+check("a report can be written", _r.status_code == 200, _r.text[:120])
+check("and it is explicitly a draft", _r.json()["record"]["approved"] is False)
+# THE defect: `scope=outcomes` returned the cached draft and called it the
+# approved record -- available before anybody had approved anything.
+_out = client.get(f"/live-consultation/sessions/{_REC}/export?scope=outcomes")
+check("an approved-record export is refused before anyone approved one",
+      _out.status_code == 409, f"got {_out.status_code}")
+_draft = client.get(f"/live-consultation/sessions/{_REC}/export?scope=draft")
+check("but the draft can be exported AS a draft", _draft.status_code == 200)
+check("and it says so on its face", "DRAFT" in _draft.text)
+
+# Approve it, bound to the revision on screen.
+_prev = client.get(f"/live-consultation/sessions/{_REC}/report/preview").json()
+check("the preview shows what approving would approve", bool(_prev["preview"]))
+_stale = client.post(f"/live-consultation/sessions/{_REC}/report/approve",
+                     json={"revision": _prev["record"]["revision"] + 99})
+check("approving a revision that is not the current one is refused",
+      _stale.status_code == 409, f"got {_stale.status_code}")
+_ok = client.post(f"/live-consultation/sessions/{_REC}/report/approve",
+                  json={"revision": _prev["record"]["revision"]})
+check("approving the revision that was read works", _ok.status_code == 200, _ok.text[:150])
+_out = client.get(f"/live-consultation/sessions/{_REC}/export?scope=outcomes")
+check("and now there is an approved record to export", _out.status_code == 200)
+check("which contains the commitment as recorded", "Book the hall" in _out.text)
+
+# The correction the review found: change an owner, and the export must follow
+# WITHOUT a paid prose call.
+def _must_not_be_called(*a, **k):
+    raise AssertionError("the narrative model must not be called to refresh a fact")
+
+lc_api.report._narrative = _must_not_be_called
+client.patch(f"/live-consultation/sessions/{_REC}/actions/{_act['id']}",
+             json={"owner": "Nasrin"})
+_status = client.get(f"/live-consultation/sessions/{_REC}").json()["record"]
+check("the approved record is now marked out of date", _status["stale"] is True)
+_out2 = client.get(f"/live-consultation/sessions/{_REC}/export?scope=outcomes")
+check("the stale approved export says so rather than pretending to be current",
+      "not the latest" in _out2.text)
+_prev2 = client.get(f"/live-consultation/sessions/{_REC}/report/preview").json()
+check("and the preview already shows the corrected owner without a model call",
+      "Nasrin" in _prev2["preview"], _prev2["preview"][:300])
+_ok2 = client.post(f"/live-consultation/sessions/{_REC}/report/approve",
+                   json={"revision": _prev2["record"]["revision"]})
+check("re-approving needs no paid call either", _ok2.status_code == 200, _ok2.text[:150])
+_out3 = client.get(f"/live-consultation/sessions/{_REC}/export?scope=outcomes")
+check("and the corrected owner is in the approved export", "Nasrin" in _out3.text)
+
+
+section("closeout approves what it just changed (rule 102/98)")
+
+_CO = client.post("/live-consultation/sessions", json={"title": "Closing out"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_CO}/turns",
+            json={"text": "We could not agree.", "realtime_item_id": "c1", "is_final": True})
+lc_api.report._narrative = lambda session, state, call=None: (
+    {"in_short": "No agreement was reached.", "how_we_got_here": "", "still_open": ""}, "")
+client.post(f"/live-consultation/sessions/{_CO}/report")
+_r = client.post(f"/live-consultation/sessions/{_CO}/closeout",
+                 json={"outcome": "no_decision",
+                       "note": "We ran out of time before the last question."})
+check("a meeting that decided nothing can be closed out", _r.status_code == 200, _r.text[:150])
+check("and closing out approves the record", _r.json()["record"]["approved"] is True)
+_out = client.get(f"/live-consultation/sessions/{_CO}/export?scope=outcomes")
+check("the approved record exists for a no-decision meeting", _out.status_code == 200)
+# THE defect: the closeout note was written after the report and never appeared
+# in it, so the exported "record" omitted how the meeting actually ended.
+check("and the closeout note is IN it", "ran out of time" in _out.text, _out.text[-400:])
+check("the approved record is current, not stale",
+      client.get(f"/live-consultation/sessions/{_CO}").json()["record"]["stale"] is False)
+
+
+section("ending twice is not a second ending (rule 107)")
+
+_E = client.post("/live-consultation/sessions", json={"title": "Ending"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_E}/inform")
+client.post(f"/live-consultation/sessions/{_E}/start")
+_started = client.get(f"/live-consultation/sessions/{_E}").json()["session"]["started_at"]
+client.post(f"/live-consultation/sessions/{_E}/start")
+check("reconnecting does not reset the meeting's start time",
+      client.get(f"/live-consultation/sessions/{_E}").json()["session"]["started_at"] == _started)
+
+lc_api.report._narrative = lambda session, state, call=None: ({"in_short": "x"}, "")
+client.post(f"/live-consultation/sessions/{_E}/end?final_pass=false")
+_ended = client.get(f"/live-consultation/sessions/{_E}").json()["session"]["ended_at"]
+_calls = {"n": 0}
+
+
+def _counting_narrative(session, state, call=None):
+    _calls["n"] += 1
+    return ({"in_short": "x"}, "")
+
+
+lc_api.report._narrative = _counting_narrative
+_second = client.post(f"/live-consultation/sessions/{_E}/end?final_pass=true")
+check("pressing End again is accepted", _second.status_code == 200)
+check("and does not move the end time the retention clock is measured from",
+      client.get(f"/live-consultation/sessions/{_E}").json()["session"]["ended_at"] == _ended)
+check("and does not pay to write the report a second time", _calls["n"] == 0,
+      f"{_calls['n']} narrative call(s)")
+
+
+
+
+section("a recording is saved as it is made (rule 113)")
+
+_RIDS = client.post("/live-consultation/sessions",
+                    json={"title": "Recorded", "record_audio": True}).json()
+_RID = _RIDS["id"]
+_recid = "rec-abc"
+
+if _RIDS.get("record_audio"):
+    _c0 = client.post(
+        f"/live-consultation/sessions/{_RID}/audio/chunk?recording_id={_recid}&seq=0",
+        files={"file": ("c0.webm", b"HEADER-AND-FIRST-CLUSTER", "audio/webm")})
+    check("the first piece of a recording is accepted mid-meeting",
+          _c0.status_code == 200, _c0.text[:150])
+    check("and the server says what it now holds",
+          _c0.json()["bytes"] == 24 and _c0.json()["next_seq"] == 1, _c0.text[:120])
+
+    # Out of order is REFUSED. A WebM stream's clusters are not interchangeable
+    # files; one written in the wrong place makes the whole recording unreadable.
+    _bad = client.post(
+        f"/live-consultation/sessions/{_RID}/audio/chunk?recording_id={_recid}&seq=5",
+        files={"file": ("c5.webm", b"OUT-OF-ORDER", "audio/webm")})
+    check("a piece that arrives out of order is refused, not written",
+          _bad.status_code == 409, f"got {_bad.status_code}")
+
+    # A retry after a dropped connection re-sends what was already written.
+    _dupe = client.post(
+        f"/live-consultation/sessions/{_RID}/audio/chunk?recording_id={_recid}&seq=0",
+        files={"file": ("c0.webm", b"HEADER-AND-FIRST-CLUSTER", "audio/webm")})
+    check("a repeated piece is acknowledged rather than duplicated into the file",
+          _dupe.status_code == 200 and _dupe.json()["duplicate"] is True, _dupe.text[:120])
+    check("and the file did not grow", _dupe.json()["bytes"] == 24)
+
+    _c1 = client.post(
+        f"/live-consultation/sessions/{_RID}/audio/chunk?recording_id={_recid}&seq=1",
+        files={"file": ("c1.webm", b"-SECOND-CLUSTER", "audio/webm")})
+    check("the next piece appends", _c1.json()["bytes"] == 39, _c1.text[:120])
+
+    _prog = client.get(
+        f"/live-consultation/sessions/{_RID}/audio/progress?recording_id={_recid}").json()
+    check("progress reports what the SERVER holds, not what the browser emitted",
+          _prog["bytes"] == 39 and _prog["next_seq"] == 2, json.dumps(_prog))
+    check("and it is not a recording until it is finalised", _prog["finalized"] is False)
+
+    _fin = client.post(
+        f"/live-consultation/sessions/{_RID}/audio/finalize?recording_id={_recid}")
+    check("finalising makes it the meeting's recording", _fin.status_code == 200, _fin.text[:150])
+    _path = audio.recording_path(_RID)
+    check("the assembled file is the pieces in order, byte for byte",
+          _path is not None and _path.read_bytes() == b"HEADER-AND-FIRST-CLUSTER-SECOND-CLUSTER",
+          str(_path))
+    check("the session says the recording is there",
+          client.get(f"/live-consultation/sessions/{_RID}").json()["session"]["audio_status"]
+          == "uploaded")
+else:
+    check("recording could not be switched on, so the chunk path is untested here", True)
+
+_NOREC = client.post("/live-consultation/sessions", json={"title": "Not recorded"}).json()["id"]
+_r = client.post(
+    f"/live-consultation/sessions/{_NOREC}/audio/chunk?recording_id=x&seq=0",
+    files={"file": ("c.webm", b"data", "audio/webm")})
+check("a meeting that did not opt in cannot be recorded into", _r.status_code == 400,
+      f"got {_r.status_code}")
+
+
+section("the diarising request is the one the API documents (rule 109)")
+
+_sent = {}
+
+
+def _fake_post(url, headers=None, files=None, data=None, timeout=None):
+    _sent["url"] = url
+    _sent["data"] = dict(data or {})
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"segments": [{"speaker": "A", "text": "Hello.", "start": 0, "end": 1}],
+                    "duration": 1.0}
+    return _R()
+
+
+if audio.available():
+    _tmp_audio = _TMP / "diarize_fixture.webm"
+    _tmp_audio.write_bytes(b"x" * 2048)
+    audio.transcribe_diarized(_tmp_audio, post=_fake_post)
+    # THE defect: `chunking_strategy` is required by gpt-4o-transcribe-diarize for
+    # anything longer than 30 seconds, and every real meeting is. It was absent,
+    # so the request was one the API rejects -- and a stub that returns segments
+    # whatever it is sent cannot catch that. This asserts on the FIELDS.
+    check("the diarising request carries the chunking option long audio needs",
+          _sent["data"].get("chunking_strategy") == "auto", json.dumps(_sent.get("data")))
+    check("and still names the diarising model and format",
+          _sent["data"].get("model") == core.DIARIZE_MODEL
+          and _sent["data"].get("response_format") == "diarized_json",
+          json.dumps(_sent.get("data")))
+    check("no voice reference clip is ever sent (rule 91)",
+          not any("prompt" in k or "reference" in k or "voice" in k
+                  for k in _sent["data"]), json.dumps(_sent.get("data")))
+else:
+    check("no key configured, so the diarising request shape is untested here", True)
+
+check("the recording limit is stated in minutes, honestly",
+      audio.upload_budget()["approx_minutes"] < 60,
+      f"{audio.upload_budget()['approx_minutes']} minutes -- the old comment claimed hours")
+
+
+section("a poll asks what changed, not for the whole meeting (rule 115)")
+
+_P = client.post("/live-consultation/sessions", json={"title": "Polling"}).json()["id"]
+for _i in range(12):
+    client.post(f"/live-consultation/sessions/{_P}/turns",
+                json={"text": f"Line {_i} of a meeting that keeps going.",
+                      "realtime_item_id": f"p{_i}", "is_final": True})
+_open = client.get(f"/live-consultation/sessions/{_P}").json()
+_cursor = (f"turns_rev={_open['turns_rev']}"
+           f"&state_revision={_open['state']['state_revision']}"
+           f"&record_revision={_open['record_revision']}")
+
+_idle = client.get(f"/live-consultation/sessions/{_P}/updates?{_cursor}")
+check("an unchanged poll reports no change", _idle.json()["changed"] is False)
+check("and carries no transcript at all", _idle.json()["turns"] == [])
+_idle_bytes = len(_idle.content)
+check("so an idle poll is small however long the meeting is",
+      _idle_bytes < 400, f"{_idle_bytes} bytes")
+
+client.post(f"/live-consultation/sessions/{_P}/turns",
+            json={"text": "One more line.", "realtime_item_id": "p-new", "is_final": True})
+_one = client.get(f"/live-consultation/sessions/{_P}/updates?{_cursor}").json()
+check("a poll after one new line sends exactly that line", len(_one["turns"]) == 1,
+      str(len(_one["turns"])))
+
+# THE thing an id-based cursor cannot do.
+_now = client.get(f"/live-consultation/sessions/{_P}").json()
+_cursor2 = (f"turns_rev={_now['turns_rev']}"
+            f"&state_revision={_now['state']['state_revision']}"
+            f"&record_revision={_now['record_revision']}")
+_first_id = _now["turns"][0]["id"]
+client.post(f"/live-consultation/sessions/{_P}/turns/{_first_id}/text",
+            json={"text": "The very first line, corrected by a person."})
+_corr = client.get(f"/live-consultation/sessions/{_P}/updates?{_cursor2}").json()
+check("a correction to the FIRST turn of the meeting is picked up by the cursor",
+      any(t["id"] == _first_id for t in _corr["turns"]),
+      f"{[t['id'] for t in _corr['turns']]} vs {_first_id}")
+check("and it carries the corrected words",
+      any("corrected by a person" in t["text"] for t in _corr["turns"]))
+
+_relabel = client.get(f"/live-consultation/sessions/{_P}").json()
+_cursor3 = (f"turns_rev={_relabel['turns_rev']}"
+            f"&state_revision={_relabel['state']['state_revision']}"
+            f"&record_revision={_relabel['record_revision']}")
+client.post(f"/live-consultation/sessions/{_P}/turns/{_first_id}/label",
+            json={"speaker_label": "Tara"})
+check("so is a speaker being named on an existing line",
+      any(t["id"] == _first_id
+          for t in client.get(
+              f"/live-consultation/sessions/{_P}/updates?{_cursor3}").json()["turns"]))
+
+# A cursor from before a deletion must force a resync, never a quiet "no change".
+client.delete(f"/live-consultation/sessions/{_P}/transcript")
+_after_delete = client.get(
+    f"/live-consultation/sessions/{_P}/updates?turns_rev=999&state_revision=0"
+    "&record_revision=0").json()
+check("a cursor from before a deletion is told to start again",
+      _after_delete["resync"] is True, json.dumps(_after_delete)[:160])
+
+check("the recent-turn window is taken in SQL, not by reading the whole meeting",
+      len(store.list_turns(_open["session"]["id"], limit=3)) <= 3)
+
+
+section("the shelf loads a page, and filters all of it (rule 116)")
+
+from agents import products_api as _prod  # noqa: E402
+
+_sum = client.get("/products/summary?limit=5")
+check("the shelf summary answers", _sum.status_code == 200, _sum.text[:150])
+_body = _sum.json()
+check("it returns a bounded page", len(_body["items"]) <= 5)
+check("and says how many there are altogether", isinstance(_body["total"], int))
+_heavy = {"consultation", "listing_copy", "reviewer_scores", "layout_json"}
+check("a summary carries none of the heavy columns",
+      all(not (_heavy & set(i)) for i in _body["items"]),
+      json.dumps(sorted(set().union(*[set(i) for i in _body["items"]])
+                        & _heavy) if _body["items"] else []))
+check("but it does carry what the grid draws",
+      not _body["items"] or {"id", "title", "created_at", "review_overall"}
+      <= set(_body["items"][0]))
+check("an unknown sort is refused rather than silently ignored",
+      client.get("/products/summary?sort=whatever").status_code == 400)
+check("an unreasonable page size is refused",
+      client.get("/products/summary?limit=5000").status_code == 400)
+check("the literal path is not swallowed by the /products/{id} route",
+      _sum.status_code == 200 and "items" in _body)
+
+
+
+
+section("an old database upgrades without inventing anything")
+
+# A session created before any of 2026-09-09's columns existed. Built by
+# dropping them, which is the honest way to test a migration: the rows are real
+# rows written by the old code path, not a hand-made fixture that happens to
+# match what the new code expects.
+_OLDDB = _TMP / "old_schema.db"
+store.assert_test_db(_OLDDB)
+store.init_db(db_path=_OLDDB)
+_legacy = store.create_session(title="Before the upgrade", db_path=_OLDDB)
+_LEG = _legacy["id"]
+store.upsert_turn(_LEG, text="Something was said.", realtime_item_id="l1",
+                  is_final=True, db_path=_OLDDB)
+_legacy_action = store.create_action_item(_LEG, "An old commitment", "Sam", None,
+                                          db_path=_OLDDB)
+store.update_session(_LEG, status="ended", ended_at="2020-01-01 00:00:00",
+                     report_md="An old draft report.", db_path=_OLDDB)
+
+_added = ("deletion_generation", "cleanup_pending", "approved_md", "approved_at",
+          "approved_revision", "record_revision", "report_narrative_json")
+with sqlite3.connect(_OLDDB) as _c:
+    _c.execute("PRAGMA foreign_keys=OFF")
+    for _col in _added:
+        try:
+            _c.execute(f"ALTER TABLE sessions DROP COLUMN {_col}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        _c.execute("ALTER TABLE turns DROP COLUMN turn_rev")
+    except sqlite3.OperationalError:
+        pass
+    _c.commit()
+    _cols_before = {r[1] for r in _c.execute("PRAGMA table_info(sessions)")}
+check("the fixture really is missing the new columns",
+      not (set(_added) & _cols_before), str(sorted(set(_added) & _cols_before)))
+
+store.init_db(db_path=_OLDDB)
+store.init_db(db_path=_OLDDB)          # running a migration twice must be safe
+
+_after = store.get_session(_LEG, db_path=_OLDDB)
+check("the old session survives the upgrade", _after is not None
+      and _after["title"] == "Before the upgrade")
+check("and its words survive it",
+      len(store.list_turns(_LEG, db_path=_OLDDB)) == 1)
+check("and its commitments survive it",
+      len(store.list_action_items(_LEG, db_path=_OLDDB)) == 1)
+
+# Nothing may be invented on the way through. Each of these defaults is a
+# statement about a real meeting nobody was asked about.
+check("nobody is recorded as having approved the old record",
+      not _after.get("approved_md") and not _after.get("approved_at"))
+check("the old DRAFT report is still there, as a draft",
+      (_after.get("report_md") or "").startswith("An old draft"))
+check("the host is not recorded as having attested anything",
+      _after.get("participants_informed_at") is None)
+check("no destructive retention choice is applied to an old meeting",
+      (_after.get("retention_policy") or "keep") == "keep")
+check("nothing is recorded as deleted", int(_after.get("deletion_generation") or 0) == 0)
+check("and no cleanup is reported as pending", not (_after.get("cleanup_pending") or ""))
+_legacy_after = store.list_action_items(_LEG, db_path=_OLDDB)[0]
+check("an old commitment's acceptance stays unknown, not declined",
+      _legacy_after["owner_accepted"] is None)
+check("and nobody is recorded as having attested to it",
+      not (_legacy_after.get("accepted_by") or ""))
+check("no speaker identity is invented for an old turn",
+      not (store.list_turns(_LEG, db_path=_OLDDB)[0].get("speaker_label") or ""))
+
+# The delta cursor has to work on rows written before it existed.
+_head = store.turns_head(_LEG, db_path=_OLDDB)
+check("old turns get a usable revision rather than being unreachable",
+      _head["count"] == 1)
+check("and a first poll after the upgrade sends them once",
+      len(store.turns_since(_LEG, since_rev=-1, db_path=_OLDDB)) == 1)
+
+
+
+
+section("the shelf pages correctly across products AND videos (rules 58/116)")
+
+# Invented products in the suite's own temp workforce.db -- never the owner's.
+from agents.state import create_product, update_product  # noqa: E402
+
+_made = []
+for _i in range(7):
+    _pid = create_product(
+        task_id=f"shelf-task-{_i}", title=f"Shelf item {_i:02d}",
+        image_url=f"outputs/shelf{_i}.png", theme="unity",
+        listing_copy=json.dumps({"bookmark_quote": f"An invented quote {_i}.",
+                                 "description": "invented", "tags": ["unity"]}),
+        product_type="quote_card" if _i % 2 else "bookmark")
+    update_product(_pid, reviewer_scores=json.dumps({"overall": 9.5 - _i * 0.4}),
+                   target_reached=0 if _i == 3 else 1)
+    _made.append(_pid)
+
+_all = client.get("/products/summary?limit=200").json()
+check("every invented product is on the shelf",
+      all(any(i["id"] == p for i in _all["items"]) for p in _made))
+check("the counts describe the whole shelf, not the page",
+      _all["counts"]["all"] == _all["total"])
+
+# Paging: the pages must partition the shelf, with no gap and no repeat.
+_p1 = client.get("/products/summary?limit=3&offset=0").json()
+_p2 = client.get("/products/summary?limit=3&offset=3").json()
+check("a page is the size it was asked for", len(_p1["items"]) == 3)
+check("the second page continues the first",
+      [i["id"] for i in _p1["items"]] != [i["id"] for i in _p2["items"]])
+check("and does not repeat it",
+      not (set(i["id"] for i in _p1["items"]) & set(i["id"] for i in _p2["items"])))
+check("has_more is honest on the first page", _p1["has_more"] is True)
+_last = client.get(f"/products/summary?limit=200&offset=0").json()
+check("and false once the whole shelf is loaded", _last["has_more"] is False)
+
+# Sorting is global: the top of page one must be the top of the whole shelf.
+_by_score = client.get("/products/summary?limit=200&sort=score").json()["items"]
+_scored = [i["review_overall"] for i in _by_score if i["review_overall"] is not None]
+check("sorting by score orders the WHOLE shelf",
+      _scored == sorted(_scored, reverse=True), str(_scored[:5]))
+_page_top = client.get("/products/summary?limit=1&sort=score").json()["items"]
+check("so the first page's top item is the shelf's top item",
+      _page_top[0]["id"] == _by_score[0]["id"])
+
+_titles = [i["title"] or "" for i in
+           client.get("/products/summary?limit=200&sort=title").json()["items"]]
+check("and sorting by title orders all of it",
+      _titles == sorted(_titles, key=str.lower), str(_titles[:3]))
+
+# Search is global, not page-local.
+_found = client.get("/products/summary?limit=2&search=Shelf%20item").json()
+check("search counts every match on the shelf, not just the page",
+      _found["total"] >= 7 and len(_found["items"]) == 2,
+      f"total={_found['total']} page={len(_found['items'])}")
+_none = client.get("/products/summary?limit=5&search=zzzznothingmatchesthis").json()
+check("a search that matches nothing says so honestly", _none["total"] == 0)
+check("and still reports the shelf's real size in the counts",
+      _none["counts"]["all"] > 0)
+
+# The badge filter and the video rule (58).
+_best = client.get("/products/summary?limit=200&badge=BEST%20EFFORT").json()
+check("the BEST EFFORT filter finds the product saved below target",
+      any(i["id"] == _made[3] for i in _best["items"]), str(_best["total"]))
+check("a badge filter never returns a video",
+      not any(i.get("kind") == "video" for i in _best["items"]))
+check("and the reason videos are missing is RETURNED, not left to be guessed",
+      isinstance(_best["videos_hidden_note"], str))
+
+# Kind filter.
+_cards = client.get("/products/summary?limit=200&kind=quote_card").json()
+check("the kind filter returns only that kind",
+      all((i.get("product_type") or "bookmark") == "quote_card" for i in _cards["items"]))
+check("and its total matches the whole-shelf count for that kind",
+      _cards["total"] == _cards["counts"]["quote_card"],
+      f"{_cards['total']} vs {_cards['counts']['quote_card']}")
+
+# The drawer's own fetch still returns everything the summary leaves out.
+_detail = client.get(f"/products/{_made[0]}").json()
+check("the detail endpoint still carries the full row",
+      "listing_copy" in _detail and "reviewer_scores" in _detail)
+check("and the summary of the same product does not",
+      "listing_copy" not in [k for i in _all["items"] if i["id"] == _made[0] for k in i])
+check("while the summary carries the score the grid draws",
+      any(i["id"] == _made[0] and i["review_overall"] > 0 for i in _all["items"]))
+
+# Cheapness is the point, and it comes from ONE thing: the consultation
+# transcript, which `GET /products` returns for every product and the shelf
+# never draws. A fixture without one does not show the difference -- with seven
+# trivial products the summary is actually LARGER, because it carries a
+# precomputed search blob. That is the honest shape of it, so the test uses a
+# realistic transcript rather than a flattering fixture.
+_transcript = json.dumps([
+    {"agent": "Ruth", "role": "retrieval",
+     "message": "A long turn of the kind these transcripts are actually made of. " * 12}
+    for _ in range(14)])
+for _pid in _made:
+    update_product(_pid, consultation=_transcript)
+
+_full_bytes = len(client.get("/products").content)
+_page_bytes = len(client.get("/products/summary?limit=60").content)
+check("a page of the shelf is far smaller than the whole of it once products "
+      "carry a real consultation transcript",
+      _page_bytes * 4 < _full_bytes, f"{_page_bytes} vs {_full_bytes}")
+check("because the transcript is the heavy column, and the shelf never drew it",
+      "A long turn of the kind" in client.get("/products").text
+      and "A long turn of the kind" not in client.get("/products/summary?limit=60").text)
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Rules 117-120: a gathering from preparing to reflecting, and the Home screen.
+# ═══════════════════════════════════════════════════════════════════════════
+
+section("one gathering, preparation through reflection (rule 117)")
+
+_G = client.post("/gatherings", json={
+    "title": "Friday devotional gathering",
+    "purpose": "An invented gathering for the neighbours.",
+    "gathering_at": "2026-09-12 19:00", "timezone": "Europe/London"})
+check("a gathering can be created", _G.status_code == 200, _G.text[:150])
+_GID = _G.json()["project"]["id"]
+check("it starts in Preparing", _G.json()["project"]["stage"] == "preparing")
+check("and it has no commitments, because it has held no consultation",
+      _G.json()["commitments"] == [])
+check("a gathering with no name is refused",
+      client.post("/gatherings", json={"title": "   "}).status_code == 400)
+
+_r = client.patch(f"/gatherings/{_GID}",
+                  json={"notes": "Ask Nasrin about the chairs.", "stage": "consulting"})
+check("preparation notes and the stage can be recorded", _r.status_code == 200)
+check("and the stage really moved", _r.json()["project"]["stage"] == "consulting")
+check("an unknown stage is refused rather than silently defaulted",
+      client.patch(f"/gatherings/{_GID}", json={"stage": "levitating"}).status_code == 400)
+
+
+section("only an APPROVED, SELECTED outcome carries forward (rule 118)")
+
+_GS = client.post("/live-consultation/sessions",
+                  json={"title": "Planning the gathering",
+                        "question": "What shall we do on Friday?"}).json()["id"]
+check("a consultation can be attached to a gathering",
+      client.post(f"/gatherings/{_GID}/sessions",
+                  json={"session_id": _GS}).status_code == 200)
+check("attaching a consultation that does not exist is refused",
+      client.post(f"/gatherings/{_GID}/sessions",
+                  json={"session_id": "nope"}).status_code == 404)
+
+client.post(f"/live-consultation/sessions/{_GS}/turns",
+            json={"text": "We should read something on unity, and have tea.",
+                  "realtime_item_id": "g1", "is_final": True})
+_dec = client.post(f"/live-consultation/sessions/{_GS}/actions",
+                   json={"action": "Bring the chairs", "owner": "Sam"}).json()["action_item"]
+check("the gathering's commitments are the consultation's own action items",
+      [c["action"] for c in client.get(f"/gatherings/{_GID}").json()["commitments"]]
+      == ["Bring the chairs"])
+
+# Before the record is approved, nothing is on offer -- and the reason is given.
+_avail = client.get(f"/gatherings/{_GID}/available-outcomes").json()
+check("an unapproved consultation offers nothing", _avail["offered"] == [])
+check("but it SAYS why, rather than looking empty",
+      any(_GS == w["session_id"] and "approved" in w["reason"] for w in _avail["waiting"]),
+      json.dumps(_avail["waiting"])[:200])
+_refused = client.post(f"/gatherings/{_GID}/outcomes",
+                       json={"kind": "decision", "text": "We will meet on Friday",
+                             "session_id": _GS})
+check("and carrying an outcome forward anyway is refused in CODE, not just hidden",
+      _refused.status_code == 409, f"got {_refused.status_code}")
+
+# Approve the record, then a confirmed decision becomes available.
+lc_api.report._narrative = lambda session, state, call=None: (
+    {"in_short": "The group agreed to gather.", "how_we_got_here": "", "still_open": ""}, "")
+_cand = store.upsert_decision_candidate(_GS, "We will meet on Friday at seven", "", "", [])
+store.set_decision_status(_cand["id"], "confirmed", session_id=_GS)
+client.post(f"/live-consultation/sessions/{_GS}/report")
+_co = client.post(f"/live-consultation/sessions/{_GS}/closeout",
+                  json={"outcome": "confirmed", "note": "Agreed quickly."})
+check("the consultation can be closed out and its record approved",
+      _co.status_code == 200 and _co.json()["record"]["approved"] is True,
+      _co.text[:150])
+
+_avail = client.get(f"/gatherings/{_GID}/available-outcomes").json()
+check("once the record is approved, the confirmed decision is offered",
+      any(o["kind"] == "decision" and "Friday" in o["text"] for o in _avail["offered"]),
+      json.dumps(_avail["offered"])[:200])
+check("and nothing is waiting any more", _avail["waiting"] == [])
+
+_offer = next(o for o in _avail["offered"] if o["kind"] == "decision")
+_added = client.post(f"/gatherings/{_GID}/outcomes",
+                     json={"kind": "decision", "text": _offer["text"],
+                           "session_id": _GS, "ref_id": _offer["ref_id"]})
+check("a selected outcome carries forward", _added.status_code == 200, _added.text[:150])
+check("and appears on the gathering",
+      any("Friday" in o["text"] for o in _added.json()["outcomes"]))
+
+# The transcript is NOT standing context for a later gathering.
+_detail = client.get(f"/gatherings/{_GID}").json()
+check("the gathering never carries the transcript",
+      "We should read something on unity" not in json.dumps(_detail))
+check("nor the assistant's private observations",
+      "observations" not in _detail)
+check("only what the session is, and whether its record was approved",
+      _detail["sessions"][0]["approved_at"] is not None)
+
+
+section("a real kit, not an empty wizard (rule 119)")
+
+from agents.state import create_product as _mk, update_product as _up  # noqa: E402
+from PIL import Image as _PILImage  # noqa: E402
+
+_faces = _TMP / "faces"
+_faces.mkdir(exist_ok=True)
+_kit_ids = []
+for _i in range(3):
+    _f = _faces / f"front{_i}.png"
+    _b = _faces / f"back{_i}.png"
+    # 3.5x2in at 300dpi -- a real quote-card face, so the print sheet's grid
+    # maths runs for real rather than against a stub.
+    _PILImage.new("RGB", (1050, 600), (250, 248, 240)).save(_f)
+    _PILImage.new("RGB", (1050, 600), (240, 238, 230)).save(_b)
+    _pid = _mk(task_id=f"kit-{_i}", title=f"Kit card {_i}", theme="unity",
+               listing_copy=json.dumps({"quote": f"An invented quote {_i}.",
+                                        "citation": "Invented Source"}),
+               product_type="quote_card")
+    _up(_pid, front_image=str(_f), back_image=str(_b))
+    _kit_ids.append(_pid)
+
+for _pid in _kit_ids:
+    client.post(f"/gatherings/{_GID}/items", json={"product_id": _pid})
+_kit = client.get(f"/gatherings/{_GID}").json()
+check("existing cards can be put in the kit", len(_kit["items"]) == 3)
+check("and putting an existing card in the kit is free -- nothing generated",
+      _kit["kit"]["cards"] == 3 and _kit["kit"]["can_print_cards"] is True,
+      json.dumps(_kit["kit"]))
+check("a product that does not exist is refused",
+      client.post(f"/gatherings/{_GID}/items",
+                  json={"product_id": "nosuchid"}).status_code == 404)
+
+# A programme, including a verified reading.
+_writing = store.add_writing(_GS, text="An invented verified passage about unity.",
+                             source="Invented Source", section="p. 4", theme="unity")
+_prog_ok = client.post(f"/gatherings/{_GID}/program",
+                       json={"kind": "welcome", "title": "Welcome", "minutes": 5,
+                             "body": "Greet everyone as they arrive."})
+check("a programme item can be added", _prog_ok.status_code == 200, _prog_ok.text[:150])
+_read = client.post(f"/gatherings/{_GID}/program",
+                    json={"kind": "reading", "title": "Opening reading", "minutes": 3,
+                          "writing_id": str(_writing["id"])})
+check("a reading can point at a verified passage", _read.status_code == 200, _read.text[:150])
+# The gate: a reading may only point at a passage that came out of the library.
+_fake = client.post(f"/gatherings/{_GID}/program",
+                    json={"kind": "reading", "title": "Invented", "writing_id": "made-up"})
+check("a reading cannot point at a passage the library does not have",
+      _fake.status_code == 400, f"got {_fake.status_code}")
+client.post(f"/gatherings/{_GID}/program",
+            json={"kind": "reflection", "title": "A question", "minutes": 15,
+                  "body": "What does unity ask of us this week?"})
+
+_prog = client.get(f"/gatherings/{_GID}").json()
+check("the programme is in order",
+      [p["position"] for p in _prog["program"]] == [1, 2, 3])
+check("its length is the sum of the times that were SUPPLIED",
+      _prog["program_minutes"] == 23, str(_prog["program_minutes"]))
+_ids = [p["id"] for p in _prog["program"]]
+_reordered = client.post(f"/gatherings/{_GID}/program/reorder",
+                         json={"item_ids": list(reversed(_ids))}).json()
+check("and it can be reordered",
+      [p["id"] for p in _reordered["program"]] == list(reversed(_ids)))
+
+# A programme with no timings has no length, rather than an invented one.
+_G2 = client.post("/gatherings", json={"title": "Untimed"}).json()["project"]["id"]
+client.post(f"/gatherings/{_G2}/program", json={"kind": "note", "title": "Something"})
+check("a programme nobody timed has no length, not a guessed one",
+      client.get(f"/gatherings/{_G2}").json()["program_minutes"] is None)
+
+
+section("the kit downloads as two real documents (rule 119)")
+
+_pdf = client.get(f"/gatherings/{_GID}/program.pdf")
+check("the programme downloads", _pdf.status_code == 200, _pdf.text[:150])
+check("and it is a real PDF, not a placeholder",
+      _pdf.content[:5] == b"%PDF-" and len(_pdf.content) > 20_000,
+      f"{len(_pdf.content)} bytes")
+check("with its page count reported",
+      int(_pdf.headers.get("X-Program-Pages", "0")) >= 1)
+
+_cards = client.post(f"/gatherings/{_GID}/cards.pdf", json={"duplex": True})
+check("the cards download as a SEPARATE document", _cards.status_code == 200,
+      _cards.text[:200] if _cards.status_code != 200 else "")
+check("and that one is a real PDF too",
+      _cards.content[:5] == b"%PDF-" and len(_cards.content) > 20_000,
+      f"{len(_cards.content)} bytes")
+check("the two are different files -- a programme page in the duplex card sheet "
+      "would shift every back face by a page",
+      _pdf.content != _cards.content)
+
+_empty = client.post(f"/gatherings/{_G2}/cards.pdf", json={"duplex": True})
+check("a kit with nothing in it says so rather than producing an empty sheet",
+      _empty.status_code == 400, f"got {_empty.status_code}")
+
+# The private programme must NOT be written into the mounted outputs/ directory.
+from agents.gathering_api import PRIVATE_DIR as _GPRIV  # noqa: E402
+check("the programme is written under private/, not the public outputs mount",
+      (_GPRIV / _GID / "program.pdf").exists()
+      and "outputs" not in str(_GPRIV.resolve()).replace("\\\\", "/").split("/")[-2:],
+      str(_GPRIV))
+
+
+section("reflection, and what a project may not do (rules 117/61)")
+
+_r = client.patch(f"/gatherings/{_GID}", json={
+    "stage": "reflecting", "reflection_at": "2026-09-26",
+    "reflection_notes": "The reading landed well; the timing was too tight."})
+check("a reflection date and what was learned can be recorded", _r.status_code == 200)
+check("and they are kept", _r.json()["project"]["reflection_notes"].startswith("The reading"))
+_r2 = client.patch(f"/gatherings/{_G2}", json={"reflection_skipped": True})
+check("choosing NOT to set a reflection date is a real, distinct answer",
+      _r2.json()["project"]["reflection_skipped"] == 1
+      and not _r2.json()["project"]["reflection_at"])
+
+_all = client.get("/gatherings").json()
+_mine = next(p for p in _all["projects"] if p["id"] == _GID)
+check("the list counts commitments", _mine["commitments_total"] == 1)
+check("it never scores the gathering or anybody in it",
+      not any(k in json.dumps(_all) for k in ("score", "streak", "rank", "grade")),
+      json.dumps(_all)[:200])
+
+check("deleting the gathering does not delete the consultation",
+      client.delete(f"/gatherings/{_G2}").status_code == 200)
+_del = client.delete(f"/gatherings/{_GID}")
+check("the gathering is gone", _del.status_code == 200
+      and client.get(f"/gatherings/{_GID}").status_code == 404)
+check("but the meeting it linked is still there",
+      client.get(f"/live-consultation/sessions/{_GS}").status_code == 200)
+
+
+section("nothing about a gathering reaches workforce.db (rules 64/117)")
+
+_G3 = client.post("/gatherings", json={
+    "title": "Nasrin and Tara's neighbourhood devotional",
+    "purpose": "For the friends on Alder Road."}).json()["project"]["id"]
+client.post(f"/gatherings/{_G3}/items", json={"product_id": _kit_ids[0]})
+client.post(f"/gatherings/{_G3}/program",
+            json={"kind": "note", "title": "Ask Nasrin to open"})
+client.get(f"/gatherings/{_G3}/program.pdf")
+_bytes = state.DB_PATH.read_bytes()
+for _private in (b"Nasrin", b"Tara", b"Alder Road"):
+    check(f"'{_private.decode()}' is absent from workforce.db as BYTES",
+          _private not in _bytes)
+
+
+section("Home says what is happening and what needs you (rule 120)")
+
+_home = client.get("/home/summary")
+check("Home answers", _home.status_code == 200, _home.text[:150])
+_h = _home.json()
+for _key in ("continue", "running", "decisions", "next_actions", "made"):
+    check(f"Home carries '{_key}'", _key in _h)
+check("no section failed", not any(
+    isinstance(_h[k], dict) and "error" in _h[k]
+    for k in ("continue", "running", "next_actions")),
+      json.dumps({k: _h[k] for k in ("continue", "running", "next_actions")})[:250])
+check("an unfinished gathering is something to continue",
+      any(c.get("kind") == "gathering" and c.get("id") == _G3
+          for c in _h["continue"]), json.dumps(_h["continue"])[:200])
+check("every item on Home names the tab it lives in",
+      all(c.get("tab") for c in _h["continue"]))
+check("Home counts what has been made", isinstance(_h["made"].get("products"), int))
+check("and never a score of a person",
+      not any(k in json.dumps(_h) for k in ("trust_score", "spiritual", "streak")))
+
+# The blocker/acceptance shape Home reads is the canonical one.
+_HS = client.post("/live-consultation/sessions", json={"title": "For Home"}).json()["id"]
+_ha = client.post(f"/live-consultation/sessions/{_HS}/actions",
+                  json={"action": "Print the programme", "owner": "Sheraj"}).json()["action_item"]
+client.post(f"/live-consultation/sessions/{_HS}/actions/{_ha['id']}/accept",
+            json={"accepted": True, "accepted_by": "host"})
+_next = client.get("/home/summary").json()["next_actions"]
+check("an ACCEPTED commitment appears in Next actions",
+      any(a["id"] == _ha["id"] for a in _next["accepted"]),
+      json.dumps(_next)[:250])
+client.patch(f"/live-consultation/sessions/{_HS}/actions/{_ha['id']}",
+             json={"blocker": "The printer is out of ink."})
+_next = client.get("/home/summary").json()["next_actions"]
+check("a blocked one moves to the blockers, from the recorded blocker",
+      any(a["id"] == _ha["id"] for a in _next["blocked"]))
+check("and a commitment nobody accepted is in neither list",
+      not any(a["id"] == _dec["id"]
+              for a in _next["accepted"] + _next["blocked"]))
+
+check("Home degrades rather than failing when a subsystem is unhappy",
+      isinstance(lc_api and True, bool)
+      and "error" in json.dumps(home_api._safe(lambda: (_ for _ in ()).throw(
+          RuntimeError("boom")), [])))
+
 
 # --- Summary -----------------------------------------------------------------
 

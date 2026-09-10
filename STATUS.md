@@ -67,8 +67,11 @@ always sent a `temperature`, which the GPT-5.x family refuses, so the Colony's
 OpenAI provider (rule 41a) had never actually worked.
 
 Sheraj has now run TWO real sessions, and the tab has changed a lot since the
-second one. **Everything below is UNCOMMITTED and none of it has been used in a
-real room yet**, though all of it is exercised by the suite and over HTTP:
+second one. **Everything below through rules 94-99 is now COMMITTED** (the last
+of it as `20ea32c`, 2026-09-09) -- this section claimed otherwise for days, which
+is exactly what the note at the top of this file warns about; check `git log`,
+not a line like this. None of it has been used in a real room yet, though all of
+it is exercised by the suite and over HTTP:
 - 2026-08-24: she was cancelling her own answers, and the presence dial was
   missing its biggest lever (rule 89, and the amendment to rule 87).
 - 2026-08-27: the spend-ceiling dead end, benign realtime errors no longer
@@ -89,6 +92,19 @@ real room yet**, though all of it is exercised by the suite and over HTTP:
   ingested as a verified corpus in its own collection. The offline suite was
   found to be making three real paid calls per run and now proves it is
   offline.
+
+- 2026-09-09: **UNCOMMITTED** -- the record now survives real request ordering,
+  quotations are verified exactly, the dashboard costs a fraction of what it did
+  to open, and there is a **Gatherings** tab and a **Home** screen
+  (rules 100-120). See the Activity Log entry below; the short version is that
+  eight P0-class defects found in a review were each reproduced against the
+  code, fixed, and pinned by a test that fails without the fix -- and then the
+  deeds-first flagship (the gathering kit) was built on top of the corrected
+  records. New modules: `agents/quote_verify.py`, `agents/products_api.py`,
+  `agents/gathering.py`, `agents/gathering_api.py`, `agents/program_sheet.py`,
+  `agents/home_api.py`, `scripts/test_quote_verify.py`, and on the dashboard
+  `HomePanel.tsx`, `GatheringsPanel.tsx`, `PanelBoundary.tsx`,
+  `lib/navGuard.ts`, `hooks/useConsultationUpdates.ts`.
 
 Nothing in this subsystem has been reviewed by hand. **The closeout, the map
 editing and the transcript correction have never been used in a real meeting.**
@@ -113,8 +129,14 @@ hand yet: "committed" is not "reviewed".
 
 **Deferred / proposed, not started** (nobody should re-discover these from
 scratch):
-- **Devotional-gathering KIT pipeline** (N new cards + a program page) — the
-  agreed flagship next per Sheraj's deeds-first direction.
+- ~~**Devotional-gathering KIT pipeline**~~ — BUILT 2026-09-09 as the
+  **Gatherings** tab (rules 117-120), generalised beyond devotionals: a project
+  carries purpose → consultation → approved outcomes → who accepted what →
+  materials → a printed programme and card sheet → reflection. Uncommitted and
+  never used for a real gathering. The one piece deliberately NOT built is the
+  "generate N new cards from inside the kit" step: new cards are made in the
+  Pipeline tab, so the batch caps, the review and the metering all apply
+  unchanged (rule 40).
 - Abigail **Phase 4** (recovery rhythms) — read
   `docs/fable5-briefing-secretary.md` first.
 - Grounding-bar tightening for bookmarks; retrieval enrichment; free
@@ -142,6 +164,114 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-09/10 -- Claude Code (Opus 5) -- the record survives real request ordering; quotations verified exactly; the dashboard stops costing so much to open; Gatherings and Home
+
+Worked from a review of the repo at `20ea32c` that listed eight P0-class defects
+and a set of P1s. Every one was REPRODUCED against the code first -- several of
+them by running the new tests in a clean `git worktree` at `20ea32c`, where they
+fail -- then fixed, then pinned. Rules 100-116 in `AGENTS.md` say why each exists.
+
+**The correctness fixes (rules 100-110).** A write could reach another meeting:
+the endpoints wrote by global child id and compared `session_id` afterwards, so
+`PATCH /sessions/A/actions/{B's id}` returned 404 having already changed B. Now
+in the WHERE clause (`store._scope`), proved by snapshotting meeting B and
+requiring it byte-for-byte unchanged. A human edit made during a model call was
+overwritten by the model's wording with `human_edited` reset -- `_run_analysis`
+read the map, spent the network call, and saved its stale snapshot wholesale; it
+now REBASES the same patch onto the current map, so the correction stands and
+no paid call is repeated. `scope=outcomes` returned the automatic draft and
+called it the approved record; `approved_md` is now separate, written only by a
+person, bound to the revision they read, and rebuildable from corrected facts
+without paying for the prose again. The retention helper had NO CALLER at all --
+a seven-day session kept its transcript for ever; it is swept at startup and
+throttled on reads. Deleting a transcript kept the whole unreviewed map and every
+private observation while saying only the approved record remained; it is now an
+allowlist, and a file that will not unlink is reported instead of swallowed.
+Late work (turns, uploads, diarisation) can no longer put deleted words back.
+The credential endpoint -- the one that actually opens a microphone -- had no
+attestation gate. Start and End are idempotent, so reconnecting no longer resets
+the meeting clock and a second End no longer pays for the report twice.
+
+**Quotations (rule 111).** The bookmark grounding check was word overlap at 60%
+of content words. On the invented sentence "The group must not publish
+confidential meeting notes", deleting `not` returned VERIFIED, "100% of content
+words traceable" -- `not` was in the stop-word list, and so were `no` and `all`.
+Reordering passed too. `agents/quote_verify.py` now decides it: contiguous whole
+words in order, honest sentence boundaries, attribution checked, the CORPUS's
+characters printed rather than the model's retyping, and unverifiable reported as
+unverifiable rather than upgraded by an embedding score. A failure offers a real
+verifiable excerpt instead of only refusing. The method is stored per product so
+an old overlap pass is never read as today's check; no historical product was
+rewritten.
+
+**Cost of opening (rules 112-116).** Panels are lazily loaded: entry bundle
+692 kB -> 242 kB (186 -> 76 kB gzip), and the build's size warning is gone rather
+than configured away. The consultation poll refetched the whole session -- and
+two copies of the transcript -- every four seconds; it now takes deltas keyed on
+a per-turn revision (so a correction to the FIRST line is still caught), and an
+idle poll is ~220 bytes at 60 turns or 600. `GET /products/summary` opens the
+shelf in 78 KB where `GET /products` was 1.58 MB on the real database, with
+search and filters applied to the whole shelf, not the page. Recordings are
+saved as they are made instead of being held in a browser array until the end --
+the old comment claimed a crash cost "the last few seconds" when it cost the
+whole meeting. Microphones, recorders and pending `getUserMedia` no longer
+outlive the panel, and leaving a listening consultation now asks first.
+
+**Setup.** `python-multipart` was missing from `requirements.txt`; without it
+`import agents.api` fails outright, not just the two upload routes. The suite's
+last assertion required the owner's `.env` to exist, which is why a fresh
+checkout reported 509/510; it now proves the same mechanism with its own
+temporary dotenv, and the network tripwire also blocks DNS.
+
+**Gatherings and Home (rules 117-120).** The deeds-first flagship, built on the
+corrected records rather than beside them. A project lives in
+`private/consultation.db` (rule 73 applies to a gathering's title and date
+exactly as it does to a transcript) and OWNS nothing that already has an owner:
+its commitments ARE the linked consultations' action items, derived on every
+read like the finished-video shelf, so accepting one in the gathering view and
+accepting it in the Consultation tab are the same act on the same row. Only
+outcomes from a session whose record a human APPROVED can be carried forward,
+and a session that is not eligible is listed WITH the reason rather than just
+looking empty. The kit produces two real PDFs -- a programme page and the
+existing duplex card sheet -- and they are deliberately never one file, because
+a programme page inside the card sheet shifts every back face onto the wrong
+side. A reading points at a verified passage by id and flows onto another page
+rather than being truncated. Home replaced the Pipeline form as the default tab:
+one cheap read, four sections in ordinary language, every section degrading on
+its own, nothing started by opening the app.
+
+**Verified:** 1,806 offline checks across ten suites, all passing, including 730
+in `test_live_consultation.py` (+220 on 510) and a new `test_quote_verify.py`
+(50). Both consultation suites also pass in a clean worktree with **no `.env`,
+no keys and no private database**. Typecheck and production build clean; the
+entry bundle is 246 kB against 692 kB before, and Home is 6.8 kB of it. The
+programme PDF was rendered and **looked at**, not just byte-counted.
+
+**NOT done:** the optional post-closeout handoff of accepted commitments into
+Abigail's tasks (the Secretary APIs exist; the reviewed preview does not), and a
+browser test harness -- there is still no frontend test setup in this repo, so
+every frontend claim here rests on typecheck, build and reading the code.
+**Nothing here has been used in a real room, at a real gathering, or in a real
+browser.**
+
+**Served live, 2026-09-10.** The new tabs came up 404 in the browser -- Home,
+Gatherings and `/products/summary` all -- and the cause was NOT the code. The
+managed API had been running since 9 Sep 13:16 and starts without `--reload`, so
+the process in memory predated every new router; `/products/summary` fell
+through to `/products/{product_id}` and answered "Product not found", which is
+rule 116's registration-order symptom wearing a stale-process disguise. Restart
+(kill :8765, `Start-ScheduledTask "bahAI Secretary API"`) fixed all three.
+**Any session adding a router has to restart the backend before believing the
+browser** -- a 404 on a brand-new endpoint is the expected first observation, not
+evidence of a bug. What the restart then proved, which the offline suite
+structurally cannot because it builds fresh temp databases: every migration
+applied cleanly to the REAL 1.3 MB `private/consultation.db` (six new tables,
+nine new `sessions` columns, three on `turns`), `/products/summary` returned
+**78,340 bytes** for 164 items against the measured 1.58 MB before, Home read in
+1,416 bytes with every section healthy, and all three new routes refuse an
+unauthenticated call (401, rule 70). Still unwalked end to end: creating a real
+gathering, linking a consultation, and printing a kit.
 
 ### 2026-09-03 -- Claude Code (Opus 5) -- the consultation record becomes true, and human-owned
 

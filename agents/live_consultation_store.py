@@ -184,6 +184,103 @@ def init_db(db_path: Path | str | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_speech_session
                 ON speech_events(session_id, created_at);
+            -- What a person took OUT of the consultation map (rule 104).
+            --
+            -- The id and nothing else. An analysis pass that was already inside
+            -- a network call when the deletion happened still carries the item
+            -- in its snapshot, and rebasing its work would put it straight back
+            -- -- the person would delete it again, and it would return again.
+            -- The removed TEXT is deliberately not kept: somebody deleted it
+            -- because it should not be written down, and storing it here for
+            -- the convenience of an audit trail would defeat that entirely.
+            -- ── Gathering projects (rule 117) ───────────────────────────
+            --
+            -- Here, and not in a store of their own, for two reasons. A project
+            -- is made of the same private material a consultation is -- a real
+            -- gathering's purpose, its date, the people it is for -- so rule 73
+            -- applies to it unchanged, and this module is the only one allowed
+            -- to touch that at rest. And a project's commitments ARE the
+            -- consultation's action items; putting them in a second database
+            -- would mean a join across files, or a copy that can disagree with
+            -- the record.
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                purpose TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL DEFAULT 'preparing',
+                -- Local wall-clock, with the zone stored beside it rather than
+                -- normalised to UTC: this is "Saturday at seven at Nasrin's",
+                -- and a gathering that moves country is not a thing that happens.
+                gathering_at TEXT,
+                timezone TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                -- NULL and "deliberately none" are different answers, so the
+                -- flag exists rather than being inferred from an empty date.
+                reflection_at TEXT,
+                reflection_skipped INTEGER NOT NULL DEFAULT 0,
+                reflection_notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+            -- A project may hold more than one consultation, and a consultation
+            -- may inform more than one project.
+            CREATE TABLE IF NOT EXISTS project_sessions (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                linked_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (project_id, session_id)
+            );
+            -- What a person SELECTED to carry forward. Only approved outcomes
+            -- reach here, and only the ones somebody chose; a transcript and the
+            -- assistant's private observations never do (rule 118).
+            CREATE TABLE IF NOT EXISTS project_outcomes (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL,
+                ref_id TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+            -- Materials chosen for the kit. A product ID and nothing about a
+            -- person: `workforce.db` never learns who a gathering is for
+            -- (rule 64), and this is the side of that boundary the names are on.
+            CREATE TABLE IF NOT EXISTS project_items (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                product_id TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                added_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (project_id, product_id)
+            );
+            -- The programme: what happens, in what order.
+            CREATE TABLE IF NOT EXISTS project_program (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'note',
+                title TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                minutes INTEGER,
+                -- A verified passage, by the id of the row in `writings`. The
+                -- programme never stores scripture text of its own: it points at
+                -- something that came out of the verified corpus, so a passage
+                -- cannot be edited into something the library does not contain
+                -- (rule 84).
+                writing_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_program_project
+                ON project_program(project_id, position);
+            CREATE INDEX IF NOT EXISTS idx_outcomes_project
+                ON project_outcomes(project_id);
+            CREATE TABLE IF NOT EXISTS removed_map_items (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                list_name TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                removed_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (session_id, list_name, item_id)
+            );
             -- Who is in the room. Typed by a human at setup and only there: the
             -- live API cannot tell voices apart (see `speaker_key`), so a name
             -- here is a claim a person made, never one this system inferred.
@@ -274,6 +371,47 @@ def init_db(db_path: Path | str | None = None) -> None:
                                   "TEXT NOT NULL DEFAULT '[]'"),
             ("decision_human_edited", "ALTER TABLE decisions ADD COLUMN human_edited "
                                       "INTEGER NOT NULL DEFAULT 0"),
+            # 2026-09-09 (rules 100-103).
+            #
+            # The deletion generation is the tombstone asynchronous work checks
+            # itself against. Clearing the screen is not deletion: a diarisation
+            # started before a delete, an analysis pass already inside a network
+            # call, a retried chunk upload -- each of them lands AFTER the words
+            # were removed and puts some of them back. Every such path carries
+            # the generation it began with and is discarded when it no longer
+            # matches. It only ever increases.
+            ("deletion_generation", "ALTER TABLE sessions ADD COLUMN deletion_generation "
+                                    "INTEGER NOT NULL DEFAULT 0"),
+            # What cleanup could NOT finish, so it can be retried and SEEN. A
+            # database flag cannot prove a file left the disk; the unlink used
+            # to fail silently and the screen said the recording was gone.
+            ("cleanup_pending", "ALTER TABLE sessions ADD COLUMN cleanup_pending TEXT "
+                                "NOT NULL DEFAULT ''"),
+            # The approved record (rule 102). `report_md` is a DRAFT written when
+            # the meeting ends; these three are what a human actually reviewed
+            # and approved, and they are what an "approved record" export may
+            # return. Null on every pre-existing session, which is the truth
+            # about them -- nobody approved anything.
+            ("approved_md", "ALTER TABLE sessions ADD COLUMN approved_md TEXT"),
+            ("approved_at", "ALTER TABLE sessions ADD COLUMN approved_at TEXT"),
+            ("approved_revision", "ALTER TABLE sessions ADD COLUMN approved_revision "
+                                  "INTEGER NOT NULL DEFAULT 0"),
+            # Bumped by every human write that could change what the record says,
+            # so approval can be bound to the exact text that was on screen.
+            ("record_revision", "ALTER TABLE sessions ADD COLUMN record_revision "
+                                "INTEGER NOT NULL DEFAULT 0"),
+            # A per-turn revision, so an incremental poll can pick up a CHANGE
+            # to a line it already has (rule 115). A cursor on the greatest turn
+            # id cannot: a turn that finalises late, or one a person corrects,
+            # keeps its id and would never be sent again. Defaults to 0 on every
+            # existing row, so a first poll after the upgrade sends everything
+            # once and is correct from then on.
+            ("turn_rev", "ALTER TABLE turns ADD COLUMN turn_rev INTEGER NOT NULL DEFAULT 0"),
+            # The three prose fields the model wrote, kept so the deterministic
+            # half of the report can be rebuilt from corrected records without
+            # paying for the narrative again (rule 102).
+            ("report_narrative_json", "ALTER TABLE sessions ADD COLUMN "
+                                      "report_narrative_json TEXT NOT NULL DEFAULT '{}'"),
         ):
             try:
                 conn.execute(ddl)
@@ -367,7 +505,11 @@ def update_session(session_id: str, db_path: Path | str | None = None, **fields)
                # allowlist gotcha AGENTS.md records for state.update_product.
                "retention_policy", "participants_informed_at", "closeout_outcome",
                "closeout_note", "closeout_at", "reflection_at",
-               "transcript_deleted_at"}
+               "transcript_deleted_at",
+               # 2026-09-09: the approved record and its reusable prose
+               # (rules 102/103). Same allowlist gotcha as above.
+               "approved_md", "approved_at", "approved_revision",
+               "report_narrative_json", "cleanup_pending"}
     sets, values = [], []
     for key, value in fields.items():
         if key not in allowed or value is None:
@@ -386,11 +528,38 @@ def update_session(session_id: str, db_path: Path | str | None = None, **fields)
 
 
 def start_session(session_id: str, db_path: Path | str | None = None) -> Optional[dict]:
-    return update_session(session_id, status="live", started_at=_now(), db_path=db_path)
+    """Begin, or RESUME, listening.
+
+    `started_at` is stamped once and never again (rule 107). Reconnecting after
+    a dropped connection, a closed tab or a paused session is a normal thing to
+    do in a real meeting, and it used to reset the meeting's start time -- so the
+    elapsed clock went back to zero, the time check re-armed, and the report said
+    a ninety-minute consultation had lasted four minutes.
+    """
+    existing = get_session(session_id, db_path=db_path)
+    fields = {"status": "live"}
+    if not (existing or {}).get("started_at"):
+        fields["started_at"] = _now()
+    return update_session(session_id, db_path=db_path, **fields)
 
 
 def end_session(session_id: str, db_path: Path | str | None = None) -> Optional[dict]:
-    return update_session(session_id, status="ended", ended_at=_now(), db_path=db_path)
+    """End the meeting. `ended_at` is the FIRST end, kept (rule 107).
+
+    Pressing End twice must not move the end time: the retention deadline is
+    computed from it, so a second press would silently push a seven-day deletion
+    seven days further out.
+    """
+    existing = get_session(session_id, db_path=db_path)
+    fields = {"status": "ended"}
+    if not (existing or {}).get("ended_at"):
+        fields["ended_at"] = _now()
+    return update_session(session_id, db_path=db_path, **fields)
+
+
+def already_ended(session_id: str, db_path: Path | str | None = None) -> bool:
+    row = get_session(session_id, db_path=db_path)
+    return bool(row and row.get("status") == "ended" and row.get("ended_at"))
 
 
 def delete_session(session_id: str, db_path: Path | str | None = None) -> dict:
@@ -431,6 +600,18 @@ def delete_session(session_id: str, db_path: Path | str | None = None) -> dict:
 
 # ── Turns (rule 80) ─────────────────────────────────────────────────────────
 
+def _next_turn_rev(conn, session_id: str) -> int:
+    """The next per-session turn revision (rule 115).
+
+    Monotonic within a meeting and bumped by every write to a turn, so a poll
+    carrying "I have everything up to R" is told about a CORRECTED or
+    LATE-FINALISED line as well as a new one -- which a cursor on the greatest
+    turn id can never do, because those keep the id they already had.
+    """
+    row = conn.execute("SELECT COALESCE(MAX(turn_rev), 0) + 1 FROM turns WHERE session_id = ?",
+                       (session_id,)).fetchone()
+    return int(row[0])
+
 def upsert_turn(session_id: str, text: str, realtime_item_id: str | None = None,
                 role: str = "human", speaker_label: str | None = None,
                 is_final: bool = False, started_at: str | None = None,
@@ -458,10 +639,11 @@ def upsert_turn(session_id: str, text: str, realtime_item_id: str | None = None,
                 new_text = row["text"]
             conn.execute(
                 """UPDATE turns SET text = ?, is_final = ?, speaker_label = COALESCE(?, speaker_label),
-                          started_at = COALESCE(started_at, ?), ended_at = COALESCE(?, ended_at)
+                          started_at = COALESCE(started_at, ?), ended_at = COALESCE(?, ended_at),
+                          turn_rev = ?
                      WHERE id = ?""",
                 (new_text, 1 if (is_final or row["is_final"]) else 0, speaker_label,
-                 started_at, ended_at, row["id"]))
+                 started_at, ended_at, _next_turn_rev(conn, session_id), row["id"]))
             conn.commit()
             return dict(conn.execute("SELECT * FROM turns WHERE id = ?", (row["id"],)).fetchone())
 
@@ -469,10 +651,10 @@ def upsert_turn(session_id: str, text: str, realtime_item_id: str | None = None,
                            (session_id,)).fetchone()[0]
         cur = conn.execute(
             """INSERT INTO turns (session_id, realtime_item_id, sequence, role, speaker_label,
-                                  text, is_final, started_at, ended_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                                  text, is_final, started_at, ended_at, turn_rev)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (session_id, realtime_item_id, seq, role, speaker_label, text or "",
-             1 if is_final else 0, started_at, ended_at))
+             1 if is_final else 0, started_at, ended_at, _next_turn_rev(conn, session_id)))
         conn.commit()
         return dict(conn.execute("SELECT * FROM turns WHERE id = ?", (cur.lastrowid,)).fetchone())
 
@@ -511,6 +693,19 @@ def has_diarized(session_id: str, db_path: Path | str | None = None) -> bool:
     return row is not None
 
 
+def _scope(where: str, params: list, session_id: str | None) -> tuple[str, list]:
+    """Add the owning session to a WHERE clause (rule 100).
+
+    Every nested record in this store -- a turn, an action item, a decision, a
+    participant -- has a globally unique id AND a session it belongs to. Writing
+    by id alone and checking the session afterwards is not a check: the write has
+    happened. Passing the scope in here makes a wrong-session write match zero
+    rows, so the endpoint's 404 is the truth rather than an apology.
+    """
+    if session_id is None:
+        return where, list(params)
+    return f"({where}) AND session_id = ?", [*params, session_id]
+
 def list_turns(session_id: str, final_only: bool = False, limit: int | None = None,
                source: str = "live", db_path: Path | str | None = None) -> list[dict]:
     """`source` is 'live', 'diarized', or 'best' — the diarised transcript when one
@@ -525,11 +720,52 @@ def list_turns(session_id: str, final_only: bool = False, limit: int | None = No
         params.append(source)
     if final_only:
         sql += " AND is_final = 1"
+    if limit:
+        # The limit belongs in SQL. It used to read EVERY row of the meeting and
+        # slice the last N off in Python, so the reasoner's "recent window" --
+        # asked for on every analysis pass -- loaded the whole transcript to
+        # throw almost all of it away (rule 115).
+        sql += " ORDER BY sequence DESC LIMIT ?"
+        params.append(int(limit))
+        with _connect(db_path) as conn:
+            rows = _rows(conn.execute(sql, params))
+        return list(reversed(rows))
     sql += " ORDER BY sequence ASC"
     with _connect(db_path) as conn:
         rows = _rows(conn.execute(sql, params))
-    return rows[-limit:] if limit else rows
+    return rows
 
+
+def turns_since(session_id: str, since_rev: int = 0, source: str = "live",
+                limit: int = 200, db_path: Path | str | None = None) -> list[dict]:
+    """Turns created OR changed since `since_rev` (rule 115)."""
+    if source == "best":
+        source = "diarized" if has_diarized(session_id, db_path=db_path) else "live"
+    sql = "SELECT * FROM turns WHERE session_id = ? AND turn_rev > ?"
+    params: list = [session_id, int(since_rev)]
+    if source in ("live", "diarized"):
+        sql += " AND source = ?"
+        params.append(source)
+    sql += " ORDER BY turn_rev ASC LIMIT ?"
+    params.append(int(limit))
+    with _connect(db_path) as conn:
+        return _rows(conn.execute(sql, params))
+
+
+def turns_head(session_id: str, source: str = "live",
+               db_path: Path | str | None = None) -> dict:
+    """The cursor and the count, cheaply -- what an UNCHANGED poll answers with."""
+    if source == "best":
+        source = "diarized" if has_diarized(session_id, db_path=db_path) else "live"
+    sql = ("SELECT COALESCE(MAX(turn_rev), 0) AS rev, COUNT(*) AS n "
+           "FROM turns WHERE session_id = ?")
+    params: list = [session_id]
+    if source in ("live", "diarized"):
+        sql += " AND source = ?"
+        params.append(source)
+    with _connect(db_path) as conn:
+        row = conn.execute(sql, params).fetchone()
+    return {"rev": int(row["rev"] or 0), "count": int(row["n"] or 0), "source": source}
 
 def unanalyzed_turns(session_id: str, db_path: Path | str | None = None) -> list[dict]:
     """Finalised turns the brain has not read yet — what makes analysis
@@ -556,18 +792,28 @@ def mark_turns_analyzed(session_id: str, turn_ids: list[int],
 
 
 def label_turn(turn_id: int, speaker_label: str | None,
-               db_path: Path | str | None = None) -> Optional[dict]:
+               db_path: Path | str | None = None,
+               session_id: str | None = None) -> Optional[dict]:
     """A human typing in who was speaking. There is no automatic diarisation
-    here and none is inferred (rule 80)."""
+    here and none is inferred (rule 80).
+
+    `session_id` is the ownership scope (rule 100) and every caller passes it.
+    It is in the WHERE clause, not checked on the way out: the endpoint used to
+    write first and compare `session_id` on the returned row afterwards, which
+    reported 404 correctly and had ALREADY changed the other meeting's record.
+    """
     label = (speaker_label or "").strip() or None
+    where, params = _scope("id = ?", [turn_id], session_id)
     with _connect(db_path) as conn:
-        conn.execute("UPDATE turns SET speaker_label = ? WHERE id = ?", (label, turn_id))
+        conn.execute(f"UPDATE turns SET speaker_label = ?, turn_rev = ? WHERE {where}",
+                     [label, _next_turn_rev(conn, session_id or ""), *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM turns WHERE {where}", params).fetchone()
     return dict(row) if row else None
 
 
-def correct_turn(turn_id: int, text: str, db_path: Path | str | None = None) -> Optional[dict]:
+def correct_turn(turn_id: int, text: str, db_path: Path | str | None = None,
+                 session_id: str | None = None) -> Optional[dict]:
     """A human fixing what the transcription misheard.
 
     `corrected_at` is stamped so the record shows the line was edited. The
@@ -583,46 +829,157 @@ def correct_turn(turn_id: int, text: str, db_path: Path | str | None = None) -> 
     text = (text or "").strip()
     if not text:
         return None
+    where, params = _scope("id = ?", [turn_id], session_id)
     with _connect(db_path) as conn:
-        conn.execute("UPDATE turns SET text = ?, corrected_at = ? WHERE id = ?",
-                     (text, _now(), turn_id))
+        conn.execute(f"UPDATE turns SET text = ?, corrected_at = ?, turn_rev = ? WHERE {where}",
+                     [text, _now(), _next_turn_rev(conn, session_id or ""), *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM turns WHERE id = ?", (turn_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM turns WHERE {where}", params).fetchone()
     return dict(row) if row else None
 
 
-def delete_transcript(session_id: str, db_path: Path | str | None = None) -> dict:
-    """Delete the words, keep the approved record (rule 94).
+# What survives "delete the transcript, keep the approved outcomes" (rule 103).
+#
+# An ALLOWLIST, not a blocklist, because the screen makes a promise about what
+# is left and the only honest way to keep it is to name what is kept. The
+# previous version deleted the turns and the audio and kept EVERYTHING else --
+# the whole consultation map including items no human ever looked at, and every
+# private model observation. Those are made of the same words the transcript
+# was, so "only the approved record remains" was not true.
+TRANSCRIPT_DELETE_KEEPS = (
+    "the approved record and the draft report",
+    "confirmed and candidate decisions",
+    "commitments, their owners and acceptance",
+    "verified passages from the Writings",
+    "participants' names",
+    "map items a person reviewed or edited by hand",
+)
+TRANSCRIPT_DELETE_REMOVES = (
+    "every transcript turn, live and speaker-separated",
+    "the recording and any uploaded audio",
+    "the assistant's private observations and speech briefs",
+    "map items no person ever reviewed",
+    "the rolling summary written from the words",
+)
 
-    What goes: every turn, and any audio recording. What stays: the report, the
-    decisions, the action items, the verified passages, the consultation map —
-    the things the meeting was FOR, and the things a person approved.
+
+def delete_transcript(session_id: str, db_path: Path | str | None = None) -> dict:
+    """Delete the words, keep the approved record (rule 94/103).
 
     Irreversible, and the caller must have said so on screen before arriving
     here. There is no soft delete, for the same reason `delete_session` has
-    none: "delete the transcript" has to mean it."""
-    removed_audio = 0
+    none: "delete the transcript" has to mean it.
+
+    Two things this does that the first version did not:
+
+    * It removes the model's working material as well as the words -- the
+      observations, the speech briefs, the rolling summary and every map item
+      no human ever reviewed. All of it is made OF the transcript, so leaving it
+      while saying only the approved record remained was a false promise.
+    * It reports what it could not delete instead of swallowing it. A file that
+      would not unlink used to disappear from the count and the screen said the
+      recording was gone. `cleanup_pending` keeps the failure -- the path, never
+      the content -- so it can be retried and seen.
+    """
+    from agents.live_consultation import ITEM_LISTS
+
+    removed_audio, failed = 0, []
     folder = AUDIO_DIR / session_id
     if folder.exists():
-        for f in folder.iterdir():
+        for f in sorted(folder.iterdir()):
             try:
                 f.unlink()
                 removed_audio += 1
-            except OSError:
-                pass
+            except OSError as e:
+                failed.append(f"{f.name}: {type(e).__name__}")
+        try:
+            folder.rmdir()
+        except OSError:
+            # An empty directory left behind holds no words; a directory that
+            # is NOT empty is already named in `failed` above.
+            pass
+
+    with _connect(db_path) as conn:
+        turns = conn.execute("SELECT COUNT(*) FROM turns WHERE session_id = ?",
+                             (session_id,)).fetchone()[0]
+        observations = conn.execute("SELECT COUNT(*) FROM observations WHERE session_id = ?",
+                                    (session_id,)).fetchone()[0]
+        conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM observations WHERE session_id = ?", (session_id,))
+        # `speech_events` rows stay untouched: they carry a kind, a decision and
+        # the governor's own reason for it ("cooldown", "human holds the
+        # floor") -- the floor record rule 89 needs, and none of the meeting's
+        # words. The observations deleted above are where the assistant's
+        # briefs about what was said actually lived.
+        conn.commit()
+
+    # The map, filtered to what a person actually put their name to.
+    map_kept, map_removed = 0, 0
+    state = get_state(session_id, db_path=db_path)
+    if state:
+        for name in ITEM_LISTS:
+            items = state.get(name) or []
+            keep = [i for i in items if isinstance(i, dict)
+                    and (i.get("human_reviewed") or i.get("human_edited"))]
+            map_removed += len(items) - len(keep)
+            map_kept += len(keep)
+            state[name] = keep
+        # Written FROM the transcript, by the model, and never reviewed.
+        state["summary"] = ""
+        save_state(session_id, state, db_path=db_path)
+
+    with _connect(db_path) as conn:
+        conn.execute("""UPDATE sessions
+                           SET transcript_deleted_at = ?,
+                               audio_status = 'none', audio_note = '',
+                               cleanup_pending = ?,
+                               deletion_generation = deletion_generation + 1
+                         WHERE id = ?""",
+                     (_now(), "; ".join(failed)[:500], session_id))
+        conn.commit()
+
+    return {"deleted": True, "turns": turns, "audio_files": removed_audio,
+            "observations": observations,
+            "map_items_removed": map_removed, "map_items_kept": map_kept,
+            "cleanup_failed": failed,
+            "kept": list(TRANSCRIPT_DELETE_KEEPS),
+            "removed": list(TRANSCRIPT_DELETE_REMOVES)}
+
+
+def deletion_generation(session_id: str, db_path: Path | str | None = None) -> int:
+    """The tombstone counter asynchronous work checks itself against (rule 100).
+
+    Anything that started before a deletion and finishes after it -- a
+    diarisation, an analysis pass inside a network call, a retried upload --
+    reads this at the start and again before it writes. A change means the words
+    it is carrying were deleted while it was working, and it must be discarded.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT deletion_generation FROM sessions WHERE id = ?",
+                           (session_id,)).fetchone()
+    return int(row["deletion_generation"]) if row else -1
+
+
+def retry_cleanup(session_id: str, db_path: Path | str | None = None) -> dict:
+    """Try again to remove files a deletion could not. Safe to call repeatedly."""
+    still, removed = [], 0
+    folder = AUDIO_DIR / session_id
+    if folder.exists():
+        for f in sorted(folder.iterdir()):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError as e:
+                still.append(f"{f.name}: {type(e).__name__}")
         try:
             folder.rmdir()
         except OSError:
             pass
     with _connect(db_path) as conn:
-        turns = conn.execute("SELECT COUNT(*) FROM turns WHERE session_id = ?",
-                             (session_id,)).fetchone()[0]
-        conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
-        conn.execute("""UPDATE sessions SET transcript_deleted_at = ?,
-                                            audio_status = 'none', audio_note = ''
-                         WHERE id = ?""", (_now(), session_id))
+        conn.execute("UPDATE sessions SET cleanup_pending = ? WHERE id = ?",
+                     ("; ".join(still)[:500], session_id))
         conn.commit()
-    return {"deleted": True, "turns": turns, "audio_files": removed_audio}
+    return {"removed": removed, "still_pending": still}
 
 
 def transcript_exists(session_id: str, db_path: Path | str | None = None) -> bool:
@@ -695,35 +1052,37 @@ def list_participants(session_id: str, db_path: Path | str | None = None) -> lis
             "SELECT * FROM participants WHERE session_id = ? ORDER BY id", (session_id,)))
 
 
-def remove_participant(participant_id: str, db_path: Path | str | None = None) -> bool:
+def remove_participant(participant_id: str, db_path: Path | str | None = None,
+                       session_id: str | None = None) -> bool:
     with _connect(db_path) as conn:
-        cur = conn.execute("DELETE FROM participants WHERE id = ?", (participant_id,))
+        where, params = _scope("id = ?", [participant_id], session_id)
+        cur = conn.execute(f"DELETE FROM participants WHERE {where}", params)
         conn.commit()
     return cur.rowcount > 0
 
 
 def set_participant_speaker(participant_id: str, speaker_key: str | None,
-                            db_path: Path | str | None = None) -> Optional[dict]:
+                            db_path: Path | str | None = None,
+                            session_id: str | None = None) -> Optional[dict]:
     """Map a named person onto a diarised voice, or clear the mapping.
 
     One voice belongs to one person: assigning a key that another participant in
     the same session already holds takes it off them, rather than quietly
     labelling two people as the same voice."""
     key = (speaker_key or "").strip()[:16] or None
+    where, params = _scope("id = ?", [participant_id], session_id)
     with _connect(db_path) as conn:
-        row = conn.execute("SELECT * FROM participants WHERE id = ?",
-                           (participant_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM participants WHERE {where}", params).fetchone()
         if not row:
             return None
         if key:
             conn.execute("""UPDATE participants SET speaker_key = NULL
                              WHERE session_id = ? AND speaker_key = ? AND id != ?""",
                          (row["session_id"], key, participant_id))
-        conn.execute("UPDATE participants SET speaker_key = ? WHERE id = ?",
-                     (key, participant_id))
+        conn.execute(f"UPDATE participants SET speaker_key = ? WHERE {where}",
+                     [key, *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM participants WHERE id = ?",
-                           (participant_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM participants WHERE {where}", params).fetchone()
     return dict(row) if row else None
 
 
@@ -745,6 +1104,76 @@ def apply_speaker_names(session_id: str, db_path: Path | str | None = None) -> i
             changed += cur.rowcount
         conn.commit()
     return changed
+
+
+def record_removed_map_item(session_id: str, list_name: str, item_id: str,
+                            db_path: Path | str | None = None) -> None:
+    """Remember that a human removed this item, by id alone (rule 104)."""
+    if not item_id:
+        return
+    with _connect(db_path) as conn:
+        conn.execute("""INSERT OR IGNORE INTO removed_map_items
+                        (session_id, list_name, item_id) VALUES (?,?,?)""",
+                     (session_id, list_name, item_id))
+        conn.commit()
+
+
+def removed_map_items(session_id: str,
+                      db_path: Path | str | None = None) -> dict[str, set]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT list_name, item_id FROM removed_map_items WHERE session_id = ?",
+            (session_id,)).fetchall()
+    out: dict[str, set] = {}
+    for row in rows:
+        out.setdefault(row["list_name"], set()).add(row["item_id"])
+    return out
+
+
+def strip_removed(session_id: str, state: dict,
+                  db_path: Path | str | None = None) -> tuple[dict, int]:
+    """Take back out anything a person already deleted. Returns (state, count)."""
+    gone = removed_map_items(session_id, db_path=db_path)
+    if not gone:
+        return state, 0
+    dropped = 0
+    for name, ids in gone.items():
+        items = state.get(name)
+        if not isinstance(items, list):
+            continue
+        keep = [i for i in items
+                if not (isinstance(i, dict) and i.get("id") in ids)]
+        dropped += len(items) - len(keep)
+        state[name] = keep
+    return state, dropped
+
+
+def bump_record_revision(session_id: str, db_path: Path | str | None = None) -> int:
+    """One counter for "the record changed" (rule 102).
+
+    Approval is bound to the revision that was actually ON SCREEN when a person
+    read it. Without this there is no way to tell an approval of the text
+    somebody reviewed from an approval of text that changed underneath them
+    between the preview and the button.
+
+    It counts human-visible changes to the RECORD -- decisions, commitments,
+    map items, corrected lines, the closeout -- which is why it is separate from
+    `state_revision` (every analysis pass bumps that one).
+    """
+    with _connect(db_path) as conn:
+        conn.execute("""UPDATE sessions SET record_revision = record_revision + 1
+                         WHERE id = ?""", (session_id,))
+        conn.commit()
+        row = conn.execute("SELECT record_revision FROM sessions WHERE id = ?",
+                           (session_id,)).fetchone()
+    return int(row["record_revision"]) if row else 0
+
+
+def record_revision(session_id: str, db_path: Path | str | None = None) -> int:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT record_revision FROM sessions WHERE id = ?",
+                           (session_id,)).fetchone()
+    return int(row["record_revision"]) if row else 0
 
 
 # ── Consultation state ──────────────────────────────────────────────────────
@@ -947,7 +1376,7 @@ def _decision_out(row: dict) -> dict:
 
 
 def update_decision(decision_id: str, db_path: Path | str | None = None,
-                    **fields) -> Optional[dict]:
+                    session_id: str | None = None, **fields) -> Optional[dict]:
     """A human editing a decision candidate. Sets `human_edited`, which is what
     stops the next analysis pass from putting its own words back (rule 95).
 
@@ -969,11 +1398,12 @@ def update_decision(decision_id: str, db_path: Path | str | None = None,
     if not sets:
         return None
     sets.append("human_edited = 1")
-    values.append(decision_id)
+    where, params = _scope("id = ?", [decision_id], session_id)
     with _connect(db_path) as conn:
-        conn.execute(f"UPDATE decisions SET {', '.join(sets)} WHERE id = ?", values)
+        conn.execute(f"UPDATE decisions SET {', '.join(sets)} WHERE {where}",
+                     [*values, *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM decisions WHERE {where}", params).fetchone()
     return _decision_out(dict(row)) if row else None
 
 
@@ -987,20 +1417,22 @@ def list_decisions(session_id: str, db_path: Path | str | None = None) -> list[d
 
 def set_decision_status(decision_id: str, status: str,
                         retained_concerns: list[str] | None = None,
-                        db_path: Path | str | None = None) -> Optional[dict]:
+                        db_path: Path | str | None = None,
+                        session_id: str | None = None) -> Optional[dict]:
     """The ONE path to a confirmed decision, and only a person reaches it
     (rule 81). `retained_concerns` is how a decision can be confirmed while
     real dissent stays attached to it rather than being tidied away."""
     confirmed_at = _now() if status == "confirmed" else None
+    where, params = _scope("id = ?", [decision_id], session_id)
     with _connect(db_path) as conn:
         if retained_concerns is not None:
             conn.execute(
-                "UPDATE decisions SET retained_concerns_json = ? WHERE id = ?",
-                (json.dumps([str(c) for c in retained_concerns]), decision_id))
-        conn.execute("UPDATE decisions SET status = ?, confirmed_at = ? WHERE id = ?",
-                     (status, confirmed_at, decision_id))
+                f"UPDATE decisions SET retained_concerns_json = ? WHERE {where}",
+                [json.dumps([str(c) for c in retained_concerns]), *params])
+        conn.execute(f"UPDATE decisions SET status = ?, confirmed_at = ? WHERE {where}",
+                     [status, confirmed_at, *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM decisions WHERE {where}", params).fetchone()
     return _decision_out(dict(row)) if row else None
 
 
@@ -1097,7 +1529,7 @@ def create_action_item(session_id: str, action: str, owner: str | None = None,
 
 
 def update_action_item(action_id: str, db_path: Path | str | None = None,
-                       **fields) -> Optional[dict]:
+                       session_id: str | None = None, **fields) -> Optional[dict]:
     """A human correcting or committing to an action.
 
     Every field here is one only a person may set. `owner_accepted` is the
@@ -1106,6 +1538,28 @@ def update_action_item(action_id: str, db_path: Path | str | None = None,
     ("asked, and did not")."""
     allowed = {"action", "owner", "due", "status", "success_criteria",
                "support_needed", "blocker", "progress_note", "accepted_by"}
+
+    # Acceptance belongs to a PERSON and a COMMITMENT, so it cannot outlive
+    # either of them (rule 101). Handing the task to someone else, or changing
+    # what the task actually is, silently kept the previous person's "yes" --
+    # which is the worst kind of wrong record here, because it reads as though
+    # somebody agreed to something they were never asked about. Cleared unless
+    # this very call is also recording a new answer.
+    reset_acceptance = False
+    if "owner_accepted" not in fields:
+        where0, params0 = _scope("id = ?", [action_id], session_id)
+        with _connect(db_path) as conn:
+            before = conn.execute(f"SELECT * FROM action_items WHERE {where0}",
+                                  params0).fetchone()
+        if before:
+            def _same(key: str) -> bool:
+                new_value = fields.get(key)
+                if new_value is None:
+                    return True
+                return str(new_value).strip() == str(before[key] or "").strip()
+            if not (_same("owner") and _same("action")):
+                reset_acceptance = before["owner_accepted"] is not None
+
     sets, values = [], []
     for key, value in fields.items():
         if key not in allowed or value is None:
@@ -1121,20 +1575,33 @@ def update_action_item(action_id: str, db_path: Path | str | None = None,
         values.append(None if accepted is None else (1 if accepted else 0))
         sets.append("accepted_at = ?")
         values.append(_now() if accepted else None)
+    if reset_acceptance:
+        sets += ["owner_accepted = ?", "accepted_at = ?"]
+        values += [None, None]
+        if not any(x.startswith("accepted_by") for x in sets):
+            sets.append("accepted_by = ?")
+            values.append("")
+        if not any(x.startswith("status") for x in sets):
+            from agents.live_consultation import DEFAULT_ACTION_STATUS
+            sets.append("status = ?")
+            values.append(DEFAULT_ACTION_STATUS)
     if not sets:
         return None
     sets.append("human_edited = 1")
-    values.append(action_id)
+    where, params = _scope("id = ?", [action_id], session_id)
     with _connect(db_path) as conn:
-        conn.execute(f"UPDATE action_items SET {', '.join(sets)} WHERE id = ?", values)
+        conn.execute(f"UPDATE action_items SET {', '.join(sets)} WHERE {where}",
+                     [*values, *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM action_items WHERE id = ?", (action_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM action_items WHERE {where}", params).fetchone()
     return _action_out(dict(row)) if row else None
 
 
-def delete_action_item(action_id: str, db_path: Path | str | None = None) -> bool:
+def delete_action_item(action_id: str, db_path: Path | str | None = None,
+                       session_id: str | None = None) -> bool:
+    where, params = _scope("id = ?", [action_id], session_id)
     with _connect(db_path) as conn:
-        cur = conn.execute("DELETE FROM action_items WHERE id = ?", (action_id,))
+        cur = conn.execute(f"DELETE FROM action_items WHERE {where}", params)
         conn.commit()
     return cur.rowcount > 0
 
@@ -1167,11 +1634,14 @@ def list_action_items(session_id: str, db_path: Path | str | None = None) -> lis
 
 
 def set_action_status(action_id: str, status: str,
-                      db_path: Path | str | None = None) -> Optional[dict]:
+                      db_path: Path | str | None = None,
+                      session_id: str | None = None) -> Optional[dict]:
+    where, params = _scope("id = ?", [action_id], session_id)
     with _connect(db_path) as conn:
-        conn.execute("UPDATE action_items SET status = ? WHERE id = ?", (status, action_id))
+        conn.execute(f"UPDATE action_items SET status = ? WHERE {where}",
+                     [status, *params])
         conn.commit()
-        row = conn.execute("SELECT * FROM action_items WHERE id = ?", (action_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM action_items WHERE {where}", params).fetchone()
     return _action_out(dict(row)) if row else None
 
 
@@ -1238,3 +1708,297 @@ def last_allowed_speech(session_id: str, kinds: tuple[str, ...] = ("intervention
                  WHERE session_id = ? AND allowed = 1 AND kind IN ({marks})
                  ORDER BY id DESC LIMIT 1""", [session_id, *kinds]).fetchone()
     return dict(row) if row else None
+
+
+# ── Gathering projects (rule 117) ───────────────────────────────────────────
+#
+# A project is the thread that ties a piece of service together. It lives here
+# because it is made of the same private material a consultation is (rule 73),
+# and because its commitments ARE the consultation's action items rather than a
+# second copy of them.
+
+def create_project(title: str, purpose: str = "", gathering_at: str | None = None,
+                   timezone: str = "", db_path: Path | str | None = None) -> Optional[dict]:
+    title = (title or "").strip()[:200]
+    if not title:
+        return None
+    pid = uuid.uuid4().hex[:12]
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO projects (id, title, purpose, gathering_at, timezone)
+               VALUES (?,?,?,?,?)""",
+            (pid, title, (purpose or "").strip()[:2000], gathering_at or None,
+             (timezone or "").strip()[:64]))
+        conn.commit()
+    return get_project(pid, db_path=db_path)
+
+
+def get_project(project_id: str, db_path: Path | str | None = None) -> Optional[dict]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_projects(db_path: Path | str | None = None, limit: int = 100) -> list[dict]:
+    with _connect(db_path) as conn:
+        return _rows(conn.execute(
+            """SELECT * FROM projects
+                ORDER BY (gathering_at IS NULL), gathering_at DESC, created_at DESC
+                LIMIT ?""", (int(limit),)))
+
+
+def update_project(project_id: str, db_path: Path | str | None = None,
+                   **fields) -> Optional[dict]:
+    """Same allowlist discipline as `update_session` -- a new column must be
+    added HERE as well as to the schema, or it silently never saves."""
+    allowed = {"title", "purpose", "stage", "gathering_at", "timezone", "notes",
+               "reflection_at", "reflection_skipped", "reflection_notes"}
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in allowed or value is None:
+            continue
+        if key == "stage":
+            from agents.gathering import normalize_stage
+            value = normalize_stage(str(value))
+        if key == "reflection_skipped":
+            value = 1 if value else 0
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return get_project(project_id, db_path=db_path)
+    sets.append("updated_at = ?")
+    values.append(_now())
+    values.append(project_id)
+    with _connect(db_path) as conn:
+        conn.execute(f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", values)
+        conn.commit()
+    return get_project(project_id, db_path=db_path)
+
+
+def delete_project(project_id: str, db_path: Path | str | None = None) -> bool:
+    """Delete the project. The consultations it linked are NOT deleted.
+
+    A meeting is a thing that happened; a project is a way of looking at it.
+    Removing the second must never destroy the first -- somebody tidying up a
+    plan would otherwise lose the record of the conversation that produced it.
+    """
+    with _connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def link_project_session(project_id: str, session_id: str,
+                         db_path: Path | str | None = None) -> bool:
+    with _connect(db_path) as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
+            return False
+        if not conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone():
+            return False
+        conn.execute("""INSERT OR IGNORE INTO project_sessions (project_id, session_id)
+                        VALUES (?,?)""", (project_id, session_id))
+        conn.commit()
+    return True
+
+
+def unlink_project_session(project_id: str, session_id: str,
+                           db_path: Path | str | None = None) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM project_sessions WHERE project_id = ? AND session_id = ?",
+            (project_id, session_id))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def project_session_ids(project_id: str, db_path: Path | str | None = None) -> list[str]:
+    with _connect(db_path) as conn:
+        return [r["session_id"] for r in conn.execute(
+            "SELECT session_id FROM project_sessions WHERE project_id = ? ORDER BY linked_at",
+            (project_id,)).fetchall()]
+
+
+def add_project_outcome(project_id: str, kind: str, text: str, session_id: str = "",
+                        ref_id: str = "", note: str = "",
+                        db_path: Path | str | None = None) -> Optional[dict]:
+    """Carry one APPROVED, SELECTED outcome forward (rule 118).
+
+    Never called with a transcript line or an observation: the endpoint only
+    offers confirmed decisions and open items from a session whose record a
+    person approved.
+    """
+    from agents.gathering import normalize_outcome_kind
+    kind = normalize_outcome_kind(kind) or ""
+    text = (text or "").strip()[:2000]
+    if not kind or not text:
+        return None
+    oid = uuid.uuid4().hex[:12]
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO project_outcomes
+                   (id, project_id, session_id, kind, ref_id, text, note)
+               VALUES (?,?,?,?,?,?,?)""",
+            (oid, project_id, session_id or "", kind, ref_id or "", text,
+             (note or "").strip()[:1000]))
+        conn.commit()
+        row = conn.execute("SELECT * FROM project_outcomes WHERE id = ?", (oid,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_project_outcomes(project_id: str, db_path: Path | str | None = None) -> list[dict]:
+    with _connect(db_path) as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM project_outcomes WHERE project_id = ? ORDER BY created_at",
+            (project_id,)))
+
+
+def remove_project_outcome(project_id: str, outcome_id: str,
+                           db_path: Path | str | None = None) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM project_outcomes WHERE id = ? AND project_id = ?",
+            (outcome_id, project_id))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def add_project_item(project_id: str, product_id: str,
+                     db_path: Path | str | None = None) -> bool:
+    product_id = (product_id or "").strip()
+    if not product_id:
+        return False
+    with _connect(db_path) as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
+            return False
+        nxt = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM project_items WHERE project_id = ?",
+            (project_id,)).fetchone()[0]
+        conn.execute("""INSERT OR IGNORE INTO project_items (project_id, product_id, position)
+                        VALUES (?,?,?)""", (project_id, product_id, nxt))
+        conn.commit()
+    return True
+
+
+def remove_project_item(project_id: str, product_id: str,
+                        db_path: Path | str | None = None) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM project_items WHERE project_id = ? AND product_id = ?",
+            (project_id, product_id))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def project_item_ids(project_id: str, db_path: Path | str | None = None) -> list[str]:
+    with _connect(db_path) as conn:
+        return [r["product_id"] for r in conn.execute(
+            "SELECT product_id FROM project_items WHERE project_id = ? ORDER BY position",
+            (project_id,)).fetchall()]
+
+
+def add_program_item(project_id: str, kind: str = "note", title: str = "", body: str = "",
+                     minutes: int | None = None, writing_id: str = "",
+                     db_path: Path | str | None = None) -> Optional[dict]:
+    from agents.gathering import (MAX_BODY, MAX_PROGRAM_ITEMS, MAX_TITLE,
+                                  normalize_program_kind)
+    with _connect(db_path) as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
+            return None
+        count = conn.execute(
+            "SELECT COUNT(*) FROM project_program WHERE project_id = ?",
+            (project_id,)).fetchone()[0]
+        if count >= MAX_PROGRAM_ITEMS:
+            return None
+        nxt = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM project_program WHERE project_id = ?",
+            (project_id,)).fetchone()[0]
+        iid = uuid.uuid4().hex[:12]
+        conn.execute(
+            """INSERT INTO project_program
+                   (id, project_id, position, kind, title, body, minutes, writing_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (iid, project_id, nxt, normalize_program_kind(kind),
+             (title or "").strip()[:MAX_TITLE], (body or "").strip()[:MAX_BODY],
+             int(minutes) if minutes else None, (writing_id or "").strip()[:64]))
+        conn.commit()
+        row = conn.execute("SELECT * FROM project_program WHERE id = ?", (iid,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_program_item(project_id: str, item_id: str, db_path: Path | str | None = None,
+                        **fields) -> Optional[dict]:
+    """Scoped by project as well as by id, exactly like every other nested write
+    in this file (rule 100)."""
+    from agents.gathering import MAX_BODY, MAX_TITLE, normalize_program_kind
+    allowed = {"kind", "title", "body", "minutes", "position", "writing_id"}
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in allowed or value is None:
+            continue
+        if key == "kind":
+            value = normalize_program_kind(str(value))
+        if key == "title":
+            value = str(value)[:MAX_TITLE]
+        if key == "body":
+            value = str(value)[:MAX_BODY]
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return None
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE project_program SET {', '.join(sets)} WHERE id = ? AND project_id = ?",
+            [*values, item_id, project_id])
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM project_program WHERE id = ? AND project_id = ?",
+            (item_id, project_id)).fetchone()
+    return dict(row) if row else None
+
+
+def remove_program_item(project_id: str, item_id: str,
+                        db_path: Path | str | None = None) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM project_program WHERE id = ? AND project_id = ?",
+            (item_id, project_id))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def reorder_program(project_id: str, item_ids: list[str],
+                    db_path: Path | str | None = None) -> list[dict]:
+    """Set the running order. Ids not belonging to this project are ignored
+    rather than moved -- the ownership scope again (rule 100)."""
+    with _connect(db_path) as conn:
+        mine = {r["id"] for r in conn.execute(
+            "SELECT id FROM project_program WHERE project_id = ?", (project_id,)).fetchall()}
+        for position, item_id in enumerate(i for i in item_ids if i in mine):
+            conn.execute(
+                "UPDATE project_program SET position = ? WHERE id = ? AND project_id = ?",
+                (position + 1, item_id, project_id))
+        conn.commit()
+    return list_program(project_id, db_path=db_path)
+
+
+def list_program(project_id: str, db_path: Path | str | None = None) -> list[dict]:
+    with _connect(db_path) as conn:
+        return _rows(conn.execute(
+            "SELECT * FROM project_program WHERE project_id = ? ORDER BY position, created_at",
+            (project_id,)))
+
+
+def project_commitments(project_id: str, db_path: Path | str | None = None) -> list[dict]:
+    """A project's commitments: the action items of the consultations it links.
+
+    Derived, never copied (the same discipline as the finished-video shelf,
+    rule 58). There is exactly one row per commitment and it lives with the
+    meeting where somebody offered to do it, so accepting it in the project view
+    and accepting it in the session view are the same act on the same record.
+    """
+    out = []
+    for sid in project_session_ids(project_id, db_path=db_path):
+        for item in list_action_items(sid, db_path=db_path):
+            out.append({**item, "session_id": sid})
+    return out

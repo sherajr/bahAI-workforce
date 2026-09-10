@@ -27,6 +27,10 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 72 | Indirect prompt injection |
 | 73–93 | Live Consultation (the Consultation tab) |
 | 94–99 | Live Consultation: the record becomes true and human-owned |
+| 100–110 | Live Consultation: the record survives real request ordering |
+| 111 | Exact quotation verification |
+| 112–116 | What the dashboard costs to open, and to leave |
+| 117–120 | A gathering, and a place to start |
 
 ## Working norms
 
@@ -67,7 +71,9 @@ python scripts/test_video_pipeline.py      # Video pipeline: 288 checks
 python scripts/test_nuclei.py              # Material World (nuclei): 281 checks
 python scripts/test_api_auth.py            # The API's owner gate: 66 checks
 python scripts/test_secretary_injection.py # Prompt-injection hold: 50 checks
-python scripts/test_live_consultation.py   # Live Consultation: 510 checks
+python scripts/test_live_consultation.py   # Live Consultation, the shelf,
+                                           # gatherings and Home: 730 checks
+python scripts/test_quote_verify.py        # Exact quotation verification: 50 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —
@@ -141,8 +147,14 @@ polled by the dashboard):
 - **Video** (`video_pipeline.py`) — a scene or story becomes many simple 3–4s
   shots that assemble into one video. See rules 30–34, 58.
 
-A fourth thing in the dashboard is not a product pipeline at all: **Live
-Consultation** (rules 73–86) is a real meeting between people, heard through
+Three things in the dashboard are not product pipelines at all. **Gatherings**
+(rules 117–120) is the thread that ties a piece of community service together
+— purpose, consultation, decisions, who accepted what, the printed kit, and
+what was learned — and **Home** is the front page built from it. Neither owns a
+record of its own: a gathering's commitments ARE the consultation's action
+items, read through the project rather than copied into it.
+
+The third is **Live Consultation** (rules 73–86): a real meeting between people, heard through
 the browser on the OpenAI Realtime API — transcribed, structured into a
 consultation map, and very occasionally spoken to. It shares nothing with
 `agents/consultation.py`, the product pipelines' team consultation, but the
@@ -1798,6 +1810,365 @@ imagined. Verify with `scripts/test_live_consultation.py`.
       and the run asserts at the end that `_OUTBOUND` is empty and the tripwire
       is still armed.
 
+## Rules 100–110 — the record survives real request ordering
+
+Added 2026-09-09, after a review reproduced each of these against the code as it
+then stood. Every one of them is a case where the application was already doing
+the right thing in the ordinary sequence and the wrong thing as soon as two
+things happened at once, or in the wrong order, or a moment too late. Verify
+with `scripts/test_live_consultation.py`.
+
+100. **A write lands in the meeting it names, and only while that meeting still
+     has words.** Two halves, both load-bearing.
+     - **Ownership is in the WHERE clause, never a check afterwards.** Turns,
+       action items, decisions and participants all have globally unique ids, so
+       `PATCH /sessions/A/actions/{an id belonging to B}` reached B's row. The
+       endpoints did compare `session_id` on the way out and did return 404 --
+       having already written. `store._scope()` puts the owning session into the
+       statement itself, so a wrong-session write matches zero rows and the 404
+       is the truth rather than an apology. Proved the strong way: the suite
+       snapshots meeting B, fires every cross-session mutation at it, and
+       requires B byte-for-byte unchanged, revisions included.
+     - **Deletion is a tombstone, not a screen wipe.** A turn still in flight, a
+       retried chunk upload and a diarisation started minutes earlier all land
+       AFTER a transcript is deleted and put part of it back; a late turn was
+       accepted and displayed while the session still reported
+       `transcript_deleted=true`. `sessions.deletion_generation` only ever
+       increases; `_refuse_if_deleted` closes the synchronous doors, and anything
+       that spans a network call re-reads the generation before it writes and
+       discards its work if it moved. A poll holding a pre-deletion cursor is
+       told to resync rather than answered "nothing changed".
+101. **Acceptance belongs to a PERSON and a COMMITMENT, and cannot outlive
+     either.** `owner_accepted` is tri-state on purpose (rule 95) and the states
+     have to stay coherent with `status`: revoking left `owner_accepted=false`
+     beside `status='accepted'`, so the record said both at once — the endpoint
+     passed `status=None` and `update_action_item` skips None. Reassigning the
+     owner, or materially changing what the commitment is, now clears the
+     acceptance: keeping it would record that somebody agreed to something they
+     were never asked about, which is the worst possible wrong entry here. Work
+     that has visibly moved on (`in_progress`, `completed`) is left alone —
+     withdrawing from something is not undoing it.
+102. **`report_md` is a DRAFT; `approved_md` is the record, and only a person
+     writes it.** `scope=outcomes` returned the draft written automatically at
+     End and called it "the APPROVED record": available before any closeout, and
+     unchanged when an owner was corrected, so a record could be sent to somebody
+     containing a fact the group had already fixed. Now:
+     - `sessions.record_revision` counts human-visible changes to the record, and
+       approval is BOUND to the revision that was on screen. A change between the
+       preview and the button is a 409, not an approval of unread words.
+     - The deterministic half is rebuilt from the canonical rows on every build
+       and the model's prose is REUSED (`report_narrative_json`), so correcting an
+       owner and re-exporting costs nothing. Before this, the only way to get a
+       corrected fact into the report was to pay for the narrative again.
+     - Three export scopes, and the difference is the point: `outcomes` (the
+       approved record, refused with a 409 when nobody has approved one),
+       `draft` (exportable, and labelled a draft on its face), `full` (still
+       refused once the transcript is deleted, rule 94). A stale approved export
+       says so in the file rather than being silently corrected or silently sent.
+     - Closing out approves the record it has just changed, in that order — the
+       closeout note used to be written after the report and never appeared in it.
+103. **"Delete the transcript, keep the approved outcomes" is an ALLOWLIST, and
+     a failure to delete is shown.** The old deletion removed turns and audio and
+     kept everything else — the entire consultation map including items no human
+     ever looked at, and every private model observation, all of which are made
+     of the same words — while the screen said only the approved record remained.
+     `TRANSCRIPT_DELETE_KEEPS` / `_REMOVES` name both sides, the API returns the
+     counts, and unreviewed map items, observations and the model's rolling
+     summary go with the words. A file that will not unlink is recorded in
+     `cleanup_pending` (the name and the error, never the content) and retried
+     from `POST .../cleanup/retry`: a database flag cannot prove a file left the
+     disk, and this one did not.
+104. **A human edit made during a model call survives it.** `_run_analysis` read
+     the map, spent tens of seconds in a network call, and wrote its merged
+     snapshot back wholesale — so a correction made in exactly that window was
+     replaced by the model's wording and `human_edited` went back to false.
+     Reproduced deterministically (the suite makes the edit from inside the
+     stubbed call, no threads and no sleeps). The result is now REBASED: if the
+     revision moved, the same validated patch is re-merged onto what the map says
+     NOW, so the correction stands and the model's reading of the new turns is
+     still applied, with no paid call repeated. Items a person deleted are held
+     as ids in `removed_map_items` — the id and nothing else, because the text
+     was deleted precisely so it would not be written down — and stripped from
+     any result that still carries them.
+105. **One gate for everything that can open a microphone.** `/start` checked the
+     host's attestation (rule 94) and `POST /realtime/client-secret` did not — so
+     the endpoint that actually mints a live credential and connects a microphone
+     to a paid cloud service could be reached for a draft session whose host had
+     attested nothing. `_assert_may_listen` is shared by both, and covers ended
+     sessions and deleted transcripts too. A disabled button is not a gate, and
+     neither is a gate on the endpoint next to the one that matters.
+106. **The retention choice actually deletes.**
+     `sessions_due_for_transcript_deletion` was correct, was tested, and had NO
+     CALLER anywhere in the application: a seven-day session aged past its
+     deadline and kept its transcript through every list and detail read. It is
+     now swept at startup (the clock keeps running while the app is closed, and
+     the UI says the deletion happens when the app next looks) and, throttled to
+     15 minutes, on ordinary reads — never on the four-second poll, and never a
+     scan of the whole database per request. `retention_policy` is settable
+     outside the closeout, since the screen calls it a per-session choice, and an
+     unknown value is refused rather than stored as one that silently means
+     "keep".
+107. **Starting and ending are idempotent.** `start_session` stamped
+     `started_at` every time, so reconnecting after a dropped connection reset
+     the meeting's clock — the elapsed time went back to zero, the time check
+     re-armed, and the report said a ninety-minute consultation had lasted four.
+     `end_session` moved `ended_at`, which is what the retention deadline is
+     measured from, so a second press pushed a seven-day deletion seven days
+     further out. Both keep the first stamp; pressing End again re-runs no
+     analysis and rewrites no report, where it used to pay for both.
+108. **The recording limit is stated in minutes, before the meeting, not after
+     it.** The comment beside `MAX_UPLOAD_BYTES` claimed 25 MB was "hours" at
+     0.5 MB/min; the real figure is about 33 minutes, and the failure arrived
+     only once the meeting was over and the file was being sent.
+     `audio.upload_budget()` computes it and `/capabilities` serves it.
+109. **The diarising request is the one the API documents.**
+     `gpt-4o-transcribe-diarize` REQUIRES `chunking_strategy` for input longer
+     than 30 seconds — checked against OpenAI's Create transcription reference on
+     2026-09-09 — and it was simply absent, so every real meeting sent a request
+     the API rejects and the only recordings that could ever have worked were
+     ones too short to be worth separating. `_diarize_fields()` is the contract
+     in one place and the suite asserts on the FIELDS, because a stub that
+     returns segments whatever it is sent cannot catch this. No voice reference
+     clip is ever sent (rule 91) and the suite asserts that too.
+110. **An upload is bounded while it is being received, and blocking work never
+     runs on the event loop.** Both upload routes did `await file.read()` — the
+     whole thing — and checked the size afterwards, so the way to make the server
+     process an arbitrary amount of data was to send an arbitrary amount of data;
+     Starlette also spools a large multipart body to disk, so "it is only an
+     `UploadFile`" was never the memory guarantee the dictation docstring
+     claimed. `_read_bounded` refuses at the cap mid-stream. `transcribe_plain`
+     makes a blocking HTTP call and was awaited directly from an async endpoint,
+     holding the loop for the whole request: one slow dictation stalled the
+     consultation poll and every other request in flight. It runs on a worker
+     thread now, like every other blocking route here.
+
+## Rule 111 — exact quotation verification
+
+111. **A "verified" quotation is the source's own words, in the source's own
+     order, with an honest beginning and end, under the source's own
+     attribution.** `agents/quote_verify.py` decides it and every
+     machine-generated path that may apply the label goes through it. Verify with
+     `scripts/test_quote_verify.py`.
+
+     What it replaced was word overlap at 60% of distinct content words. That is
+     a similarity score, and similarity is not quotation. Measured on the code
+     before the change, with an INVENTED sentence (nothing in that suite is
+     scripture, and the trusted corpus is never opened or edited):
+
+         Source:    The group must not publish confidential meeting notes.
+         Candidate: The group must publish confidential meeting notes.
+
+     — returned **verified, "100% of content words traceable"**. So did the same
+     words reordered. `not` is three letters and sat in the stop-word list, along
+     with `no` and `all`; the lesson is not "fix the list" but that a bag of
+     words cannot decide this, because the words carrying the meaning are often
+     the shortest ones. The retired list is left in `api.py` as a comment rather
+     than deleted, so the next person can see why.
+     - **Contiguous, in order, whole words.** A deleted negation breaks the run;
+       so does a reordering.
+     - **Honest boundaries.** A contiguous substring is not enough: starting one
+       word after a negation turns a prohibition into an instruction while every
+       word remains genuine. An excerpt begins at a sentence start and ends at
+       sentence punctuation, an early stop must carry an elision mark, and a
+       passage that itself opens mid-sentence (overlap chunking does this) can
+       never print as a complete quotation.
+     - **Attribution is part of it.** Correct words under an invented author are
+       not verified, and the failure names where the words actually came from.
+     - **What is printed is the CORPUS's characters**, never the candidate's, so
+       a diacritic or curly apostrophe retyped by a model cannot reach the card.
+       Matching folds those per word, so a correct quotation is not rejected for
+       a keyboard difference.
+     - **Unverifiable is reported as unverifiable.** No citations means no
+       verification; the old code fell back to `librarian.verify()`'s embedding
+       score and let a close match print as verified, which is the same mistake
+       one layer down.
+     - **A failure offers a way forward** (`eligible_excerpt`): a real,
+       exactly-verifiable passage from the same retrieval, offered for review and
+       never substituted.
+     - **The method is stored** on the product (`quote_verification`), so an old
+       overlap pass can never be read as though it had met today's standard, and
+       a later regeneration cannot lean on a verified flag whose method is
+       unknown. Historical products are NOT rewritten and their renders are not
+       touched.
+
+## Rules 112–116 — what the dashboard costs to open, and to leave
+
+112. **A panel is downloaded when it is opened, not when the app starts.** All
+     eight were static imports, so opening the dashboard parsed the Colony's
+     graph, the video editor, the product editor, Abigail's panel and the whole
+     realtime consultation client before anything was on screen: one 692 kB
+     bundle (186 kB gzip). Lazy imports take the entry chunk to 242 kB (75 kB
+     gzip) and the build's own size warning goes away rather than being
+     configured away. Inactive panels are still UNMOUNTED, exactly as before —
+     keeping them mounted to preserve state would trade the download for a
+     permanent cost in timers and memory — and nothing is prefetched on a hunch.
+     `PanelBoundary` covers the two failures this newly makes possible: a chunk
+     that will not download, and a panel that throws before the shell is drawn.
+113. **An opted-in recording is saved as it is made.** The browser held every
+     MediaRecorder chunk in an array until the meeting ended, so a crashed tab
+     cost the WHOLE recording — while the comment beside `rec.start(5000)` said a
+     timeslice meant a crash cost the last few seconds — and the array grew for
+     the length of the meeting. Chunks now go to
+     `POST .../audio/chunk?recording_id=&seq=` as they arrive.
+     - **Order is the container.** A WebM stream is a header followed by
+       continuation clusters; the later chunks are not independently decodable
+       files. An out-of-order sequence is refused rather than written into the
+       wrong place.
+     - **A repeat is acknowledged, not applied**, so a retry after a dropped
+       connection cannot duplicate audio into the file.
+     - **Finalising is explicit**, so an interrupted meeting cannot leave
+       something that looks complete and is not, and what the SERVER holds
+       (`/audio/progress`) is the only honest "saved" claim — the recording
+       indicator shows that, not what the browser emitted.
+     - `stop()` is AWAITED by everything that ends a meeting. It used to be fired
+       and forgotten while the UI moved on to closeout.
+114. **Nothing outlives the screen that started it, and leaving is a choice.**
+     `start()` awaits a microphone permission, then a credential, then a
+     connection; unmounting during any of them left a live microphone attached to
+     nothing, with the browser's recording indicator still lit. Every step now
+     checks a capture generation and releases what it produced if the generation
+     moved. The unmount cleanup stops the tracks, the recorder and the pending
+     start — its comment promised "no live microphone" while doing none of it —
+     and finalises the recording outside the component's lifetime. The same race
+     is fixed in `DictateButton`, where unmount also had to stop the recorder's
+     own `onstop` from firing a transcription request nobody asked for.
+     Navigating away from a listening consultation asks first (`lib/navGuard.ts`,
+     consulted by App for the sidebar AND every in-app link). The choice is
+     deliberately never "end the meeting": ending leads to the closeout and must
+     not be reachable by a mis-click. Resuming is always a press, and
+     `started_at` survives it (rule 107).
+115. **A poll asks what CHANGED.** The panel refetched the whole session every
+     four seconds — and two copies of the transcript inside it, since `turns` and
+     `final_turns` are the same rows until a speaker pass exists. Measured on
+     synthetic meetings: 81 KB at 60 turns, 805 KB at 600, so the cost of
+     listening grew with how long the group had been talking. `GET
+     .../updates` answers from cursors; an idle poll is ~220 bytes at any
+     transcript length, and one new line is ~900.
+     - **The cursor is a per-turn revision, not the greatest turn id.** The
+       changes that matter most here happen to turns that already exist: a line
+       that finalises late, and a line a person corrects. An id cursor would
+       never send either again. The suite pins a correction to the FIRST turn of
+       the meeting being caught.
+     - `list_turns(limit=...)` takes its limit in SQL. It read every row of the
+       meeting and sliced in Python, so the reasoner's recent window loaded the
+       whole transcript to throw almost all of it away.
+     - `GET /sessions/{id}` is unchanged for its callers.
+116. **The Products shelf loads a page, and filters all of it.** `GET /products`
+     returns every column of every row — the full listing JSON, the whole
+     scorecard, and the entire consultation transcript, which the shelf does not
+     display at all. On the owner's real history that is **1.58 MB** to draw a
+     grid of thumbnails; `GET /products/summary` is **78 KB** for the first page.
+     Search, kind, badge and sort are applied to the WHOLE shelf and a page is
+     cut from the result, because a filter that only saw the loaded page would
+     answer a different question from the one the bar appears to ask. Videos stay
+     DERIVED (rule 58) and still drop out under a review-result filter, with the
+     reason returned rather than left to be guessed. No badge arithmetic is
+     duplicated: the parsed score and `target_reached` go back and the
+     dashboard's existing `badgeForProduct` decides, so the two cannot drift.
+     `/products/summary` is registered BEFORE `/products/{product_id}` — FastAPI
+     matches in registration order, and a literal path declared after a dynamic
+     sibling is swallowed by it.
+
+## Rules 117–120 — a gathering, and a place to start
+
+Added 2026-09-09. The deeds-first direction (`STATUS.md`) named the
+devotional-gathering kit as the flagship next thing; this is it, generalised,
+plus the Home screen that makes any of it findable. `agents/gathering.py` owns
+the domain, `agents/gathering_api.py` the endpoints, `agents/program_sheet.py`
+the printed programme, `agents/home_api.py` the front page. Verify with
+`scripts/test_live_consultation.py`.
+
+117. **A project is the thread, and it OWNS nothing that already has an owner.**
+     A gathering project ties a purpose, a consultation, what was decided, who
+     took something on, the materials and what was learned into one thing a
+     person can open. Three decisions make it safe rather than a second system:
+     - **It lives in `private/consultation.db`, through
+       `live_consultation_store.py`.** A gathering's title, its date and its
+       purpose are the same class of private material a transcript is, so rule
+       73 applies unchanged and this module stays the only one that touches it.
+     - **Commitments are DERIVED, never copied.** A project's commitments are
+       the action items of the consultations it links — the same rows, with the
+       same tri-state acceptance (rule 101), so accepting one in the gathering
+       view and accepting it in the Consultation tab are the same act on the
+       same record. Same discipline as the finished-video shelf (rule 58). A
+       project that has held no consultation has NO commitments, and that is the
+       truthful answer rather than a parallel list that can disagree.
+     - **Nothing is scored.** The stages are a description of how the work goes,
+       not a funnel: a project can move back a stage, and `closed` is a resting
+       place rather than a success condition. Commitments are COUNTED
+       ("3 of 5 still open"); there is no percentage, no streak and no ranking
+       of anybody, and the suite greps the API's own output for those words
+       (rule 61).
+     - **Deleting a project never deletes a consultation.** A meeting is a thing
+       that happened; a project is a way of looking at it. Tidying away a plan
+       must not destroy the record of the conversation that produced it.
+     - A programme with no timings has **no length** rather than a guessed one.
+       Assuming five minutes an item would print a number on the page nobody
+       chose and then measure the group against it.
+118. **Only an APPROVED, SELECTED outcome crosses into a project, and a refusal
+     says why.** The offer list is built from confirmed decisions and open items
+     of sessions whose record a human approved (rule 102) — never from the
+     transcript, and never from the assistant's private observations, so a raw
+     meeting never becomes standing context for the next one. Two halves:
+     - **The gate is in the endpoint, not in what the UI chooses to show.**
+       `POST .../outcomes` re-checks `approved_at` and returns 409; a hidden
+       button is not a gate.
+     - **A session that is not eligible yet is LISTED, with the reason.**
+       "There is nothing here" and "you have not approved it yet" are completely
+       different things to be told, and a section that just looks empty tells
+       you the wrong one.
+119. **A kit produces two real documents, and they are never one document.**
+     - **The programme and the card sheet are separate PDFs.** The card sheet is
+       a duplex grid whose page 2 has to line up with page 1 through the
+       printer's long-edge flip (`print_sheet.build_print_sheet`); a programme
+       page inside that file shifts every back face by a page and every card
+       prints on the wrong side. Two downloads, and the screen says why.
+     - **A reading points at a VERIFIED passage by id.** The programme stores no
+       scripture text of its own, so there is nothing that could be edited into
+       something the library does not contain, and nothing a model wrote can
+       print as a quotation (rule 84). The endpoint refuses a `writing_id` that
+       is not one of the gathering's own verified passages.
+     - **A reading is never truncated to fit.** It flows onto another page.
+       Quietly shortening a passage to make a layout work is the same failure as
+       paraphrasing one. A passage that has gone missing prints as a stated
+       placeholder and is reported in a header, rather than being dropped.
+     - **Programme files are written under `private/`, not `outputs/`.**
+       `outputs/` is a mounted static directory because quote-card images are
+       public artwork; a programme names a real gathering and its date. Served
+       only through the owner-gated endpoint, with the path resolved and checked
+       against its own directory.
+     - **Nothing in the kit builder spends anything.** Existing cards are added
+       for free; making new ones is a separate, explicit act through the
+       pipeline entry points that already have the batch caps, the review and
+       the metering (rule 40). Font sizes in `program_sheet.py` are POINTS via
+       `pt()` — the first version used pixel numbers at 300 dpi, which is 6.7pt
+       on paper: unreadable, and invisible on screen because a preview is
+       scaled.
+120. **Home is a read, and it is the front door.** The dashboard opened on the
+     Pipeline form — a theme box and a target score — which answers "make me a
+     bookmark" and not "what was I doing?". Home is four sections in ordinary
+     language: what to continue, what needs a decision, what happens next, and
+     what to create. Sheraj is non-technical and dashboard-visible behaviour is
+     the deliverable (AGENTS.md), so there is no pipeline, provider, agent graph
+     or trust score on it.
+     - **One request, and nothing is started.** No job, no microphone, no model,
+       no provider query. Opening the application must not begin anything, and
+       the poll is a minute rather than seconds — a fast timer would make simply
+       having the app open more expensive.
+     - **Every section degrades on its own.** A subsystem that raises is
+       reported as unavailable in that section and the rest of the page still
+       renders. A front page that 500s because one store is unhappy is worse
+       than one that says which part is missing.
+     - **Every number points at something real.** Approvals come from the actual
+       queues (rules 20/24/25/28/37/51/102); a commitment comes from a
+       consultation's own action items and shows its tri-state acceptance as
+       three states, so "nobody has answered yet" never reads as agreement.
+     - **A private title never leaves the response.** Home combines
+       `private/consultation.db` and `workforce.db` in memory for one authorised
+       reader and writes the combination nowhere — not to a log, not to a cache,
+       not into a URL. Abigail's queue is shown by KIND, never by content: this
+       is a screen somebody may walk past.
+
 ## Gotchas
 
 - **Windows console is cp1252**: use ASCII `->` not `→` in anything a script
@@ -1840,6 +2211,18 @@ imagined. Verify with `scripts/test_live_consultation.py`.
   across what look like full restarts (new PIDs). If a `.env` change doesn't
   take effect, kill every process on the port (Windows may leave a phantom
   LISTENING socket) and start once without `--reload` to confirm.
+- **A NEW endpoint 404s in the browser until the backend is restarted, and the
+  404 can look like a routing bug.** The managed task runs uvicorn WITHOUT
+  `--reload` (deliberately, rule 70), so a router added to `agents/api.py` is
+  not in the running process however many times the page is refreshed. The
+  confusing part is the message: a new literal path under an existing dynamic
+  one is answered by the OLD process's dynamic route, so `/products/summary`
+  came back **"404: Product not found"** -- which reads exactly like rule 116's
+  registration-order mistake and is not it. Verified the same way every time:
+  `python -c "import agents.api"` and check `app.routes` for the path (that is
+  the CODE), then restart and curl it (that is the SERVER). Real, 2026-09-10:
+  three new tabs were dead in the dashboard while every one of their tests
+  passed.
 - **`WHATSAPP_TOKEN` must be a permanent System User token**, not the temporary
   one from Meta's API Setup page — that one expires in ~24h and silently breaks
   both messaging and any Graph API call, looking exactly like a code regression.

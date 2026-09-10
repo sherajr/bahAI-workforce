@@ -108,6 +108,22 @@ def on_startup():
     # transcripts never touch workforce.db.
     from agents import live_consultation_store
     live_consultation_store.init_db()
+    # Retention is defined against a clock that keeps running while this
+    # application is closed, so the catch-up belongs at startup (rule 106). A
+    # machine switched off through the seventh day deletes on the next start --
+    # which is exactly what the setting promises, and what the UI says.
+    try:
+        from agents.live_consultation_api import retention_sweep
+        swept = retention_sweep(force=True)
+        if swept.get("deleted"):
+            print(f"Consultation retention: {len(swept['deleted'])} transcript(s) "
+                  f"deleted on the retention schedule.")
+        if swept.get("failed"):
+            print(f"Consultation retention: {len(swept['failed'])} could NOT be "
+                  f"deleted -- see the Consultation tab.")
+    except Exception as e:
+        # Never let a retention sweep stop the API from coming up.
+        print(f"Consultation retention sweep skipped ({type(e).__name__}).")
     # Secretary's reminder scheduler — all state in private/secretary.db, so a
     # restart resumes exactly where it left off.
     from agents import scheduler
@@ -554,60 +570,84 @@ def _apply_review_feedback(listing: dict, review: dict, verified_quote: str,
     return revised, ("; ".join(note_parts) or "no actionable feedback"), changes
 
 
-# Common function words excluded from the grounding overlap check so that a
-# quote can't pass just by sharing "the/and/unto" with a passage.
-_GROUNDING_STOPWORDS = frozenset(
-    "the and that this with from unto thee thou thy thine hath have has for are not all our "
-    "your his her its will shall which what when they them been were may can doth does did "
-    "you but was is it in of to on at by an as be or so no".split()
-)
+# RETIRED 2026-09-09, and left here as a warning rather than deleted silently.
+#
+# This was the stop-word list for the word-overlap grounding check: common
+# function words excluded so a quote could not pass just by sharing "the/and/
+# unto" with a passage. Reasonable-looking, and it is exactly what made the
+# check unsafe -- read the list. `not` is in it, and `no`, and `all`. A
+# candidate with the negation deleted therefore scored 100% and was reported
+# as "100% of content words traceable", i.e. VERIFIED.
+#
+# The lesson is not "fix the list". It is that a bag of words cannot decide
+# whether something is a quotation, because the words that carry the meaning
+# are often the shortest ones. Verification is now exact and lives in
+# `agents/quote_verify.py` (rule 111).
+
+
+def verify_bookmark_quote(quote: str, citations: list[dict]) -> "quote_verify.Verdict":
+    """
+    The one place a bookmark quote earns a "verified" label (rule 111).
+
+    It checks the words against the passages that were actually RETRIEVED for
+    this run -- the authorised corpus for this product -- using the shared exact
+    verifier. What it replaced was word overlap at 60%, which is a similarity
+    score, and similarity is not quotation: it passed a candidate with the word
+    "not" deleted, reporting "100% of content words traceable".
+
+    An unverifiable result is reported as unverifiable. It is never upgraded by
+    an embedding score or by the Librarian's own say-so -- the previous version
+    fell back to `librarian.verify()` when retrieval was empty and let a close
+    embedding match print as a verified quotation, which is the same mistake one
+    layer down.
+    """
+    from agents import quote_verify
+
+    if not citations:
+        return quote_verify.Verdict(
+            False, ("no passages were retrieved for this run, so there is nothing to "
+                    "check the quotation against -- it cannot be called verified"))
+    passages = [{"text": str(c.get("text") or ""),
+                 "source": str(c.get("source") or ""),
+                 "section": str(c.get("section") or ""),
+                 "link": str(c.get("link") or "")}
+                for c in citations if str(c.get("text") or "").strip()]
+    return quote_verify.verify_quotation(quote, passages)
+
+
+def eligible_excerpt(citations: list[dict]) -> dict:
+    """A real, exactly-verifiable excerpt from the retrieved passages.
+
+    Bounded recovery (rule 111): when a generated quotation fails, the useful
+    thing to hand back is not an error but an excerpt that WOULD pass, for a
+    person to look at. It is offered, never substituted -- nothing here rewrites
+    a product on its own.
+    """
+    from agents import quote_verify
+
+    for c in citations or []:
+        text = str(c.get("text") or "").strip()
+        if not text:
+            continue
+        # The first complete sentence of the passage, which is the shortest
+        # thing that can satisfy the boundary rules.
+        for match in re.finditer(r"[^.!?]*[.!?]", text):
+            candidate = match.group(0).strip()
+            if len(candidate.split()) < 6:
+                continue
+            verdict = quote_verify.verify_quotation(candidate, [c])
+            if verdict.verified:
+                return {"text": verdict.canonical_text, "source": verdict.source,
+                        "locator": verdict.locator}
+            break
+    return {}
 
 
 def _check_quote_grounding(quote: str, citations: list[dict]) -> tuple[bool, str]:
-    """
-    Deterministic backstop for the consultation Librarian's GROUNDED verdict
-    (principles 3 and 9): never ship "Librarian-verified" on the model's
-    self-report alone — the same discipline as _best_matching_citation in the
-    card pipeline and scribe._sanitize_claims.
-
-    With retrieved citations (the normal case — the Librarian was told to
-    adapt from exactly these passages): at least 60% of the quote's distinct
-    content words must appear in a single passage. "Condense" keeps source
-    words and passes easily; a quote the Librarian actually invented shares
-    only scattered vocabulary and fails.
-
-    With no citations (retrieval was down; the Librarian drew from memory):
-    librarian.verify() checks the full text index by embedding similarity.
-    Any failure — including the index being unavailable — returns False:
-    unverifiable is not the same as verified.
-
-    Returns (traceable, human-readable reason for the log).
-    """
-    words = {w for w in re.sub(r"[^a-z0-9 ]", " ", quote.lower()).split()
-             if len(w) >= 3 and w not in _GROUNDING_STOPWORDS}
-    if not words:
-        return False, "quote has no checkable content words"
-
-    if citations:
-        best_frac, best_src = 0.0, ""
-        for c in citations:
-            passage_words = set(re.sub(r"[^a-z0-9 ]", " ", str(c.get("text") or "").lower()).split())
-            frac = len(words & passage_words) / len(words)
-            if frac > best_frac:
-                best_frac, best_src = frac, str(c.get("source") or "")
-        if best_frac >= 0.6:
-            return True, f"{best_frac:.0%} of content words traceable to: {best_src}"
-        return False, (f"only {best_frac:.0%} of the quote's content words appear in any "
-                       "retrieved passage")
-
-    try:
-        from agents.librarian import verify
-        verdict = verify(quote)
-        if verdict.get("verified"):
-            return True, "verified against the full text index (embedding similarity)"
-        return False, "; ".join(verdict.get("issues") or ["no close match in the text index"])
-    except Exception as e:
-        return False, f"could not verify against the text index ({e})"
+    """Backwards-compatible wrapper: (traceable, reason). See
+    `verify_bookmark_quote`, which is where the actual decision is made."""
+    verdict = verify_bookmark_quote(quote, citations)
+    return verdict.verified, verdict.reason
 
 
 def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_turn=None,
@@ -732,24 +772,40 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
     # Deterministic grounding backstop: the Librarian's GROUNDED verdict is a
     # self-report, and this quote gets locked for the rest of the run — check
     # it against the actual retrieved passages before letting "verified" stick.
+    quote_verification: dict = {}
     if verified_quote and quote_grounded:
-        traceable, why = _check_quote_grounding(verified_quote, req.citations or [])
-        if not traceable:
+        verdict = verify_bookmark_quote(verified_quote, req.citations or [])
+        quote_verification = verdict.as_dict()
+        if not verdict.verified:
             quote_grounded = False
+            # Bounded recovery: say what WOULD have passed, so a person has
+            # something to act on rather than only a refusal (rule 111).
+            offer = eligible_excerpt(req.citations or [])
+            suggestion = ""
+            if offer:
+                suggestion = ("\n\nAn exactly-verifiable passage from the same retrieval, "
+                              "if the team wants to quote rather than paraphrase:\n"
+                              f"“{offer['text']}” - {offer['source']}")
             consultation["transcript"].append({
                 "agent": "System", "role": "grounding check",
-                "message": ("The Librarian called this quote GROUNDED, but the deterministic "
-                            f"check could not trace it to a source ({why}). The listing will "
-                            "present it as the team's phrase, not a verified quotation."),
+                "message": ("The Librarian called this quote GROUNDED, but the exact check "
+                            f"could not confirm it is the source's own words ({verdict.reason}). "
+                            "The listing will present it as the team's phrase, not a verified "
+                            "quotation." + suggestion),
             })
             consultation["context"] += (
-                "\n\nCORRECTION (deterministic grounding check): the quote above could NOT be "
-                "traced to a verified source — do not describe it as a verified scriptural "
-                "quotation; call it the team's guiding phrase instead."
+                "\n\nCORRECTION (exact quotation check): the quote above could NOT be "
+                "confirmed as the source's own words - do not describe it as a verified "
+                "scriptural quotation; call it the team's guiding phrase instead."
             )
+        else:
+            # The source's own characters, so a diacritic or a curly apostrophe
+            # retyped by the model never reaches the printed face (rule 111).
+            verified_quote = verdict.canonical_text or verified_quote
         if req.task_id:
             log_run(req.task_id, "librarian", "grounding_check", verified_quote[:200],
-                    why[:400], passed_review=traceable)
+                    f"[{verdict.method}] {verdict.reason}"[:400],
+                    passed_review=verdict.verified)
 
     _progress(f"Scribe is writing the listing (attempt 1/{req.max_attempts})...")
     listing = write_listing(
@@ -871,6 +927,11 @@ def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_tur
         "consultation":   consultation["transcript"] + editing_log,
         "image_path":     image_path,
         "image_prompt":   image_prompt,
+        # How the quotation was checked, and what it was checked against
+        # (rule 111). Carried so a product can say which verifier passed it --
+        # an old word-overlap pass and a new exact one must never look the same,
+        # and a later regeneration must not lean on a stale verified flag.
+        "quote_verification": quote_verification,
     }
 
 
@@ -940,6 +1001,8 @@ def _generate_bookmark(theme: str, task_id: str, target_score: float, max_attemp
         "attempts":       wa["attempts"],
         "target_reached": wa["target_reached"],
         "consultation":   wa["consultation"],
+        # Carried through to the product row (rule 111).
+        "quote_verification": wa.get("quote_verification") or {},
     }
 
 
@@ -1025,7 +1088,12 @@ def _run_full_pipeline(req: PipelineRunRequest, progress, on_turn=None, request_
     update_product(product_id, reviewer_scores=json.dumps(review),
                    consultation=json.dumps(gen["consultation"]),
                    target_reached=1 if gen["target_reached"] else 0,
-                   attempts=gen["attempts"])
+                   attempts=gen["attempts"],
+                   # Which check passed this quotation, and against what
+                   # (rule 111). A product carrying no entry was verified by the
+                   # retired overlap check, and the dashboard can say so rather
+                   # than implying it met today's standard.
+                   quote_verification=json.dumps(gen.get("quote_verification") or {}))
 
     finish = _render_and_publish(product_id, task_id, image_path, listing, progress)
 
@@ -3130,8 +3198,22 @@ def x_post_discard(post_id: str):
 
 @app.get("/products")
 def list_products():
-    """List all saved products, newest first."""
+    """List all saved products, newest first.
+
+    Every column of every row, including the whole consultation transcript. Kept
+    exactly as it was for its existing callers; the shelf itself now opens
+    through `/products/summary`, which is bounded (rule 116).
+    """
     return get_all_products()
+
+
+# Registered HERE, above `/products/{product_id}`: FastAPI matches routes in
+# registration order, so a literal path declared after a dynamic sibling is
+# swallowed by it and "summary" would be looked up as a product id.
+from agents.products_api import router as products_router   # noqa: E402
+
+app.include_router(products_router)
+
 
 @app.get("/products/{product_id}")
 def get_product(product_id: str):
@@ -6895,6 +6977,14 @@ def nuclei_send_message(req: NucleiSendIn):
 from agents.live_consultation_api import router as live_consultation_router  # noqa: E402
 
 app.include_router(live_consultation_router)
+
+# Gatherings (rules 117-119) and Home (rule 120) get their own routers rather
+# than more of this file -- the pattern the Consultation router established.
+from agents.gathering_api import router as gathering_router   # noqa: E402
+from agents.home_api import router as home_router             # noqa: E402
+
+app.include_router(gathering_router)
+app.include_router(home_router)
 
 
 # --- Health check ---

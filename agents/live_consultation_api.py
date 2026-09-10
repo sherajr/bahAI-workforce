@@ -18,6 +18,8 @@ Steward's ledger with no meeting content attached.
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -25,6 +27,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from agents import live_consultation as core
@@ -98,6 +101,11 @@ class SessionPatch(BaseModel):
     presence: Optional[str] = None
     duration_minutes: Optional[int] = None
     warn_minutes: Optional[int] = None
+    # Retention is described on screen as a per-session choice, so it has to be
+    # settable outside the closeout (rule 106) -- it was only reachable there,
+    # which meant a meeting still in progress could not be told to forget
+    # itself. Validated below; an unknown value is refused, never stored.
+    retention_policy: Optional[str] = None
 
 
 class ParticipantIn(BaseModel):
@@ -274,6 +282,19 @@ class CloseoutIn(BaseModel):
     note: str = ""
     reflection_at: Optional[str] = None
     retention_policy: Optional[str] = None
+    # The revision the host was looking at. Closing out APPROVES the record, so
+    # it carries the same binding as `/report/approve` (rule 102): if the record
+    # moved between the preview and the button, the approval is refused rather
+    # than applied to words nobody read. Omitted means "approve whatever it says
+    # now", which is what an older client will send.
+    approve_revision: Optional[int] = None
+    # A host may close a meeting out without approving a record at all -- the
+    # outcome and the note are still worth having.
+    approve_record: bool = True
+
+
+class ApproveIn(BaseModel):
+    revision: Optional[int] = None
 
 
 # ── Capabilities (rule 86) ──────────────────────────────────────────────────
@@ -306,6 +327,9 @@ def capabilities():
         # could come of a recording, and a checkbox that quietly does nothing is
         # the Canva-autofill failure this repo has already had once.
         "recording_supported": realtime_ok,
+        # What the recording limit actually means in minutes, so the setup
+        # screen can say it BEFORE an hour is recorded and refused (rule 108).
+        "recording_budget": audio.upload_budget(),
         "diarize_model": core.DIARIZE_MODEL,
         "diarize_available": realtime_ok,
         # The opening passage, so the tab can show the exact words while she
@@ -363,6 +387,7 @@ def capabilities():
 
 @router.get("/sessions")
 def list_sessions(limit: int = 100):
+    retention_sweep()
     store.init_db()
     return {"sessions": store.list_sessions(limit=limit)}
 
@@ -409,14 +434,144 @@ def create_session(req: SessionIn):
     return store.get_session(session["id"])
 
 
+# ── Retention, actually enforced (rule 106) ─────────────────────────────────
+#
+# `sessions_due_for_transcript_deletion` existed, was correct, was tested, and
+# had NO CALLER anywhere in the application. A seven-day session aged past its
+# deadline, was correctly identified as due by the helper, and kept its
+# transcript through every list and detail read -- so the retention choice on
+# screen was a setting that did nothing.
+#
+# Two things make it real without making it expensive:
+#
+#   * a catch-up at startup, because the deletion is defined against a clock
+#     that keeps running while the application is closed, and
+#   * a THROTTLED sweep on read, because a machine can stay on for weeks and
+#     the four-second consultation poll must not scan the whole database.
+#
+# The deadline is computed from the meeting's own end time, so nothing here
+# depends on how often the sweep happens to run -- only on it running at all.
+_RETENTION_SWEEP_EVERY_S = int(os.getenv("CONSULTATION_RETENTION_SWEEP_S", "900"))
+_last_retention_sweep = 0.0
+_retention_lock = threading.Lock()
+
+
+def retention_sweep(force: bool = False) -> dict:
+    """Delete the transcripts whose time is up. Idempotent and safe to repeat.
+
+    A failure on one session is recorded and the sweep continues: one row that
+    will not delete must not leave every later one undeleted.
+    """
+    global _last_retention_sweep
+    now = time.time()
+    if not force and (now - _last_retention_sweep) < _RETENTION_SWEEP_EVERY_S:
+        return {"ran": False}
+    if not _retention_lock.acquire(blocking=False):
+        return {"ran": False}
+    try:
+        _last_retention_sweep = now
+        done, failed = [], []
+        for row in store.sessions_due_for_transcript_deletion():
+            try:
+                result = store.delete_transcript(row["id"])
+                done.append({"session_id": row["id"],
+                             "policy": row.get("retention_policy"),
+                             "turns": result.get("turns", 0),
+                             "cleanup_failed": result.get("cleanup_failed") or []})
+            except Exception as e:                       # one bad row, not the sweep
+                failed.append({"session_id": row["id"], "error": type(e).__name__})
+        return {"ran": True, "deleted": done, "failed": failed}
+    finally:
+        _retention_lock.release()
+
+def _assert_may_listen(session: dict) -> None:
+    """Everything that has to be true before a microphone may open (rule 105).
+
+    `/start` checked this and the credential endpoint did not, so the actual
+    side effect -- minting a live realtime credential and connecting a
+    microphone to a paid cloud service -- could be reached for a draft session
+    whose host had attested nothing. A disabled button is not a gate and neither
+    is a gate on the endpoint next to the one that matters, so both call this.
+    """
+    if session.get("status") == "ended":
+        raise HTTPException(status_code=400,
+                            detail="That consultation has already ended.")
+    if session.get("transcript_deleted_at"):
+        raise HTTPException(status_code=409, detail=(
+            "The transcript of this consultation was deleted. Start a new "
+            "consultation rather than listening into this one again."))
+    if not session.get("participants_informed_at"):
+        raise HTTPException(
+            status_code=400,
+            detail=("Before this starts, everyone in the room has to be told that "
+                    f"{core.ASSISTANT_NAME} is listening and transcribing"
+                    + (", and that the meeting is being recorded"
+                       if session.get("record_audio") else "")
+                    + ". Confirm that on the setup screen."))
+
+def _touch_record(session_id: str) -> int:
+    """Mark that the record a person may approve has changed (rule 102)."""
+    return store.bump_record_revision(session_id)
+
+async def _read_bounded(file: UploadFile, max_bytes: int, what: str) -> bytes:
+    """Read an upload, refusing it the moment it is too big (rule 110).
+
+    Both upload routes did `await file.read()` -- the WHOLE thing -- and checked
+    the size afterwards, so the way to make this process an arbitrary amount of
+    data was to send an arbitrary amount of data. Starlette spools a large
+    multipart body to a temporary file, so "it is only an UploadFile" is not a
+    memory guarantee either; the cap has to be applied while the bytes are
+    arriving.
+
+    Reading in chunks is also what makes the dictation promise true. That one is
+    documented as memory-only, and it is: the bytes are held for one request and
+    never written anywhere.
+    """
+    chunks, total = [], 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            await file.close()
+            raise HTTPException(status_code=413, detail=(
+                f"That {what} is larger than the {max_bytes // (1024 * 1024)} MB limit, "
+                "so it was refused without being read any further."))
+        chunks.append(chunk)
+    await file.close()
+    if not total:
+        raise HTTPException(status_code=400, detail=f"That {what} was empty.")
+    return b"".join(chunks)
+
+
+_UPLOAD_CHUNK = 256 * 1024
+
+def _refuse_if_deleted(session: dict, what: str) -> None:
+    """Nothing may put words back into a meeting whose words were deleted.
+
+    Rule 100. Clearing the screen is not deletion: a turn still in flight when
+    the delete landed, a retried chunk upload, a diarisation started minutes
+    earlier -- each of them arrives afterwards and recreates part of exactly
+    what somebody asked to be gone. Observed for real: a late turn was accepted
+    and displayed while the session still reported `transcript_deleted=true`,
+    and an audio upload rebuilt a recording that had been removed.
+    """
+    if session.get("transcript_deleted_at"):
+        raise HTTPException(status_code=409, detail=(
+            f"The transcript of this consultation was deleted on "
+            f"{session['transcript_deleted_at']}, so {what} cannot be added to it. "
+            "The approved record is still here."))
+
 def _detail(session: dict) -> dict:
     sid = session["id"]
     state = store.get_state(sid)
     decisions = store.list_decisions(sid)
+    live_turns = store.list_turns(sid)
     return {
         "session": session,
         "state": state,
-        "turns": store.list_turns(sid),
+        "turns": live_turns,
         "observations": store.list_observations(sid),
         "decisions": decisions,
         # Kept singular for every existing caller and every old session; the
@@ -436,16 +591,109 @@ def _detail(session: dict) -> dict:
         # The best transcript there is: the speaker-separated one once it exists,
         # the live one until then. `turns` above stays the LIVE record so nothing
         # that already read it changes meaning (rule 80).
-        "final_turns": store.list_turns(sid, source="best"),
+        #
+        # Until a speaker pass exists these two are the SAME rows, and both were
+        # being serialised on every four-second poll -- the transcript, twice,
+        # for the whole meeting (rule 115). The field keeps its meaning for every
+        # existing caller; it is simply the same list rather than a second copy
+        # fetched separately, and the polling path no longer asks for either.
+        "final_turns": (store.list_turns(sid, source="diarized")
+                        if store.has_diarized(sid) else live_turns),
         "has_diarized": store.has_diarized(sid),
         "report": session.get("report_md") or "",
+        # Draft and approved are DIFFERENT things and the UI must be able to say
+        # which it is showing (rule 102). `report` above stays the draft, for
+        # every existing caller; these three are the truthful additions.
+        "approved_report": session.get("approved_md") or "",
+        "record": _record_status(session),
+        # Files a deletion could not remove. A flag in a database cannot prove a
+        # file left the disk, so what could not be cleaned up is SHOWN and can
+        # be retried rather than swallowed (rule 103).
+        "cleanup_pending": session.get("cleanup_pending") or "",
+        # The cursor a delta poll starts from (rule 115). Sent with the full
+        # read so the dashboard never has to fetch everything twice to find out
+        # where it is.
+        "turns_rev": store.turns_head(sid)["rev"],
+        "record_revision": int(session.get("record_revision") or 0),
+        "deletion_generation": int(session.get("deletion_generation") or 0),
         "mode_info": core.MODES.get(session.get("mode") or core.DEFAULT_MODE, {}),
     }
 
 
 @router.get("/sessions/{session_id}")
 def get_session(session_id: str):
+    retention_sweep()
     return _detail(_session_or_404(session_id))
+
+
+@router.get("/sessions/{session_id}/updates")
+def session_updates(session_id: str, turns_rev: int = 0, state_revision: int = -1,
+                    record_revision: int = -1, source: str = "live",
+                    limit: int = 200):
+    """
+    What has CHANGED, for a poll that runs every few seconds (rule 115).
+
+    The dashboard used to refetch the whole session four times a minute --
+    and, since the diarised transcript landed, TWO copies of it: `turns` and
+    `final_turns` are the same rows until a speaker pass exists. Measured on
+    synthetic meetings, that payload was 68 KB at 60 turns and 679 KB at 600, so
+    the cost of listening grew with how long the group had been talking.
+
+    The cursor is a per-turn revision, not the greatest turn id, because the
+    changes that matter most here happen to turns that ALREADY EXIST: a line
+    that finalises late, and a line a person corrects. An id-based cursor would
+    never send either again.
+
+    An unchanged poll answers with the cursor and nothing else. Callers that
+    want everything still call `GET /sessions/{id}`, which is unchanged.
+    """
+    session = _session_or_404(session_id)
+    if source not in ("live", "diarized", "best"):
+        raise HTTPException(status_code=400, detail=f"Unknown transcript: {source}")
+
+    head = store.turns_head(session_id, source=source)
+    now_state = int(store.get_state(session_id).get("state_revision") or 0)
+    now_record = int(session.get("record_revision") or 0)
+    generation = int(session.get("deletion_generation") or 0)
+
+    # A cursor from before a deletion describes turns that no longer exist, and
+    # a client holding them has to be told to start again rather than being sent
+    # a quiet "nothing changed" while it displays deleted words (rule 100).
+    if session.get("transcript_deleted_at") and turns_rev > head["rev"]:
+        return {"resync": True, "reason": "transcript_deleted",
+                "transcript_deleted": True, "deletion_generation": generation,
+                "turns_rev": head["rev"], "turns_total": head["count"]}
+
+    changed = store.turns_since(session_id, since_rev=turns_rev, source=source, limit=limit)
+    state_changed = state_revision != now_state
+    record_changed = record_revision != now_record
+    out = {
+        "resync": False,
+        "turns_rev": head["rev"], "turns_total": head["count"],
+        "turns_source": head["source"],
+        "turns": changed,
+        "more": len(changed) >= limit,
+        "state_revision": now_state, "record_revision": now_record,
+        "deletion_generation": generation,
+        "transcript_deleted": bool(session.get("transcript_deleted_at")),
+        "changed": bool(changed) or state_changed or record_changed,
+        "has_diarized": store.has_diarized(session_id),
+    }
+    # Only sent when they actually moved. This is what keeps an idle meeting's
+    # poll the same size at turn 600 as at turn 6.
+    if state_changed:
+        out["state"] = store.get_state(session_id)
+        out["open_threads"] = _open_threads(session_id)
+    if record_changed or state_changed:
+        decisions = store.list_decisions(session_id)
+        out["decisions"] = decisions
+        out["confirmed_decisions"] = [d for d in decisions if d["status"] == "confirmed"]
+        out["action_items"] = store.list_action_items(session_id)
+        out["record"] = _record_status(session)
+    if record_changed:
+        out["participants"] = store.list_participants(session_id)
+        out["writings"] = store.list_writings(session_id)
+    return out
 
 
 @router.patch("/sessions/{session_id}")
@@ -456,6 +704,10 @@ def patch_session(session_id: str, req: SessionPatch):
         raise HTTPException(status_code=400, detail=f"Unknown participation mode: {fields['mode']}")
     if "presence" in fields and fields["presence"] not in core.PRESENCE_LEVELS:
         raise HTTPException(status_code=400, detail=f"Unknown presence: {fields['presence']}")
+    if "retention_policy" in fields             and fields["retention_policy"] not in core.RETENTION_POLICIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown retention choice: {fields['retention_policy']}")
     updated = store.update_session(session_id, **fields)
     return _detail(updated)
 
@@ -482,16 +734,7 @@ def start_session(session_id: str):
     moment the microphone starts, not the moment a checkbox is drawn.
     """
     session = _session_or_404(session_id)
-    if session["status"] == "ended":
-        raise HTTPException(status_code=400, detail="That consultation has already ended.")
-    if not session.get("participants_informed_at"):
-        raise HTTPException(
-            status_code=400,
-            detail=("Before this starts, everyone in the room has to be told that "
-                    f"{core.ASSISTANT_NAME} is listening and transcribing"
-                    + (", and that the meeting is being recorded"
-                       if session.get("record_audio") else "")
-                    + ". Confirm that on the setup screen."))
+    _assert_may_listen(session)
     return _detail(store.start_session(session_id))
 
 
@@ -516,6 +759,16 @@ def end_session(session_id: str, final_pass: bool = True):
     the worst possible moment for it.
     """
     session = _session_or_404(session_id)
+
+    # Pressing End again is not a second ending (rule 107). It used to re-run
+    # the closing analysis AND rewrite the report -- two paid calls, on a
+    # meeting that was already over, for a record that does not change.
+    if store.already_ended(session_id):
+        detail = _detail(store.get_session(session_id))
+        detail["note"] = ("This consultation had already ended, so nothing was run "
+                          "again. The record is as it was.")
+        return detail
+
     ended = store.end_session(session_id)
     note = ""
     if final_pass and realtime.available():
@@ -539,8 +792,13 @@ def end_session(session_id: str, final_pass: bool = True):
             writings=store.list_writings(session_id),
             turns=store.list_turns(session_id, source="best"),
             participants=store.list_participants(session_id))
-        store.update_session(session_id, report_md=built["markdown"],
-                             report_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        store.update_session(
+            session_id, report_md=built["markdown"],
+            report_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # Kept so the factual half can be rebuilt later without paying for
+            # the prose again (rule 102). This is a DRAFT: nothing here approves.
+            report_narrative_json=json.dumps(built.get("narrative") or {},
+                                             ensure_ascii=False))
         if built["note"]:
             note = (note + " " + built["note"]).strip()
     except Exception as e:
@@ -563,7 +821,7 @@ def add_turn(session_id: str, req: TurnIn):
     Partials are not persisted by the dashboard — only finalised turns and the
     assistant's own spoken turns arrive here.
     """
-    _session_or_404(session_id)
+    _refuse_if_deleted(_session_or_404(session_id), "another line of transcript")
     turn = store.upsert_turn(
         session_id, text=req.text, realtime_item_id=req.realtime_item_id,
         role=req.role if req.role in ("human", "assistant") else "human",
@@ -577,9 +835,10 @@ def add_turn(session_id: str, req: TurnIn):
 def label_turn(session_id: str, turn_id: int, req: LabelIn):
     """A human typing in who was speaking. Nothing infers this (rule 80)."""
     _session_or_404(session_id)
-    turn = store.label_turn(turn_id, req.speaker_label)
+    turn = store.label_turn(turn_id, req.speaker_label, session_id=session_id)
     if not turn or turn.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="No such turn in this session.")
+    _touch_record(session_id)
     return {"turn": turn}
 
 
@@ -607,11 +866,53 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False) 
                 "No OpenAI API key is configured, so the consultation map cannot be "
                 "updated. The transcript is still being saved.")}
         state = store.get_state(sid)
+        base_revision = int(state.get("state_revision") or 0)
+        generation = store.deletion_generation(sid)
         recent = store.list_turns(sid, final_only=True, limit=reasoner.RECENT_WINDOW)
+
+        # THE NETWORK CALL. Nothing is held across it -- no lock on the database
+        # and no assumption that the map will still say what it said. A pass can
+        # take tens of seconds, and the person who is sitting there correcting
+        # the record is doing it during exactly that window (rule 104).
         result = reasoner.analyze(session, state, new_turns, recent, final_pass=final_pass)
         _LAST_ANALYSIS[sid] = time.time()
         if not result.ok:
             return {"ran": True, "ok": False, "note": result.note}
+
+        # The words this was built from may have been deleted while it ran.
+        if store.deletion_generation(sid) != generation:
+            return {"ran": True, "ok": False, "note": (
+                "The transcript was deleted while the map was being updated, so the "
+                "result was discarded rather than written back.")}
+
+        # REBASE, never overwrite. `result.state` was merged against the map as
+        # it stood BEFORE the call; saving it wholesale is what silently put a
+        # model's wording back over a human correction and reset `human_edited`
+        # to false. If the map has moved, the patch is re-merged onto what it
+        # says NOW -- so the correction stands and the model's reading of the new
+        # turns is still applied. No paid call is repeated to do it.
+        fresh = store.get_state(sid)
+        fresh_revision = int(fresh.get("state_revision") or 0)
+        rebased = False
+        if fresh_revision != base_revision:
+            merged, merge_notes = reasoner.merge(fresh, result.patch)
+            validated, problem = reasoner.validate_state(merged)
+            if problem:
+                return {"ran": True, "ok": False, "note": (
+                    "Someone edited the record while the map was being updated, and the "
+                    "result would not re-apply cleanly to the edited version, so the "
+                    "edit stands and the pass was dropped. " + problem)}
+            result.state = validated
+            result.notes = list(result.notes) + list(merge_notes)
+            result.notes.append(
+                f"re-applied onto revision {fresh_revision} after an edit during the pass")
+            rebased = True
+
+        # Anything a person took out stays out, however the map got here.
+        result.state, resurrected = store.strip_removed(sid, result.state)
+        if resurrected:
+            result.notes.append(
+                f"{resurrected} item(s) a person had deleted were not written back")
 
         # Provenance has to point at turns that exist IN THIS SESSION, or a
         # "supporting conversation" link opens nothing and the citation is
@@ -657,7 +958,7 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False) 
         return {
             "ran": True, "ok": True, "note": "", "why": why,
             "state": saved, "observations": added, "turns_analyzed": len(new_turns),
-            "writings": found, "merge_notes": result.notes,
+            "writings": found, "merge_notes": result.notes, "rebased": rebased,
         }
     finally:
         lock.release()
@@ -939,7 +1240,8 @@ def confirm_decision(session_id: str, decision_id: str, req: ConfirmIn = Confirm
     _session_or_404(session_id)
     _decision_or_404(session_id, decision_id)
     decision = store.set_decision_status(decision_id, "confirmed",
-                                         retained_concerns=req.retained_concerns)
+                                         retained_concerns=req.retained_concerns,
+                                         session_id=session_id)
     state = store.get_state(session_id)
     state["confirmed_decision"] = {
         "id": decision["id"], "text": decision["text"], "rationale": decision.get("rationale", ""),
@@ -950,6 +1252,7 @@ def confirm_decision(session_id: str, decision_id: str, req: ConfirmIn = Confirm
         if cand.get("text", "").strip().lower() == (decision["text"] or "").strip().lower():
             cand["status"] = "confirmed"
     saved = store.save_state(session_id, state)
+    _touch_record(session_id)
     return {"decision": decision, "state": saved}
 
 
@@ -959,11 +1262,14 @@ def reject_decision(session_id: str, decision_id: str):
     decision, which is a truthful thing for a meeting to end with."""
     _session_or_404(session_id)
     _decision_or_404(session_id, decision_id)
-    decision = store.set_decision_status(decision_id, "rejected")
+    decision = store.set_decision_status(decision_id, "rejected",
+                                         session_id=session_id)
+    _touch_record(session_id)
     state = store.get_state(session_id)
     if (state.get("confirmed_decision") or {}).get("id") == decision_id:
         state["confirmed_decision"] = None
     saved = store.save_state(session_id, state)
+    _touch_record(session_id)
     return {"decision": decision, "state": saved}
 
 
@@ -972,9 +1278,10 @@ def set_action_status(session_id: str, action_id: str, req: ActionStatusIn):
     _session_or_404(session_id)
     if req.status not in ("open", "done"):
         raise HTTPException(status_code=400, detail=f"Unknown status: {req.status}")
-    item = store.set_action_status(action_id, req.status)
+    item = store.set_action_status(action_id, req.status, session_id=session_id)
     if not item or item.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="No such action item in this session.")
+    _touch_record(session_id)
     return {"action_item": item}
 
 
@@ -991,6 +1298,9 @@ def client_secret(req: ClientSecretIn):
     minute, and a soft ceiling nobody is shown is not a ceiling (rule 85).
     """
     session = _session_or_404(req.session_id)
+    # The same gate as `/start`, at the place the money and the microphone
+    # actually are (rule 105).
+    _assert_may_listen(session)
     spend = realtime.spend_snapshot()
     if spend.get("over_ceiling") and not req.accept_over_ceiling:
         # Stated as a fact, with no instruction attached. It used to end "start
@@ -1069,7 +1379,7 @@ def add_participant(session_id: str, req: ParticipantIn):
 @router.delete("/sessions/{session_id}/participants/{participant_id}")
 def delete_participant(session_id: str, participant_id: str):
     _session_or_404(session_id)
-    if not store.remove_participant(participant_id):
+    if not store.remove_participant(participant_id, session_id=session_id):
         raise HTTPException(status_code=404, detail="No such participant.")
     return {"removed": True}
 
@@ -1084,7 +1394,8 @@ def map_participant_speaker(session_id: str, participant_id: str, req: SpeakerMa
     which is which (rule 91).
     """
     _session_or_404(session_id)
-    person = store.set_participant_speaker(participant_id, req.speaker_key)
+    person = store.set_participant_speaker(participant_id, req.speaker_key,
+                                           session_id=session_id)
     if not person:
         raise HTTPException(status_code=404, detail="No such participant.")
     applied = store.apply_speaker_names(session_id)
@@ -1247,18 +1558,74 @@ def time_warning(session_id: str, req: TimeWarningIn):
 async def upload_audio(session_id: str, file: UploadFile = File(...)):
     """Take the room's recording. Private, git-ignored, deleted with the session."""
     session = _session_or_404(session_id)
+    _refuse_if_deleted(session, "a recording")
     if not session.get("record_audio"):
         raise HTTPException(status_code=400,
                             detail="This meeting was not set to be recorded.")
-    data = await file.read()
+    data = await _read_bounded(file, audio.MAX_UPLOAD_BYTES, "recording")
     try:
-        path = audio.save_recording(session_id, data, file.filename or "meeting.webm")
+        path = await run_in_threadpool(
+            audio.save_recording, session_id, data, file.filename or "meeting.webm")
     except audio.AudioError as e:
         store.update_session(session_id, audio_status="failed", audio_note=str(e))
         raise HTTPException(status_code=400, detail=str(e))
     store.update_session(session_id, audio_status="uploaded", audio_note="")
     return {"saved": True, "bytes": path.stat().st_size,
             "session": store.get_session(session_id)}
+
+
+@router.post("/sessions/{session_id}/audio/chunk")
+async def upload_audio_chunk(session_id: str, recording_id: str, seq: int,
+                             file: UploadFile = File(...)):
+    """
+    One piece of a recording, saved as it is made (rule 113).
+
+    This is what makes "the recording is safe" true. Before it, every chunk sat
+    in a browser array until the meeting ended, so a crashed tab lost the whole
+    recording -- while the code's own comment said a timeslice meant a crash
+    cost only a few seconds.
+    """
+    session = _session_or_404(session_id)
+    _refuse_if_deleted(session, "a recording")
+    if not session.get("record_audio"):
+        raise HTTPException(status_code=400,
+                            detail="This meeting was not set to be recorded.")
+    data = await _read_bounded(file, audio.MAX_UPLOAD_BYTES, "recording chunk")
+    try:
+        result = await run_in_threadpool(
+            audio.append_chunk, session_id, recording_id, seq, data)
+    except audio.AudioError as e:
+        store.update_session(session_id, audio_status="failed", audio_note=str(e))
+        raise HTTPException(status_code=409, detail=str(e))
+    store.update_session(session_id, audio_status="recording", audio_note="")
+    return result
+
+
+@router.post("/sessions/{session_id}/audio/finalize")
+async def finalize_audio(session_id: str, recording_id: str):
+    """Say the recording is complete. Until this, a part file is not a recording."""
+    session = _session_or_404(session_id)
+    _refuse_if_deleted(session, "a recording")
+    try:
+        path = await run_in_threadpool(audio.finalize_recording, session_id, recording_id)
+    except audio.AudioError as e:
+        store.update_session(session_id, audio_status="failed", audio_note=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    store.update_session(session_id, audio_status="uploaded", audio_note="")
+    return {"saved": True, "bytes": path.stat().st_size,
+            "session": store.get_session(session_id)}
+
+
+@router.get("/sessions/{session_id}/audio/progress")
+def audio_progress(session_id: str, recording_id: str):
+    """How much of the recording the SERVER actually holds.
+
+    The only honest answer to "is it saved?". A browser knowing it emitted a
+    blob is not the same fact, and that is the difference this endpoint exists
+    to expose -- it is also how a reconnecting page finds out where to resume.
+    """
+    _session_or_404(session_id)
+    return audio.recording_progress(session_id, recording_id)
 
 
 @router.post("/dictate")
@@ -1274,9 +1641,15 @@ async def dictate(file: UploadFile = File(...)):
     It is behind the owner gate like everything else here (rule 70), so it is
     not an open transcription service; it is Sheraj's own microphone.
     """
-    data = await file.read()
+    data = await _read_bounded(file, audio.DICTATE_MAX_BYTES, "recording")
     try:
-        result = audio.transcribe_plain(data, file.filename or "note.webm")
+        # `transcribe_plain` makes a BLOCKING HTTP request. Awaited directly from
+        # an async endpoint it holds the event loop for the whole call, so one
+        # slow dictation stalled the consultation poll, the save of a turn, and
+        # every other request in flight (rule 110). It belongs on a worker
+        # thread, like every other blocking route in this router.
+        result = await run_in_threadpool(
+            audio.transcribe_plain, data, file.filename or "note.webm")
     except audio.AudioError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result
@@ -1292,6 +1665,8 @@ def diarize(session_id: str):
     transcript, never over it.
     """
     session = _session_or_404(session_id)
+    _refuse_if_deleted(session, "a speaker-separated transcript")
+    generation = store.deletion_generation(session_id)
     path = audio.recording_path(session_id)
     if not path:
         raise HTTPException(status_code=400,
@@ -1302,6 +1677,13 @@ def diarize(session_id: str):
     except audio.AudioError as e:
         store.update_session(session_id, audio_status="failed", audio_note=str(e))
         raise HTTPException(status_code=503, detail=str(e))
+    # Minutes may have passed inside that call. If the words were deleted while
+    # it ran, the result is made of text somebody asked to be gone (rule 100).
+    if store.deletion_generation(session_id) != generation:
+        store.update_session(session_id, audio_status="none", audio_note="")
+        raise HTTPException(status_code=409, detail=(
+            "The transcript of this consultation was deleted while the speakers were "
+            "being worked out, so the result was discarded rather than written back."))
     written = store.replace_diarized_turns(session_id, result["segments"])
     applied = store.apply_speaker_names(session_id)
     store.update_session(session_id, audio_status="done", audio_note="")
@@ -1317,18 +1699,22 @@ def diarize(session_id: str):
 
 # ── The report (rule 90) ────────────────────────────────────────────────────
 
-@router.post("/sessions/{session_id}/report")
-def make_report(session_id: str):
-    """
-    Build the one readable page the meeting produced.
+def _build_record(session: dict, reuse_narrative: bool) -> dict:
+    """Assemble the record from the CANONICAL rows, every time (rule 102).
 
-    The decision, the actions and any passages are copied out of the record; the
-    summarising prose is written by the reasoning model. A model failure costs
-    the prose and says so -- it never costs the report.
+    `reuse_narrative=True` re-uses prose already written and paid for, so the
+    deterministic half -- decisions, commitments, owners, acceptance, passages
+    -- refreshes from a corrected record with no model call. That is what makes
+    "the owner was wrong, fix it and re-export" work without a paid button.
     """
-    session = _session_or_404(session_id)
     sid = session["id"]
-    built = report.build_report(
+    narrative = None
+    if reuse_narrative:
+        try:
+            narrative = json.loads(session.get("report_narrative_json") or "{}")
+        except (ValueError, TypeError):
+            narrative = None
+    return report.build_report(
         session=session,
         state=store.get_state(sid),
         decisions=store.list_decisions(sid),
@@ -1336,11 +1722,109 @@ def make_report(session_id: str):
         writings=store.list_writings(sid),
         turns=store.list_turns(sid, source="best"),
         participants=store.list_participants(sid),
+        narrative=narrative or None,
     )
+
+
+def _record_status(session: dict) -> dict:
+    """Is what a person would export the thing a person actually approved?
+
+    Three states, and the UI shows which: never approved (a draft), approved and
+    current, approved but the record has CHANGED since -- that last one is the
+    honest answer to "I corrected an owner, is my export right?", and the old
+    code could not tell it apart from the second.
+    """
+    approved_at = session.get("approved_at")
+    revision = int(session.get("record_revision") or 0)
+    approved_revision = int(session.get("approved_revision") or 0)
+    if not approved_at:
+        return {"approved": False, "stale": False, "revision": revision,
+                "approved_revision": 0, "approved_at": None,
+                "note": "This is a draft. Nobody has approved it yet."}
+    stale = revision != approved_revision
+    return {
+        "approved": True, "stale": stale, "revision": revision,
+        "approved_revision": approved_revision, "approved_at": approved_at,
+        "note": ("The record has been edited since it was approved, so the approved "
+                 "copy is out of date. Review and approve it again."
+                 if stale else "Approved, and current."),
+    }
+
+
+@router.post("/sessions/{session_id}/report")
+def make_report(session_id: str, reuse_narrative: bool = False):
+    """
+    Build the one readable page the meeting produced -- as a DRAFT.
+
+    The decision, the actions and any passages are copied out of the record; the
+    summarising prose is written by the reasoning model. A model failure costs
+    the prose and says so -- it never costs the report.
+
+    `reuse_narrative=true` rebuilds the factual half from the record without
+    paying for the prose again. Nothing here approves anything: approval is a
+    person reading the preview and pressing the button (rule 102).
+    """
+    session = _session_or_404(session_id)
+    sid = session["id"]
+    built = _build_record(session, reuse_narrative)
     store.update_session(sid, report_md=built["markdown"],
-                         report_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                         report_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                         report_narrative_json=json.dumps(built.get("narrative") or {},
+                                                          ensure_ascii=False))
+    current = store.get_session(sid)
     return {"report": built["markdown"], "note": built["note"],
-            "narrated": built["narrated"], "session": store.get_session(sid)}
+            "narrated": built["narrated"], "session": current,
+            "record": _record_status(current)}
+
+
+@router.get("/sessions/{session_id}/report/preview")
+def preview_report(session_id: str):
+    """Exactly what approving would approve, and the revision it belongs to.
+
+    Free: it re-uses the prose already written and rebuilds everything else from
+    the record. A person must be able to READ the thing before putting their
+    name to it, and reading it must not cost anything or change anything.
+    """
+    session = _session_or_404(session_id)
+    built = _build_record(session, reuse_narrative=True)
+    status = _record_status(session)
+    return {"preview": built["markdown"], "record": status,
+            "approved": session.get("approved_md") or "",
+            "differs_from_approved":
+                (built["markdown"] or "").strip() != (session.get("approved_md") or "").strip()}
+
+
+@router.post("/sessions/{session_id}/report/approve")
+def approve_report(session_id: str, req: ApproveIn):
+    """
+    A person putting their name to the record (rule 102).
+
+    Approval is bound to the REVISION that was on screen. If anything changed
+    between the preview and this call, it is refused with the new text rather
+    than approving words nobody read -- which is the whole difference between an
+    approved record and a cached one.
+
+    This is also the only writer of `approved_md`. `report_md` beside it stays
+    what it always was: a draft, written automatically when the meeting ended.
+    """
+    session = _session_or_404(session_id)
+    status = _record_status(session)
+    if req.revision is not None and int(req.revision) != status["revision"]:
+        built = _build_record(session, reuse_narrative=True)
+        raise HTTPException(status_code=409, detail=(
+            "The record changed while you were reading it, so it was not approved. "
+            "Read the updated version and approve that."), headers={"X-Record-Revision":
+                                                                    str(status["revision"])})
+    built = _build_record(session, reuse_narrative=True)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    store.update_session(
+        session_id, approved_md=built["markdown"], approved_at=now,
+        approved_revision=status["revision"],
+        report_md=built["markdown"], report_at=now,
+        report_narrative_json=json.dumps(built.get("narrative") or {}, ensure_ascii=False))
+    current = store.get_session(session_id)
+    return {"approved": built["markdown"], "session": current,
+            "record": _record_status(current)}
 
 
 # ── Human authority over the map (rules 95-97) ──────────────────────────────
@@ -1384,6 +1868,7 @@ def edit_map_item(session_id: str, list_name: str, item_id: str, req: MapItemIn)
     item["human_edited"] = True
     item["human_reviewed"] = True
     saved = store.save_state(session_id, state)
+    _touch_record(session_id)
     return {"item": item, "state": saved}
 
 
@@ -1402,7 +1887,11 @@ def delete_map_item(session_id: str, list_name: str, item_id: str):
                         if not (isinstance(i, dict) and i.get("id") == item_id)]
     if len(state.get(list_name) or []) == before:
         raise HTTPException(status_code=404, detail="No such item in the consultation map.")
+    # Remembered by id, so an analysis pass that was already running cannot
+    # hand it back (rule 104). The text is not kept -- see the table comment.
+    store.record_removed_map_item(session_id, list_name, item_id)
     saved = store.save_state(session_id, state)
+    _touch_record(session_id)
     return {"deleted": True, "state": saved}
 
 
@@ -1417,6 +1906,7 @@ def review_map_item(session_id: str, list_name: str, item_id: str, req: ReviewIn
         raise HTTPException(status_code=404, detail="No such item in the consultation map.")
     item["human_reviewed"] = bool(req.reviewed)
     saved = store.save_state(session_id, state)
+    _touch_record(session_id)
     return {"item": item, "state": saved}
 
 
@@ -1436,9 +1926,10 @@ def correct_turn(session_id: str, turn_id: int, req: TurnTextIn):
         raise HTTPException(status_code=400,
                             detail="A corrected line cannot be empty. Delete the meeting "
                                    "instead if that is what you meant.")
-    turn = store.correct_turn(turn_id, text)
+    turn = store.correct_turn(turn_id, text, session_id=session_id)
     if not turn or turn.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="No such turn in this session.")
+    _touch_record(session_id)
     return {"turn": turn,
             "note": "The transcript is corrected. The consultation map is not rebuilt "
                     "automatically -- correct anything it got wrong directly."}
@@ -1452,6 +1943,7 @@ def create_action(session_id: str, req: ActionIn):
     item = store.create_action_item(session_id, req.action, req.owner, req.due)
     if not item:
         raise HTTPException(status_code=400, detail="An action needs some words.")
+    _touch_record(session_id)
     return {"action_item": item}
 
 
@@ -1461,19 +1953,43 @@ def edit_action(session_id: str, action_id: str, req: ActionPatchIn):
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="Nothing to change.")
-    item = store.update_action_item(action_id, **fields)
+    item = store.update_action_item(action_id, session_id=session_id, **fields)
     if not item or item.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="No such action item in this session.")
+    _touch_record(session_id)
     return {"action_item": item}
 
 
 @router.delete("/sessions/{session_id}/actions/{action_id}")
 def remove_action(session_id: str, action_id: str):
     _session_or_404(session_id)
-    items = {a["id"] for a in store.list_action_items(session_id)}
-    if action_id not in items:
+    if not store.delete_action_item(action_id, session_id=session_id):
         raise HTTPException(status_code=404, detail="No such action item in this session.")
-    return {"deleted": store.delete_action_item(action_id)}
+    _touch_record(session_id)
+    return {"deleted": True}
+
+
+def _status_for_acceptance(session_id: str, action_id: str,
+                           accepted: Optional[bool]) -> Optional[str]:
+    """Keep `status` and `owner_accepted` telling the same story (rule 101).
+
+    Accepting sets the status to `accepted`. REVOKING has to move it back off
+    `accepted`, or the record says both "Accepted" and "did not accept" at once
+    -- which is what it did: the endpoint passed `status=None` on a revoke, and
+    `update_action_item` skips None fields, so the old `accepted` simply stayed.
+
+    Work that has visibly moved on is left alone. Someone who withdraws from
+    something already `in_progress`, `blocked`, `completed` or `dropped` has not
+    undone it, and silently resetting that to `proposed` would erase a real
+    state nobody asked to change.
+    """
+    if accepted:
+        return "accepted"
+    current = next((a for a in store.list_action_items(session_id)
+                    if a["id"] == action_id), None)
+    if not current:
+        return None
+    return core.DEFAULT_ACTION_STATUS if current.get("status") == "accepted" else None
 
 
 @router.post("/sessions/{session_id}/actions/{action_id}/accept")
@@ -1488,11 +2004,12 @@ def accept_action(session_id: str, action_id: str, req: AcceptIn):
     """
     _session_or_404(session_id)
     item = store.update_action_item(
-        action_id, owner_accepted=req.accepted,
+        action_id, session_id=session_id, owner_accepted=req.accepted,
         accepted_by=(req.accepted_by or "").strip(),
-        status="accepted" if req.accepted else None)
+        status=_status_for_acceptance(session_id, action_id, req.accepted))
     if not item or item.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="No such action item in this session.")
+    _touch_record(session_id)
     return {"action_item": item}
 
 
@@ -1503,7 +2020,8 @@ def edit_decision(session_id: str, decision_id: str, req: DecisionPatchIn):
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="Nothing to change.")
-    decision = store.update_decision(decision_id, **fields)
+    decision = store.update_decision(decision_id, session_id=session_id, **fields)
+    _touch_record(session_id)
     return {"decision": decision}
 
 
@@ -1537,15 +2055,52 @@ def closeout(session_id: str, req: CloseoutIn):
         fields["reflection_at"] = req.reflection_at
     if req.retention_policy:
         fields["retention_policy"] = req.retention_policy
+
+    # Bound to the revision the host was reading, exactly like `/report/approve`
+    # (rule 102). Checked BEFORE the closeout's own write, since that write is
+    # itself a change to the record.
+    before = int(session.get("record_revision") or 0)
+    if req.approve_record and req.approve_revision is not None             and int(req.approve_revision) != before:
+        raise HTTPException(status_code=409, detail=(
+            "The record changed while you were reviewing it, so the closeout was not "
+            "saved. Read the updated version and approve that."))
+
     updated = store.update_session(session_id, **fields)
+    _touch_record(session_id)
+    updated = store.get_session(session_id)
 
     note = ""
+    if req.approve_record:
+        # The outcome and the note ARE part of the record, so the approved copy
+        # is built after they are written -- otherwise a host approves a report
+        # that does not mention how the meeting ended. Free: the prose is
+        # re-used, only the factual half is rebuilt.
+        try:
+            built = _build_record(updated, reuse_narrative=True)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            store.update_session(
+                session_id, approved_md=built["markdown"], approved_at=now,
+                approved_revision=int(updated.get("record_revision") or 0),
+                report_md=built["markdown"], report_at=now,
+                report_narrative_json=json.dumps(built.get("narrative") or {},
+                                                 ensure_ascii=False))
+            updated = store.get_session(session_id)
+        except Exception as e:
+            note = (f"The closeout is saved, but the record could not be rebuilt "
+                    f"({type(e).__name__}), so nothing was approved. Try Approve again "
+                    f"from the record.")
+
     # `until_closeout` means exactly this moment. Done here rather than on a
-    # timer so the deletion happens while the person who chose it is watching.
+    # timer so the deletion happens while the person who chose it is watching --
+    # and AFTER the approval above, or the record it approves would be built
+    # from a transcript that has just been deleted.
     if (updated or {}).get("retention_policy") == "until_closeout":
         removed = store.delete_transcript(session_id)
-        note = (f"The transcript has been deleted ({removed['turns']} lines). "
-                "The approved record is kept.")
+        note = (note + f" The transcript has been deleted ({removed['turns']} lines). "
+                       "The approved record is kept.").strip()
+        if removed.get("cleanup_failed"):
+            note += (" Some recording files could not be removed -- they are listed "
+                     "on the session so this can be retried.")
         updated = store.get_session(session_id)
     detail = _detail(updated)
     detail["note"] = note
@@ -1564,10 +2119,28 @@ def delete_transcript(session_id: str):
     _session_or_404(session_id)
     removed = store.delete_transcript(session_id)
     detail = _detail(store.get_session(session_id))
-    detail["note"] = (f"{removed['turns']} transcript line(s) deleted"
-                      + (f" and {removed['audio_files']} recording file(s) removed"
-                         if removed["audio_files"] else "")
-                      + ". The approved record is kept; the words are gone for good.")
+    # The whole summary, not a sentence about it. What was kept and what was
+    # removed are both named, because the screen makes a promise here and the
+    # only honest way to keep it is to say what the promise actually covered
+    # (rule 103).
+    detail["deleted"] = removed
+    parts = [f"{removed['turns']} transcript line(s) deleted"]
+    if removed["audio_files"]:
+        parts.append(f"{removed['audio_files']} recording file(s) removed")
+    if removed["observations"]:
+        parts.append(f"{removed['observations']} private observation(s) removed")
+    if removed["map_items_removed"]:
+        parts.append(f"{removed['map_items_removed']} unreviewed map item(s) removed")
+    note = ", ".join(parts) + "."
+    if removed["map_items_kept"]:
+        note += (f" {removed['map_items_kept']} item(s) a person reviewed by hand were "
+                 "kept, along with the decisions, commitments and passages.")
+    if removed["cleanup_failed"]:
+        # Never reported as a clean success. A database flag cannot prove a file
+        # left the disk, and this one did not.
+        note += (f" {len(removed['cleanup_failed'])} recording file(s) could NOT be "
+                 "removed from disk and are still there -- retry from the session.")
+    detail["note"] = note
     return detail
 
 
@@ -1686,6 +2259,20 @@ def _markdown(session: dict) -> str:
     return "\n".join(lines)
 
 
+@router.post("/sessions/{session_id}/cleanup/retry")
+def retry_cleanup(session_id: str):
+    """Try again to remove recording files a deletion could not (rule 103).
+
+    Deletion used to swallow an unlink failure and still report success, so a
+    recording could be left on disk while the screen said it was gone. What
+    remains is kept -- the file name and the error, never the content -- and
+    this is the way to clear it.
+    """
+    _session_or_404(session_id)
+    result = store.retry_cleanup(session_id)
+    return {**result, "session": store.get_session(session_id)}
+
+
 @router.get("/sessions/{session_id}/export", response_class=PlainTextResponse)
 def export_session(session_id: str, scope: str = "full"):
     """
@@ -1693,25 +2280,60 @@ def export_session(session_id: str, scope: str = "full"):
     It leaves the private store only because a person asked for it, by hand,
     one session at a time.
 
-    `scope=outcomes` is the APPROVED record alone — the report, which is what
-    somebody actually wants to send to a person who was not there. `scope=full`
-    adds the working map and the transcript, and is refused once the transcript
-    has been deleted rather than quietly returning a "full" export with the
-    largest part of it missing (rule 94).
+    Three scopes, and the difference between the first two is the whole point
+    (rule 102):
+
+    * `outcomes` -- the APPROVED record: the text a person read and put their
+      name to. It used to return `report_md`, which is the DRAFT written
+      automatically when the meeting ended, and call it approved. That draft was
+      available before any closeout had happened and did not change when an
+      owner was corrected, so an "approved record" could be sent to somebody
+      containing a fact the group had already fixed.
+    * `draft` -- the current unapproved text, explicitly labelled as one. A
+      draft may be exported; it may not be exported as an approved record.
+    * `full` -- the working record: map, transcript and all. Refused once the
+      transcript has been deleted, rather than quietly returning a "full"
+      export with the largest part of it missing (rule 94).
     """
     session = _session_or_404(session_id)
-    if scope not in ("full", "outcomes"):
+    if scope not in ("full", "outcomes", "draft"):
         raise HTTPException(status_code=400, detail=f"Unknown export scope: {scope}")
+
     if scope == "outcomes":
-        text = (session.get("report_md") or "").strip()
+        text = (session.get("approved_md") or "").strip()
         if not text:
-            raise HTTPException(
-                status_code=404,
-                detail="No approved record has been written for this consultation yet.")
-        return PlainTextResponse(text + "\n", media_type="text/markdown; charset=utf-8")
+            raise HTTPException(status_code=409, detail=(
+                "Nobody has approved a record for this consultation yet, so there is no "
+                "approved record to export. Review it and approve it first, or export "
+                "scope=draft to send the current draft as a draft."))
+        status = _record_status(session)
+        header = [f"<!-- Approved {status['approved_at']} -->"]
+        if status["stale"]:
+            # Not silently corrected and not silently sent either: the person
+            # exporting is told, in the file, that the record moved on.
+            header.append(
+                "> **Note:** this is the approved record. The consultation record has "
+                "been edited since it was approved, so this copy is not the latest.")
+            header.append("")
+        return PlainTextResponse("\n".join(header) + "\n" + text + "\n",
+                                 media_type="text/markdown; charset=utf-8")
+
+    if scope == "draft":
+        built = _build_record(session, reuse_narrative=True)
+        text = (built["markdown"] or "").strip()
+        if not text:
+            raise HTTPException(status_code=404,
+                                detail="There is nothing recorded for this consultation yet.")
+        banner = ("> **DRAFT — not approved.** Nobody has reviewed and approved this "
+                  "record.\n\n") if not session.get("approved_at") else (
+                 "> **DRAFT — newer than the approved record.**\n\n")
+        return PlainTextResponse(banner + text + "\n",
+                                 media_type="text/markdown; charset=utf-8")
+
     if session.get("transcript_deleted_at"):
         raise HTTPException(
             status_code=409,
             detail=("The transcript of this consultation was deleted, so there is no "
-                    "full export any more. The approved record is still available."))
+                    "full export any more. The approved record is still available "
+                    "(scope=outcomes)."))
     return PlainTextResponse(_markdown(session), media_type="text/markdown; charset=utf-8")

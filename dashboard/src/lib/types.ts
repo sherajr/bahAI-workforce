@@ -297,6 +297,57 @@ export interface ProductRow {
   recipient_feedback?: string | null;
 }
 
+/**
+ * What the shelf draws, without what it does not (rule 116).
+ *
+ * Deliberately NOT a `Partial<ProductRow>`: the heavy columns are not "missing
+ * and might turn up", they are never sent, and a type that said otherwise would
+ * invite a component to reach for `listing_copy` and find null. The score, the
+ * printed quote and the search blob are computed once on the server instead of
+ * re-parsed in the browser on every keystroke.
+ *
+ * A product's drawer fetches the full `ProductRow` when it opens.
+ */
+export interface ProductSummary {
+  kind: "product";
+  id: string;
+  task_id: string | null;
+  title: string | null;
+  theme: string | null;
+  product_type: string | null;
+  status: string | null;
+  created_at: string | null;
+  image_url: string | null;
+  front_image: string | null;
+  back_image: string | null;
+  etsy_listing_id: string | null;
+  revenue: number | null;
+  recipient_feedback: string | null;
+  target_reached?: number | null;
+  attempts?: number | null;
+  /** Parsed from the reviewer's scorecard on the server. */
+  review_overall: number;
+  quote: string;
+  citation: string;
+  language_name: string;
+  /** Which check passed this product's quotation. Empty means the retired
+   *  word-overlap check, which is not the same standard (rule 111). */
+  quote_verification_method: string;
+  search: string;
+}
+
+/** One page of the shelf, with the counts and filters applied to all of it. */
+export interface ProductsPage {
+  items: (ProductSummary | (FinishedVideo & { kind: "video"; search: string }))[];
+  counts: Record<string, number>;
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  videos_hidden: number;
+  videos_hidden_note: string;
+}
+
 export interface AgentStatus {
   name: string;
   trust_level: number;
@@ -1490,4 +1541,208 @@ export interface NucleiGroupingDetail {
 
 export interface NucleiQuietLights {
   items: { actor_id: number; display_name: string; days: number; sentence: string }[];
+}
+
+
+// ── Gatherings (rules 117-119) ───────────────────────────────────────────────
+//
+// A project is the thread that ties a piece of service together. Its
+// commitments are the consultation's OWN action items, read through the project
+// rather than copied into it, so accepting one here and accepting it in the
+// Consultation tab are the same act on the same record.
+
+export interface GatheringProject {
+  id: string;
+  title: string;
+  purpose: string;
+  stage: string;
+  gathering_at: string | null;
+  timezone: string;
+  notes: string;
+  reflection_at: string | null;
+  /** 1 when the host deliberately chose NOT to set a reflection date, which is
+   *  a different answer from having not decided yet. */
+  reflection_skipped: number;
+  reflection_notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GatheringStage {
+  label: string;
+  blurb: string;
+}
+
+export interface GatheringSessionRef {
+  id: string;
+  title: string;
+  status: string;
+  started_at: string | null;
+  ended_at: string | null;
+  closeout_outcome: string | null;
+  /** Null until a human approved the record. Only an approved record's outcomes
+   *  may be carried into a gathering (rule 118). */
+  approved_at: string | null;
+  transcript_deleted: boolean;
+}
+
+export interface GatheringOutcome {
+  id: string;
+  project_id: string;
+  session_id: string;
+  kind: string;
+  ref_id: string;
+  text: string;
+  note: string;
+  created_at: string;
+}
+
+export interface GatheringItem {
+  id: string;
+  title: string | null;
+  theme: string | null;
+  product_type: string;
+  front_image: string | null;
+  back_image: string | null;
+  image_url: string | null;
+}
+
+export interface ProgramItem {
+  id: string;
+  project_id: string;
+  position: number;
+  kind: string;
+  title: string;
+  body: string;
+  minutes: number | null;
+  /** Points at a verified passage by id. The programme never stores scripture
+   *  text of its own (rule 119). */
+  writing_id: string;
+}
+
+export interface KitReadiness {
+  cards: number;
+  program_items: number;
+  can_print_cards: boolean;
+  can_print_program: boolean;
+  /** What is actually wrong, not just "not ready". */
+  problems: string[];
+}
+
+/** The canonical commitment shape, as a gathering reads it. */
+export interface GatheringCommitment {
+  id: string;
+  session_id?: string;
+  action: string;
+  owner: string | null;
+  due: string | null;
+  status: string;
+  /** Tri-state: null is "nobody has recorded an answer", which is a different
+   *  and more honest fact than false (rule 101). */
+  owner_accepted: boolean | null;
+  accepted_by?: string;
+  success_criteria?: string;
+  support_needed?: string;
+  blocker?: string;
+  progress_note?: string;
+}
+
+export interface GatheringWriting {
+  id: string;
+  text: string;
+  source: string;
+  section: string;
+}
+
+export interface GatheringDetail {
+  project: GatheringProject;
+  stage_info: Partial<GatheringStage>;
+  sessions: GatheringSessionRef[];
+  outcomes: GatheringOutcome[];
+  commitments: GatheringCommitment[];
+  items: GatheringItem[];
+  program: ProgramItem[];
+  /** null when nobody supplied timings — not a guess (rule 117). */
+  program_minutes: number | null;
+  kit: KitReadiness;
+  writings: GatheringWriting[];
+}
+
+export interface GatheringSummary extends GatheringProject {
+  stage_info: Partial<GatheringStage>;
+  session_count: number;
+  item_count: number;
+  outcome_count: number;
+  commitments_total: number;
+  commitments_open: number;
+}
+
+export interface AvailableOutcomes {
+  offered: {
+    session_id: string; kind: string; ref_id: string; text: string;
+    retained_concerns?: string[];
+  }[];
+  /** Sessions whose outcomes are NOT eligible yet, WITH the reason — "nothing
+   *  here" and "you have not approved it yet" are different things to be
+   *  told (rule 118). */
+  waiting: { session_id: string; title: string; reason: string }[];
+  kinds: Record<string, string>;
+}
+
+// ── Home (rule 120) ─────────────────────────────────────────────────────────
+
+export interface HomeEntry {
+  kind: string;
+  id: string;
+  title: string;
+  detail?: string;
+  tab: string;
+  stage?: string;
+  when?: string;
+  started_by?: string;
+}
+
+export interface HomeNextAction {
+  id: string;
+  session_id: string;
+  action: string;
+  owner: string;
+  owner_accepted: boolean | null;
+  due: string;
+  status: string;
+  blocker: string;
+  tab: string;
+}
+
+export interface HomeReflection {
+  id: string;
+  title: string;
+  when: string;
+  overdue: boolean;
+  tab: string;
+}
+
+/** A section that could not be read reports itself rather than taking the whole
+ *  page down with it. */
+export type HomeSection<T> = T | { error: string; value: unknown };
+
+export interface HomeSummary {
+  continue: HomeSection<HomeEntry[]>;
+  running: HomeSection<HomeEntry[]>;
+  decisions: HomeSection<{ items: HomeEntry[]; total: number }>;
+  next_actions: HomeSection<{
+    accepted: HomeNextAction[];
+    accepted_total: number;
+    blocked: HomeNextAction[];
+    blocked_total: number;
+    reflections: HomeReflection[];
+  }>;
+  made: HomeSection<{ products: number; quote_cards: number; bookmarks: number }>;
+  generated_at: string;
+}
+
+/** Narrow a Home section that may have failed. */
+export function homeOk<T>(section: HomeSection<T>): T | null {
+  if (section && typeof section === "object" && "error" in (section as object)) return null;
+  return section as T;
 }

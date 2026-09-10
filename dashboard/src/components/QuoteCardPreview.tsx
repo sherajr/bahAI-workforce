@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invalidateProducts } from "../lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2 } from "lucide-react";
 import { api, imageUrl } from "../lib/api";
@@ -309,12 +310,12 @@ export function CardRedirectCard({ product }: { product: ProductRow }) {
 
   const quote = useMutation<RegenerateCardQuoteResult, Error, void>({
     mutationFn: () => api.regenerateCardQuote(product.id, guidance),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   const image = useMutation<RegenerateCardImageResult, Error, void>({
     mutationFn: () => api.regenerateCardImage(product.id, guidance),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   const redoAll = useMutation<{ job_id: string }, Error, void>({
@@ -334,7 +335,7 @@ export function CardRedirectCard({ product }: { product: ProductRow }) {
 
   useEffect(() => {
     if (job?.status === "done") {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
     }
   }, [job?.status, queryClient]);
 

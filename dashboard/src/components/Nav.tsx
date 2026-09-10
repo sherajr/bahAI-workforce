@@ -1,5 +1,6 @@
 import {
   Sparkles, Images, Orbit, Settings, MessageCircleHeart, Send, Clapperboard, Users,
+  House, HeartHandshake,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { NineStar } from "./NineStar";
@@ -9,10 +10,16 @@ import { RosterAvatar } from "./ui";
 // into the whole workforce — performance, handoffs, per-agent chat and
 // settings, team goals and team consultation. The trust scores and the product
 // quality history still live inside it, under Performance.
-export type Tab = "pipeline" | "products" | "video" | "x-posts" | "secretary" | "consultation"
-  | "colony" | "settings";
+export type Tab = "home" | "gatherings" | "pipeline" | "products" | "video" | "x-posts"
+  | "secretary" | "consultation" | "colony" | "settings";
 
 const TABS: { id: Tab; label: string; icon: typeof Sparkles; avatar?: string }[] = [
+  // Home first, and the default (rule 120): the dashboard used to open on the
+  // Pipeline form, which answers "make me a bookmark" rather than "what was I
+  // doing?".
+  { id: "home", label: "Home", icon: House },
+  // A piece of community service, from preparing to reflecting (rule 117).
+  { id: "gatherings", label: "Gatherings", icon: HeartHandshake },
   { id: "pipeline", label: "Pipeline", icon: Sparkles },
   { id: "products", label: "Products", icon: Images },
   { id: "video", label: "Video", icon: Clapperboard },

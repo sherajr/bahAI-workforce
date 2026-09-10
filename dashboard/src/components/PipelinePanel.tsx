@@ -4,7 +4,7 @@ import { CheckCircle2, ChevronDown, ChevronRight, ExternalLink, Loader2 } from "
 import { api, imageUrl } from "../lib/api";
 import { getActiveJobId, getSettings, setActiveJobId } from "../lib/settings";
 import type { CardBatchResult, Job, PipelineResult } from "../lib/types";
-import { badgeClasses, ROSTER } from "../lib/utils";
+import { invalidateProducts, badgeClasses, ROSTER } from "../lib/utils";
 import { BookmarkPreview } from "./BookmarkPreview";
 import { ConsultationPause } from "./ConsultationPause";
 import { ConsultationTranscript } from "./ConsultationTranscript";
@@ -241,7 +241,7 @@ export function PipelinePanel() {
   const jobStatus = job?.status;
   useEffect(() => {
     if (jobStatus === "done") {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
       queryClient.invalidateQueries({ queryKey: ["steward"] });
       queryClient.invalidateQueries({ queryKey: ["trust"] });
     }

@@ -187,14 +187,27 @@ def _narrative(session: dict, state: dict, call=None) -> tuple[dict, str]:
 
 def build_report(session: dict, state: dict, decisions: list[dict], actions: list[dict],
                  writings: list[dict], turns: list[dict], participants: list[dict],
-                 call=None) -> dict:
+                 call=None, narrative: dict | None = None) -> dict:
     """
-    Assemble the report. Returns {markdown, note, narrated}.
+    Assemble the report. Returns {markdown, note, narrated, narrative}.
 
     The deterministic half is built first and completely, so a model failure
     subtracts prose from a working document rather than producing nothing.
+
+    `narrative` re-uses prose that was already written and paid for (rule 102).
+    The RECORD half -- decisions, commitments, owners, acceptance, passages --
+    is copied verbatim from the store on every build, so correcting an owner and
+    rebuilding gives a correct report with no model call at all. Without this
+    the only way to get a changed fact into the report was to pay for the prose
+    again, which is why a "Write it again" button had become load-bearing for
+    something that is not a writing problem.
     """
-    fields, note = _narrative(session, state, call=call)
+    if narrative:
+        fields = {k: str(narrative.get(k) or "").strip()
+                  for k in ("in_short", "how_we_got_here", "still_open")}
+        note = ""
+    else:
+        fields, note = _narrative(session, state, call=call)
     title = session.get("title") or "Consultation"
     lines: list[str] = [f"# {title}", ""]
 
@@ -336,4 +349,7 @@ def build_report(session: dict, state: dict, decisions: list[dict], actions: lis
         "markdown": "\n".join(lines).rstrip() + "\n",
         "note": note,
         "narrated": bool(fields),
+        # Handed back so it can be stored and re-used: rebuilding the record
+        # sections must never require paying for the prose again (rule 102).
+        "narrative": dict(fields),
     }

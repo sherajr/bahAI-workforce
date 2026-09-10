@@ -41,14 +41,37 @@ export function Dictate({
   const chunksRef = useRef<Blob[]>([]);
   const startedAtRef = useRef(0);
 
+  // Bumped on unmount. `getUserMedia` is asynchronous, so a permission prompt
+  // answered after this component has gone resolves into a stream nobody owns
+  // -- and the old cleanup could not release it, because it ran BEFORE the
+  // stream existed (rule 114). The same race as the consultation hook's, in the
+  // place it is easiest to hit: a mic button on a form.
+  const aliveRef = useRef(0);
+
   const release = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     recorderRef.current = null;
   }, []);
 
-  // A component that unmounts mid-recording must not leave the mic open.
-  useEffect(() => release, [release]);
+  // A component that unmounts mid-recording must not leave the mic open -- and
+  // must not send a transcription request either. Detaching `onstop` first is
+  // what stops the recorder's own stop event calling `send()` into a component
+  // that is no longer on screen, which would be a paid call nobody asked for
+  // and whose text has nowhere to go.
+  useEffect(() => () => {
+    aliveRef.current += 1;
+    const rec = recorderRef.current;
+    if (rec) {
+      rec.onstop = null;
+      rec.ondataavailable = null;
+      if (rec.state !== "inactive") {
+        try { rec.stop(); } catch { /* already stopping */ }
+      }
+    }
+    chunksRef.current = [];
+    release();
+  }, [release]);
 
   const start = async () => {
     setError("");
@@ -56,14 +79,22 @@ export function Dictate({
       setError("This browser cannot record. Type it in instead.");
       return;
     }
+    const myGen = aliveRef.current;
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
+      if (aliveRef.current !== myGen) return;
       const name = (e as DOMException)?.name ?? "";
       setError(name === "NotAllowedError"
         ? "The microphone was blocked. Allow it for this page, or type it in."
         : "No microphone was found. Type it in instead.");
+      return;
+    }
+    if (aliveRef.current !== myGen) {
+      // Answered after this button went away. Release it here, because the
+      // cleanup that ran on unmount had nothing to release yet.
+      stream.getTracks().forEach((t) => t.stop());
       return;
     }
     streamRef.current = stream;

@@ -613,7 +613,15 @@ def parse_observations(patch: dict, state_revision: int) -> list[Observation]:
 class AnalysisResult:
     def __init__(self, ok: bool, state: dict, observations: list[Observation],
                  writings_theme: str = "", note: str = "", raw_error: str = "",
-                 notes: Optional[list[str]] = None):
+                 notes: Optional[list[str]] = None, patch: Optional[dict] = None,
+                 base_revision: int = 0):
+        # The validated patch this result came from, and the revision of the map
+        # it was merged against. Both exist so a result that arrives late can be
+        # REBASED onto whatever the map says now instead of overwriting it
+        # (rule 104) -- the model's work is not thrown away and a human edit made
+        # during the call is not either.
+        self.patch = patch or {}
+        self.base_revision = base_revision
         self.ok = ok
         self.state = state
         self.observations = observations
@@ -661,7 +669,8 @@ def analyze(session: dict, state: dict, new_turns: list[dict], recent_turns: lis
             "The updated map did not validate, so the previous one stands. " + problem))
     observations = parse_observations(patch, int(state.get("state_revision") or 0))
     theme = str(patch.get("writings_theme") or "").strip()[:200]
-    return AnalysisResult(True, validated, observations, writings_theme=theme, notes=notes)
+    return AnalysisResult(True, validated, observations, writings_theme=theme, notes=notes,
+                          patch=patch, base_revision=int(state.get("state_revision") or 0))
 
 
 # ── Context for a spoken answer ─────────────────────────────────────────────

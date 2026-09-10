@@ -7,10 +7,10 @@ import { api, BASE, frontImageUrl, imageUrl } from "../lib/api";
 import type { Tab } from "./Nav";
 import type {
   EditProductPayload, EditProductResult, EtsyPublishResult, FinishedVideo, ImproveResult, Job,
-  ProductRow, RegenerateImageResult, RegenerateQuoteResult,
+  ProductRow, ProductSummary, RegenerateImageResult, RegenerateQuoteResult,
 } from "../lib/types";
 import { getProductsUi, patchProductsUi, patchVideoUi } from "../lib/settings";
-import {
+import { invalidateProducts,
   badgeClasses, badgeForProduct, formatDate, isQuoteCard, parseCardCopy, parseListing,
   parseReview, usd,
 } from "../lib/utils";
@@ -78,15 +78,20 @@ function ProductCard({
   selected,
   onToggleSelect,
 }: {
-  product: ProductRow;
+  // A SUMMARY, not a whole product row (rule 116). The grid needs a thumbnail,
+  // a title, a score and a badge; it never needed the Etsy listing, the
+  // reviewer's full scorecard or the consultation transcript, all of which used
+  // to be downloaded for every product on the shelf to draw this. The score and
+  // the card's language are computed once on the server rather than re-parsed
+  // out of JSON here on every render.
+  product: ProductSummary;
   onOpen: () => void;
   selected: boolean;
   onToggleSelect: () => void;
 }) {
-  const review = parseReview(product);
-  const overall = review?.overall ?? 0;
-  const quoteCard = isQuoteCard(product);
-  const cardCopy = parseCardCopy(product);
+  const overall = product.review_overall ?? 0;
+  const quoteCard = (product.product_type ?? "bookmark") === "quote_card";
+  const language = product.language_name;
   // Final product renders (stored by the pipeline / backfill); fall back to the
   // legacy filename guess, then to the raw artwork for very old products.
   const front = imageUrl(product.front_image) || frontImageUrl(product.image_url);
@@ -134,13 +139,16 @@ function ProductCard({
       <div className="flex flex-1 flex-col gap-2 p-4">
         {quoteCard && (
           <div className="text-[10px] uppercase tracking-widest text-sky-300">
-            Quote card{cardCopy?.language_name ? ` · English + ${cardCopy.language_name}` : " · English"}
+            Quote card{language ? ` · English + ${language}` : " · English"}
           </div>
         )}
         <div className="line-clamp-2 text-sm font-medium text-slate-100">
           {product.title ?? product.theme ?? product.id}
         </div>
         <div className="mt-auto flex items-center justify-between">
+          {/* The badge is still decided by the shared helper, from the same two
+              inputs it always used, so the server and the browser cannot drift
+              into disagreeing about what a product's badge is. */}
           <BadgePill className={badgeClasses(badgeForProduct(product, overall))}>
             {badgeForProduct(product, overall)}
           </BadgePill>
@@ -365,7 +373,7 @@ function ProductDrawer({
   const edit = useMutation<EditProductResult, Error, EditProductPayload>({
     mutationFn: (payload) => api.editProduct(product.id, payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
       setEditing(false);
     },
   });
@@ -383,7 +391,7 @@ function ProductDrawer({
 
   const improve = useMutation<ImproveResult, Error, void>({
     mutationFn: () => api.improveProduct(product.id, notes),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   const publish = useMutation<EtsyPublishResult, Error, void>({
@@ -401,13 +409,13 @@ function ProductDrawer({
       }
       return api.publishToEtsy(product.id, true);
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   const record = useMutation({
     mutationFn: () => api.recordRevenue(product.id, parseFloat(revenue)),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
       queryClient.invalidateQueries({ queryKey: ["steward"] });
       setRevenue("");
     },
@@ -726,7 +734,7 @@ function FeedbackCard({ product }: { product: ProductRow }) {
 
   const save = useMutation({
     mutationFn: () => api.recordFeedback(product.id, text.trim()),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   return (
@@ -774,7 +782,7 @@ function RecordDeedCard({ product }: { product: ProductRow }) {
         note: note.trim(),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
       queryClient.invalidateQueries({ queryKey: ["steward"] });
       setCount(1);
       setNote("");
@@ -844,12 +852,12 @@ function RedirectCard({ product }: { product: ProductRow }) {
 
   const quote = useMutation<RegenerateQuoteResult, Error, void>({
     mutationFn: () => api.regenerateQuote(product.id, guidance),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   const image = useMutation<RegenerateImageResult, Error, void>({
     mutationFn: () => api.regenerateImage(product.id, guidance),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["products"] }),
+    onSuccess: () => invalidateProducts(queryClient),
   });
 
   const redoAll = useMutation<{ job_id: string }, Error, void>({
@@ -869,7 +877,7 @@ function RedirectCard({ product }: { product: ProductRow }) {
 
   useEffect(() => {
     if (job?.status === "done") {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
+      invalidateProducts(queryClient);
     }
   }, [job?.status, queryClient]);
 
@@ -997,7 +1005,8 @@ function DrawerImage({ label, src, downloadName }: { label: string; src: string;
 type GalleryItem =
   | {
       kind: "product"; id: string; type: "bookmark" | "quote_card"; title: string;
-      createdAt: string; score: number; badge: string; search: string; product: ProductRow;
+      createdAt: string; score: number; badge: string; search: string;
+      product: ProductSummary;
     }
   | {
       kind: "video"; id: string; type: "video"; title: string;
@@ -1021,28 +1030,21 @@ const SORTS: { id: string; label: string }[] = [
   { id: "title", label: "Title A–Z" },
 ];
 
-function productItem(product: ProductRow): GalleryItem {
-  const review = parseReview(product);
-  const overall = review?.overall ?? 0;
-  const card = parseCardCopy(product);
-  const listing = isQuoteCard(product) ? null : parseListing(product);
+function productItem(product: ProductSummary): GalleryItem {
+  const overall = product.review_overall ?? 0;
   return {
     kind: "product",
     id: product.id,
-    type: isQuoteCard(product) ? "quote_card" : "bookmark",
+    type: (product.product_type ?? "bookmark") === "quote_card" ? "quote_card" : "bookmark",
     title: product.title ?? product.theme ?? product.id,
     createdAt: product.created_at ?? "",
     score: overall,
     badge: String(badgeForProduct(product, overall)),
-    // Searched as one lower-cased blob: title, theme, id, the printed quote and
-    // its citation, and the listing's tags — the words Sheraj would actually
-    // type to find a piece again.
-    search: [
-      product.title, product.theme, product.id,
-      card?.quote, card?.citation, card?.language_name,
-      listing?.bookmark_quote, listing?.description, (listing?.tags ?? []).join(" "),
-      product.etsy_listing_id ? `etsy ${product.etsy_listing_id}` : "",
-    ].filter(Boolean).join(" ").toLowerCase(),
+    // The searchable blob is built once on the server now -- title, theme, id,
+    // the printed quote and citation, the listing's description and tags -- so
+    // it is not rebuilt in the browser out of parsed JSON on every keystroke,
+    // and the words searched are the same ones either way (rule 116).
+    search: product.search,
     product,
   };
 }
@@ -1140,6 +1142,9 @@ function GalleryToolbar({
 
 // ── Gallery ───────────────────────────────────────────────────────────────────
 
+/** How much of the shelf loads at once, and how much each "Show more" adds. */
+const PAGE = 60;
+
 export function ProductsGallery({ onNavigate }: { onNavigate?: (tab: Tab) => void } = {}) {
   const [open, setOpen] = useState<{ kind: "product" | "video"; id: string } | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -1157,17 +1162,34 @@ export function ProductsGallery({ onNavigate }: { onNavigate?: (tab: Tab) => voi
   const setSortBy = (v: string) => { setSort(v); patchProductsUi({ sort: v }); };
   const clearFilters = () => { setSearch(""); setKind("all"); setBadge("all"); };
 
-  const products = useQuery({
-    queryKey: ["products"],
-    queryFn: api.getProducts,
-    refetchInterval: 30_000,
-  });
+  // How much of the shelf is on screen. Grows with "Show more" and resets when
+  // the question changes -- a new filter is a new list, and keeping the old
+  // page depth would silently load hundreds of rows nobody asked for.
+  const [pageSize, setPageSize] = useState(PAGE);
+  useEffect(() => { setPageSize(PAGE); }, [search, kindFilter, badgeFilter, sort]);
 
-  // Finished videos come from the video project store, not the products table.
-  const videos = useQuery({
-    queryKey: ["finished-videos"],
-    queryFn: api.getFinishedVideos,
+  /**
+   * One bounded page, with search, filters and sort applied to the WHOLE shelf
+   * on the server (rule 116).
+   *
+   * This used to be `GET /products`, which returns every column of every row --
+   * the full Etsy listing, the whole scorecard, and the entire consultation
+   * transcript, which this grid does not display at all. On Sheraj's real
+   * history that is 1.58 MB to draw thumbnails; a page is 78 KB.
+   *
+   * The finished-video shelf is merged in on the server for the same reason it
+   * always existed (rule 58): derived on every read, never a products row. That
+   * is also why paging can be correct -- both halves are ordered together
+   * before the page is cut, rather than one being paged and the other appended.
+   */
+  const products = useQuery({
+    queryKey: ["products-page", pageSize, search, kindFilter, badgeFilter, sort],
+    queryFn: () => api.getProductsPage({
+      limit: pageSize, offset: 0, kind: kindFilter, search,
+      sort, badge: badgeFilter,
+    }),
     refetchInterval: 30_000,
+    placeholderData: (prev) => prev,   // no flash back to empty while typing
   });
 
   const steward = useQuery({
@@ -1186,46 +1208,37 @@ export function ProductsGallery({ onNavigate }: { onNavigate?: (tab: Tab) => voi
     );
   };
 
-  const items = useMemo<GalleryItem[]>(() => [
-    ...(products.data ?? []).map(productItem),
-    ...(videos.data?.videos ?? []).map(videoItem),
-  ], [products.data, videos.data]);
+  // Already filtered, already sorted, already paged -- by the server, across the
+  // whole shelf. The browser's job here is to draw it (rule 116).
+  const visible = useMemo<GalleryItem[]>(
+    () => (products.data?.items ?? []).map((i) =>
+      i.kind === "video" ? videoItem(i as FinishedVideo) : productItem(i as ProductSummary)),
+    [products.data]);
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { all: items.length, bookmark: 0, quote_card: 0, video: 0 };
-    for (const item of items) c[item.type] += 1;
-    return c;
-  }, [items]);
+  // Counts describe the WHOLE shelf, never the loaded page.
+  const counts = products.data?.counts ?? { all: 0, bookmark: 0, quote_card: 0, video: 0 };
+  const total = products.data?.total ?? 0;
+  const hasMore = products.data?.has_more ?? false;
 
-  const visible = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    const filtered = items.filter((item) => {
-      if (kindFilter !== "all" && item.type !== kindFilter) return false;
-      // A video carries no review score, so it can never match a score filter.
-      if (badgeFilter !== "all" && item.badge !== badgeFilter) return false;
-      if (needle && !item.search.includes(needle)) return false;
-      return true;
-    });
-    const byDate = (a: GalleryItem, b: GalleryItem) => a.createdAt.localeCompare(b.createdAt);
-    const sorted = [...filtered];
-    if (sort === "oldest") sorted.sort(byDate);
-    else if (sort === "title") sorted.sort((a, b) => a.title.localeCompare(b.title));
-    else if (sort === "score" || sort === "score_low") {
-      // Unscored videos sort to the end either way — they aren't "a zero".
-      sorted.sort((a, b) => {
-        if (a.score === null && b.score === null) return -byDate(a, b);
-        if (a.score === null) return 1;
-        if (b.score === null) return -1;
-        return sort === "score" ? b.score - a.score : a.score - b.score;
-      });
-    } else sorted.sort((a, b) => -byDate(a, b));
-    return sorted;
-  }, [items, search, kindFilter, badgeFilter, sort]);
-
-  const openProduct = open?.kind === "product"
-    ? products.data?.find((p) => p.id === open.id) ?? null : null;
+  /**
+   * The drawer's full row is fetched when the drawer opens.
+   *
+   * This is the other half of the shelf being bounded: everything the drawer
+   * needs and the grid does not -- the listing, the scorecard, the layout, the
+   * consultation transcript -- arrives for ONE product, when somebody actually
+   * looks at it, instead of for all of them on the way in.
+   */
+  const openProductQuery = useQuery({
+    queryKey: ["product", open?.kind === "product" ? open.id : null],
+    queryFn: () => api.getProduct((open as { id: string }).id),
+    enabled: open?.kind === "product",
+  });
+  const openProduct = open?.kind === "product" ? openProductQuery.data ?? null : null;
   const openVideo = open?.kind === "video"
-    ? videos.data?.videos.find((v) => v.id === open.id) ?? null : null;
+    ? (products.data?.items.find(
+        (i) => i.kind === "video" && (i as FinishedVideo).id === open.id) as
+        FinishedVideo | undefined) ?? null
+    : null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -1363,33 +1376,35 @@ export function ProductsGallery({ onNavigate }: { onNavigate?: (tab: Tab) => voi
           8765?
         </ErrorNote>
       )}
-      {/* The videos live behind their own endpoint — if it fails, say so instead
-          of quietly showing a shelf that's missing them. */}
-      {videos.isError && (
-        <ErrorNote>
-          Could not load finished videos: {(videos.error as Error).message}
-        </ErrorNote>
+      {/* Videos are merged into the shelf by the same endpoint now, so there is
+          no second request to fail on its own. When a review-result filter
+          hides them, the bar SAYS so — a filter that silently removes a whole
+          kind of thing is indistinguishable from a bug (rule 58). */}
+      {(products.data?.videos_hidden ?? 0) > 0 && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-400">
+          {products.data?.videos_hidden_note}
+        </div>
       )}
 
-      {items.length > 0 && (
+      {counts.all > 0 && (
         <GalleryToolbar
           search={search} onSearch={setSearch}
           kind={kindFilter} onKind={setKind}
           badge={badgeFilter} onBadge={setBadge}
           sort={sort} onSort={setSortBy}
-          counts={counts} showing={visible.length} total={items.length}
+          counts={counts} showing={visible.length} total={total}
           onClear={clearFilters}
         />
       )}
 
-      {!products.isLoading && items.length === 0 && (
+      {!products.isLoading && counts.all === 0 && (
         <Card>
           <CardContent className="pt-5 text-sm text-slate-400">
             No products yet. Head to the Pipeline tab and give the team its first theme.
           </CardContent>
         </Card>
       )}
-      {items.length > 0 && visible.length === 0 && (
+      {counts.all > 0 && total === 0 && (
         <Card>
           <CardContent className="flex flex-wrap items-center gap-3 pt-5 text-sm text-slate-400">
             Nothing matches these filters.
@@ -1420,6 +1435,59 @@ export function ProductsGallery({ onNavigate }: { onNavigate?: (tab: Tab) => voi
         )}
       </div>
 
+      {/* Selection survives paging and filtering, so it has to be possible to
+          see that something is selected which is not currently on screen --
+          otherwise a print sheet quietly contains things the person cannot
+          find. */}
+      {selectedIds.length > 0 && selectedIds.some(
+        (id) => !visible.some((v) => v.id === id)) && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-400/30 bg-amber-400/5 px-4 py-2 text-xs text-amber-200">
+          {selectedIds.filter((id) => !visible.some((v) => v.id === id)).length} selected
+          item(s) are not shown by these filters. They are still selected and will still
+          be printed.
+          <button onClick={() => setSelectedIds([])}
+                  className="underline hover:text-amber-100">
+            Clear the selection
+          </button>
+        </div>
+      )}
+
+      {hasMore && (
+        <div className="flex flex-col items-center gap-1 py-2">
+          <Button variant="secondary" onClick={() => setPageSize((n) => n + PAGE)}
+                  loading={products.isFetching}>
+            Show more
+          </Button>
+          <div className="text-xs text-slate-500">
+            Showing {visible.length} of {total}
+          </div>
+        </div>
+      )}
+
+      {/* The drawer's full row is fetched when it opens, so there is a moment
+          with nothing to draw. Say so, rather than a click that appears to do
+          nothing — and say it plainly if the fetch fails (rule 116). */}
+      {open?.kind === "product" && openProductQuery.isLoading && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/60"
+             role="status" aria-live="polite">
+          <div className="rounded-lg border border-slate-800 bg-slate-900 px-5 py-3 text-sm text-slate-300">
+            Opening…
+          </div>
+        </div>
+      )}
+      {open?.kind === "product" && openProductQuery.isError && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/60">
+          <Card className="max-w-md">
+            <CardContent className="space-y-3 pt-5 text-sm text-slate-300">
+              <div>
+                This product could not be opened:{" "}
+                {(openProductQuery.error as Error).message}
+              </div>
+              <Button variant="secondary" onClick={() => setOpen(null)}>Close</Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
       {openProduct && (
         <ProductDrawer
           product={openProduct}

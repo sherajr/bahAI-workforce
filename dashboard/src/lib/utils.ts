@@ -45,7 +45,12 @@ export function badgeFor(overall: number): Badge {
  * looks like a clean pass. target_reached null/undefined = saved before the
  * pipeline tracked this — fall back to the score-range badge.
  */
-export function badgeForProduct(row: ProductRow, overall: number): Badge {
+export function badgeForProduct(
+  // Widened to the ONE field this actually reads, so the shelf's bounded
+  // summary and the drawer's full row can both use it (rule 116). Duplicating
+  // the badge rule for the summary would have been the drift this avoids.
+  row: Pick<ProductRow, "target_reached">, overall: number,
+): Badge {
   return row.target_reached === 0 ? "BEST EFFORT" : badgeFor(overall);
 }
 
@@ -197,4 +202,23 @@ export function formatDate(iso: string | null | undefined): string {
 
 export function usd(n: number): string {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
+
+/**
+ * Refresh everything that shows a product after a mutation (rule 116).
+ *
+ * The shelf reads a bounded, filter-keyed page (`["products-page", ...]`) and a
+ * drawer reads one full row (`["product", id]`), while other callers still read
+ * the whole list (`["products"]`). React Query matches keys by PREFIX, so
+ * invalidating `["products"]` alone leaves the shelf and the open drawer stale
+ * -- which looks exactly like a mutation that did not work. One helper, so no
+ * call site has to remember all three.
+ */
+export function invalidateProducts(qc: {
+  invalidateQueries: (f: { queryKey: unknown[] }) => unknown;
+}): void {
+  qc.invalidateQueries({ queryKey: ["products"] });
+  qc.invalidateQueries({ queryKey: ["products-page"] });
+  qc.invalidateQueries({ queryKey: ["product"] });
 }

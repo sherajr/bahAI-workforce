@@ -125,9 +125,27 @@ Fresh setup elsewhere:
 
 ```bash
 pip install -r requirements.txt
+python -c "import agents.api"                                    # import check
 python -m uvicorn agents.api:app --host 127.0.0.1 --port 8765   # backend
 cd dashboard && npm install && npm run dev                       # UI on :5173
 ```
+
+The import check is worth running on a fresh install: `requirements.txt` is the
+whole declared backend dependency set and there is no lockfile, so a
+`ModuleNotFoundError` there is a real gap in that file rather than a local
+problem. (`python-multipart` was one such gap until 2026-09-09 — without it the
+ENTIRE API failed to import, not just the two upload routes that use it.)
+
+The offline suites need none of the above — no `.env`, no API key, no private
+database, no network. They are the fastest way to check a change:
+
+```bash
+python scripts/test_live_consultation.py   # Live Consultation
+python scripts/test_quote_verify.py        # exact quotation verification
+python scripts/test_api_auth.py            # every endpoint is owner-gated
+```
+
+AGENTS.md lists all ten and their check counts.
 
 Requires: Ollama running locally (`qwen3-16k`, `nomic-embed-text`), an xAI API
 key in `.env` (images + review), and `scripts/download_texts.py` +
@@ -139,13 +157,18 @@ keys all optional.
 
 | Path | What it is |
 |---|---|
-| `AGENTS.md` | **Canonical dev orientation for any AI coding tool** — commands, pipelines, 28 hard rules, gotchas |
+| `AGENTS.md` | **Canonical dev orientation for any AI coding tool** — commands, pipelines, the numbered hard rules (1–116), gotchas |
 | `CLAUDE.md` | Thin `@AGENTS.md` import for Claude Code — don't edit directly |
 | `STATUS.md` | Living snapshot + running log of recent sessions across all tools |
 | `bahai-workforce-constitution.md` | The 9 principles every product is scored against |
 | `docs/consultation-constitution.md` | What the live consultation assistant works under — the half asked of the model, and the half enforced in code |
 | `agents/api.py` | FastAPI backend — all endpoints + both pipeline orchestrations |
 | `agents/consultation.py` | The 3-round, scripture-grounded team consultation (one human pause) — the PRODUCT pipeline's, not the live one |
+| `agents/quote_verify.py` | The one place a quotation earns a "verified" label: the source's own words, in order, with honest boundaries and real attribution (rule 111). Replaced a word-overlap score that passed a sentence with the negation deleted |
+| `agents/gathering.py`, `gathering_api.py` | A piece of community service from preparing to reflecting (rules 117-119): purpose, consultation, approved outcomes, who accepted what, materials, printed kit, reflection. Its records live in `private/consultation.db`; its commitments ARE the consultation's action items, never a copy |
+| `agents/program_sheet.py` | The gathering programme as a printable PDF — a SEPARATE file from the card sheet, because a programme page inside a duplex card grid puts every card back on the wrong side (rule 119) |
+| `agents/home_api.py` | The Home screen's one cheap read: what to continue, what needs a decision, what happens next (rule 120) |
+| `agents/products_api.py` | The Products shelf as a bounded page, with search and filters applied to the whole shelf (rule 116) |
 | `agents/live_consultation*.py` | Live Consultation: Abigail sitting in on a real meeting over the OpenAI Realtime API — the floor governor, the silent brain, the private store (`private/consultation.db`), the recording and the end-of-meeting report. In a room she carries none of Sheraj's private data (rule 88) |
 | `scripts/download_consultation_compilation.py`, `ingest_consultation.py` | `Consultation: A Compilation` (bahai.org) as a verified corpus for the live consultation only. Its OWN ChromaDB collection, deliberately not `bahai_texts`, so what a quote card may print is unchanged (rule 11) |
 | `agents/librarian.py` | Vector search over the writings (ChromaDB); citation verification |

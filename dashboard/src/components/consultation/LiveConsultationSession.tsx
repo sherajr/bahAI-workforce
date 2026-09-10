@@ -6,7 +6,9 @@ import {
 } from "lucide-react";
 import { api } from "../../lib/api";
 import * as gov from "../../lib/consultationGovernor";
+import { registerLeaveGuard } from "../../lib/navGuard";
 import { useRealtimeConsultation } from "../../hooks/useRealtimeConsultation";
+import { useConsultationUpdates } from "../../hooks/useConsultationUpdates";
 import type {
   ConsultationCapabilities, ConsultationMode, ConsultationObservation,
   ConsultationPresence,
@@ -43,11 +45,15 @@ export function LiveConsultationSession({
   const [now, setNow] = useState(Date.now());
   const autoStarted = useRef(false);
 
+  // Read the whole session ONCE, then take deltas (rule 115). The four-second
+  // full refetch that used to be here re-sent the entire transcript -- twice --
+  // on every tick, so an hour-long meeting paid more per poll than a five-minute
+  // one for exactly the same information.
   const { data, error } = useQuery({
     queryKey: ["consultation", sessionId],
     queryFn: () => api.getConsultation(sessionId),
-    refetchInterval: 4000,
   });
+  useConsultationUpdates(sessionId, true);
 
   const refresh = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["consultation", sessionId] });
@@ -83,11 +89,43 @@ export function LiveConsultationSession({
 
   const endSession = useMutation({
     mutationFn: async () => {
-      live.stop();
+      // AWAITED. `stop()` finishes and finalises the recording, and ending the
+      // meeting used to race it -- the screen moved on to closeout while the
+      // last seconds of audio were still being saved, and a failure surfaced
+      // after the record had already been called complete (rule 113).
+      await live.stop();
       return api.endConsultation(sessionId);
     },
     onSuccess: () => { refresh(); onEnded(); },
   });
+
+  /**
+   * Leaving this screen while the microphone is open (rule 114).
+   *
+   * The choice is deliberately only two things, and neither of them is "end the
+   * meeting": ending a consultation is a separate, deliberate act that leads to
+   * the closeout, and a mis-click on the sidebar must never be able to perform
+   * it. Stopping listening is honest about what it does -- the session stays
+   * open and resumable, and says so.
+   */
+  useEffect(() => {
+    const listening = live.connection === "live" || live.connection === "connecting"
+      || live.connection === "starting" || live.connection === "reconnecting";
+    if (!listening) return;
+    return registerLeaveGuard(async () => {
+      const leave = window.confirm(
+        "This consultation is still listening." + "\n\n" +
+        "OK: stop listening and leave. The meeting is NOT ended -- it stays open "
+        + "and you can resume listening when you come back." + "\n" +
+        "Cancel: stay on this screen."
+      );
+      if (!leave) return "stay";
+      // Await the recording's finalisation before the panel is unmounted, so
+      // the last chunks are saved rather than racing the navigation.
+      await live.stop();
+      return "leave";
+    });
+  }, [live.connection, live]);
 
   const setMode = useMutation({
     mutationFn: (mode: ConsultationMode) => api.patchConsultation(sessionId, { mode }),
@@ -221,7 +259,14 @@ export function LiveConsultationSession({
             {!isLive && !connecting && (
               <Button onClick={() => void live.start()}>
                 <Play className="h-4 w-4" />
-                {live.connection === "error" ? "Reconnect" : "Start listening"}
+                {/* "Resume" once this meeting has already been listening, so
+                    coming back to a session that was left is not mistaken for
+                    starting a new one -- and so it is clear the meeting was
+                    never ended (rule 114). Resuming is always a press: nothing
+                    reopens a microphone because a panel mounted. */}
+                {live.connection === "error"
+                  ? "Reconnect"
+                  : data?.session.started_at ? "Resume listening" : "Start listening"}
               </Button>
             )}
             {connecting && (
@@ -256,6 +301,24 @@ export function LiveConsultationSession({
         </ErrorNote>
       )}
       {live.error && <ErrorNote>{live.error}</ErrorNote>}
+      {/* What the SERVER holds, not what the browser emitted. A recording light
+          that reflects only the second is not a claim about safety (rule 113). */}
+      {live.saveFailed && <ErrorNote>{live.saveFailed}</ErrorNote>}
+      {live.recording && !live.saveFailed && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-400">
+          Recording saved as it is made — {(live.savedBytes / (1024 * 1024)).toFixed(1)} MB
+          stored so far
+          {live.savePending > 0 && `, ${live.savePending} piece(s) still to send`}.
+          {!data?.session.started_at && " "}
+        </div>
+      )}
+      {!isLive && data?.session.started_at && data.session.status !== "ended" && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-400">
+          This consultation is open but not listening. The meeting has not been ended —
+          press Resume listening to carry on, or End the consultation when the group is
+          finished.
+        </div>
+      )}
       {live.analysisNote && (
         <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs text-slate-400">
           {live.analysisNote}

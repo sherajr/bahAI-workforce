@@ -8,6 +8,11 @@ python-bidi>=0.4.2
 hnswlib>=0.8
 numpy>=1.26
 pydantic>=2.6
+python-multipart>=0.0.9  # multipart/form-data parsing — REQUIRED by the audio upload
+                         # and dictation routes in agents/live_consultation_api.py
+                         # (`UploadFile = File(...)`). FastAPI raises at IMPORT time
+                         # without it, so its absence here took down the whole API on
+                         # a clean install, not just the two routes that use it.
 anthropic>=0.60
 tweepy>=4.14.0
 chromadb>=0.5           # vector_store/ — agents/librarian.py, scripts/ingest_*.py
