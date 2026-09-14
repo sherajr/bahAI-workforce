@@ -1051,9 +1051,20 @@ def make_executor(event_map: dict, effects: dict, contain: bool = True):
                 if not whatsapp.is_configured():
                     return "WhatsApp isn't connected yet — nothing sent."
                 if whatsapp.is_owner(to) or store.is_allowlisted(to):
+                    # Whether the 24-hour window is open decides what actually
+                    # goes out, and only this module can see it - so say which
+                    # one happened, exactly as nuclei_bridge.send_to_contact
+                    # does. "Sent." over a template send is a claim about
+                    # wording the recipient did not receive.
+                    open_window = whatsapp.within_24h_window(to, store=store)
                     whatsapp.send_best_effort(to, body)
                     effects["workspace"].append(f"sent WhatsApp message to {to}")
-                    return f"Sent WhatsApp message to {to}."
+                    if open_window:
+                        return f"Sent WhatsApp message to {to}."
+                    return (f"Sent to {to}, but the 24-hour window has closed, so it "
+                            f"went out through the pre-approved template and the wording "
+                            f"they see may differ. That template has never been confirmed "
+                            f"working - tell Sheraj to check it arrived.")
                 desc = f"Send WhatsApp message to {to}: {body[:60]}"
                 aid = _queue("whatsapp_send", desc, {"to": to, "body": body})
                 effects["queued_for_approval"].append(f"#{aid} {desc}")
@@ -1181,6 +1192,17 @@ def make_executor(event_map: dict, effects: dict, contain: bool = True):
                 from agents.secretary_colony import PrivateLeak
                 if isinstance(e, PrivateLeak):
                     return f"Nothing was written to the workforce's records: {e}"
+            except Exception:
+                pass
+            # A provider that explained itself must reach Sheraj in ITS OWN
+            # words. `WhatsAppError` exists precisely because the class name
+            # alone ("HTTPError") told him nothing he could act on.
+            try:
+                from agents.whatsapp import WhatsAppError
+                if isinstance(e, WhatsAppError):
+                    if name in write_tool_names:
+                        effects["errors"].append(f"{name} failed: {e}")
+                    return f"{name} did not go through. {e}"
             except Exception:
                 pass
             if name in write_tool_names:

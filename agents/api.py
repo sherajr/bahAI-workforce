@@ -5578,7 +5578,7 @@ def _handle_whatsapp_message(msg: dict):
             result = secretary.chat(msg["text"], channel="whatsapp")
             whatsapp.send_text(phone, result["reply"])
         except Exception as e:
-            secretary_store.add_notification("scheduler_error", f"WhatsApp reply failed: {type(e).__name__}")
+            secretary_store.add_notification("scheduler_error", f"WhatsApp reply failed: {whatsapp.why(e)}")
     else:
         contact = secretary_store.get_contact_by_phone(phone)
         if contact and contact.get("allowlisted"):
@@ -5587,7 +5587,7 @@ def _handle_whatsapp_message(msg: dict):
                 whatsapp.send_text(phone, result["reply"])
             except Exception as e:
                 secretary_store.add_notification("scheduler_error",
-                    f"WhatsApp guest reply to {contact['name']} failed: {type(e).__name__}")
+                    f"WhatsApp guest reply to {contact['name']} failed: {whatsapp.why(e)}")
         else:
             try:
                 whatsapp.send_text(phone, "This is Abigail, Sheraj's personal assistant — "

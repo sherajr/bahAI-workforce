@@ -96,14 +96,17 @@ def next_occurrence(fire_at: datetime, recurrence: str) -> datetime | None:
 def _deliver(title: str, kind: str = "reminder"):
     store.add_notification(kind, title)
     store.add_message("assistant", f"⏰ Reminder: {title}", channel="dashboard")
+    # Imported OUTSIDE the try: the handler below calls whatsapp.why(), so a
+    # failed import would leave the name unbound and turn a noted hiccup into
+    # a NameError that loses the notification entirely.
+    from agents import whatsapp
     try:
-        from agents import whatsapp
         if whatsapp.is_configured():
             whatsapp.send_best_effort(whatsapp.WHATSAPP_OWNER_NUMBER, f"⏰ Reminder: {title}")
     except Exception as e:
         # Best-effort only — the dashboard delivery above already happened,
         # so a WhatsApp hiccup is a notice, not a lost reminder.
-        store.add_notification("scheduler_error", f"WhatsApp delivery failed: {type(e).__name__}")
+        store.add_notification("scheduler_error", f"WhatsApp delivery failed: {whatsapp.why(e)}")
 
 
 # ── Tick parts ─────────────────────────────────────────────────────────────────

@@ -165,6 +165,45 @@ scratch):
 
 ## Activity Log (newest first)
 
+### 2026-09-11 -- Claude Code (Opus 5) -- a WhatsApp send that failed for a reason nobody could read
+
+Sheraj asked Abigail to send a friend a morning prayer over WhatsApp. It failed,
+and all she could tell him was `send_whatsapp failed: HTTPError`. Two separate
+problems, both now fixed in `agents/whatsapp.py`.
+
+**Why it actually failed**: the friend IS on the trusted-contacts allowlist, but
+his last inbound message was 2026-07-12, so the 24-hour free-form window has been
+shut for two months. `send_best_effort` therefore fell through to the
+`secretary_update` template -- the one AGENTS.md has flagged as unproven since
+2026-07-11. It is not unproven any more: Meta answers HTTP 404 / error 132001,
+"template name (secretary_update) does not exist in en_US". Checked live the same
+day: the token is a permanent System User token and is valid (`expires_at: 0`),
+the phone number id resolves, and it is still Meta's sandbox **Test Number**
+(+1 555-156-8050, five-recipient limit). **Consequence beyond this one message:
+every scheduler reminder fired outside the 24-hour window is being silently
+dropped.** Creating the template in WhatsApp Manager is an owner action in Meta's
+console (UTILITY, body exactly `{{1}}`, en_US) -- no code change, `GET
+/whatsapp/setup` walks through it.
+
+**Why he could not see any of that**: `resp.raise_for_status()` throws away the
+response body, which is the only place Meta explains itself. Every send now goes
+through one `whatsapp._post` chokepoint that raises `WhatsAppError` carrying
+Meta's code translated into plain language (`_ERROR_HELP`, including the sandbox
+number's 131030 and the closed-window 131047); `send_best_effort` names the shut
+window as the reason a template was attempted and says that asking the friend to
+message first reopens it; `whatsapp.why(exc)` is what the webhook reply paths
+(`api._handle_whatsapp_message`) and `scheduler._deliver` now print instead of a
+bare class name. `why()` does not widen to `str(exc)` for arbitrary exceptions --
+those can carry request bodies, and a notification is no place for message
+content (rule 15). Abigail's `send_whatsapp` tool also now distinguishes a real
+send from a template send, the way `nuclei_bridge.send_to_contact` already did.
+
+Nothing new was added to the numbered rules; this is the existing "never fail
+silently" norm applied where it had been missed. Suites unchanged and green
+(nuclei 281, injection 50, secretary-colony 92, api-auth 66, colony 135,
+job-cancel 24) plus `npx tsc --noEmit` clean. The backend was restarted so the
+change is live -- it runs without `--reload`.
+
 ### 2026-09-09/10 -- Claude Code (Opus 5) -- the record survives real request ordering; quotations verified exactly; the dashboard stops costing so much to open; Gatherings and Home
 
 Worked from a review of the repo at `20ea32c` that listed eight P0-class defects

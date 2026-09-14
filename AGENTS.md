@@ -2239,9 +2239,29 @@ the printed programme, `agents/home_api.py` the front page. Verify with
   (default `secretary_update`), and on 2026-07-11 that template did not exist in
   Meta's system — error 132001 in every language, while `hello_world` sent fine.
   It needs a UTILITY template of that exact name, body exactly `{{1}}`, English
-  (US), approved in WhatsApp Manager; no code change. Unverified since, so treat
-  scheduler reminders sent outside the 24-hour window as unproven until someone
-  checks. `GET /whatsapp/setup` walks through creating it.
+  (US), approved in WhatsApp Manager; no code change. `GET /whatsapp/setup`
+  walks through creating it. **Re-confirmed still broken 2026-09-11**: a message
+  to an allowlisted friend whose last inbound was two months old fell through to
+  the template and came back HTTP 404 / error 132001, "template name
+  (secretary_update) does not exist". So it is not unproven any more — it is
+  known not to work, and every scheduler reminder sent outside the window is
+  being dropped. The token was checked live the same day and is fine (permanent
+  System User, `expires_at: 0`), so a template failure must never be diagnosed
+  as an expired token.
+- **A provider's refusal must reach Sheraj in the provider's own words.**
+  `whatsapp.py` used `resp.raise_for_status()`, which discards the response
+  BODY — the only place Meta says what was wrong. The 132001 above surfaced in
+  the dashboard as `send_whatsapp failed: HTTPError` and nothing else, which is
+  the Canva-autofill silent failure with a status code on top: he cannot act on
+  it, and it reads as "WhatsApp is broken" rather than "that template was never
+  created". Every send now goes through one `whatsapp._post` chokepoint raising
+  `WhatsAppError` with Meta's code translated into plain language (`_ERROR_HELP`,
+  which covers the sandbox test number's 131030 and the closed-window 131047),
+  `send_best_effort` names the closed window as the REASON a template was tried
+  at all, and `whatsapp.why(exc)` is what notification strings print.
+  `why()` deliberately does NOT widen to `str(exc)` for an arbitrary exception —
+  that can carry a request body, and a notification is not a place message
+  content may appear (rule 15).
 - **A WABA sends webhook events to whichever Meta app is in its
   `subscribed_apps` list** — a separate, API-level link from the App Dashboard's
   Callback URL/Verify Token and from the per-field "Subscribe" toggle. All of

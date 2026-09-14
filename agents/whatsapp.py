@@ -66,16 +66,93 @@ def is_owner(phone: str) -> bool:
 
 # ── Outbound ─────────────────────────────────────────────────────────────────
 
-def send_text(to: str, body: str) -> dict:
-    """Free-form text — only valid within the 24-hour window (within_24h_window)."""
+class WhatsAppError(RuntimeError):
+    """A send Meta refused, carrying Meta's OWN explanation of why.
+
+    `resp.raise_for_status()` throws the response BODY away, and the body is
+    the only place Meta says what actually went wrong. Real failure,
+    2026-09-11: a morning prayer to an allowlisted friend outside the 24-hour
+    window reached Sheraj in the dashboard as "send_whatsapp failed:
+    HTTPError" and nothing else - no code, no reason, no next step. Meta had
+    said, in the discarded body, that the fallback template does not exist.
+    Sheraj is non-technical (AGENTS.md); an error he cannot act on is the
+    Canva-autofill silent failure with a status code on top.
+    """
+
+    def __init__(self, message: str, *, code=None, subcode=None,
+                 details: str = "", status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.subcode = subcode
+        self.details = details
+        self.status = status
+
+
+# Meta's numeric codes in the plain language Sheraj reads. A code that is NOT
+# in this table still surfaces Meta's own `message` verbatim - an unknown code
+# must never fall back to a bare status line, which is the whole bug here.
+_ERROR_HELP = {
+    132001: ("That pre-approved template does not exist in WhatsApp Manager, so "
+             "nothing was sent. Outside the 24-hour window a template is the "
+             "only kind of message WhatsApp allows."),
+    132000: "The template exists, but the number of variables does not match what it expects.",
+    132005: "The template's text was changed and needs re-approval before it can be used.",
+    131047: ("More than 24 hours have passed since they last messaged, so a "
+             "free-form message is not allowed - only a pre-approved template."),
+    131026: ("The message could not be delivered - that number may not be on "
+             "WhatsApp, or cannot receive messages from this business."),
+    131030: ("That number is not in Meta's test-recipient list. Abigail is still "
+             "on Meta's sandbox test number, which can only reach five numbers "
+             "that have been added there by hand."),
+    131031: "Meta has restricted this WhatsApp business account.",
+    133010: "This phone number is not registered with the WhatsApp Cloud API.",
+    190: ("The WhatsApp access token is invalid or expired - it must be a "
+          "permanent System User token (see AGENTS.md)."),
+    100: "Meta rejected the request as malformed - usually a bad recipient number or template name.",
+}
+
+
+def why(exc: BaseException) -> str:
+    """The reason to put in front of Sheraj. A WhatsAppError has already been
+    written for him to read; anything else falls back to the class name, which
+    is deliberately NOT widened to str(exc) - an arbitrary exception can carry
+    request bodies, and a notification is not a place message content may
+    appear (rule 15)."""
+    if isinstance(exc, WhatsAppError):
+        return str(exc)
+    return type(exc).__name__
+
+
+def _post(payload: dict, what: str) -> dict:
+    """The single outbound chokepoint. Raises WhatsAppError carrying Meta's
+    real reason instead of requests' bare "404 Client Error"."""
     resp = requests.post(
         f"{GRAPH_API_BASE}/{WHATSAPP_PHONE_NUMBER_ID}/messages",
-        headers=_headers(),
-        json={"messaging_product": "whatsapp", "to": _digits(to), "type": "text",
-              "text": {"body": body}},
-        timeout=30)
-    resp.raise_for_status()
+        headers=_headers(), json=payload, timeout=30)
+    if resp.status_code >= 400:
+        try:
+            err = (resp.json() or {}).get("error", {}) or {}
+        except Exception:
+            err = {}
+        code = err.get("code")
+        subcode = err.get("error_subcode")
+        meta_msg = (err.get("message") or "").strip()
+        details = ((err.get("error_data") or {}).get("details") or "").strip()
+        parts = [p for p in (_ERROR_HELP.get(code), details or meta_msg) if p]
+        if not parts:
+            parts = [f"WhatsApp refused the {what} (HTTP {resp.status_code})."]
+        summary = " ".join(parts)
+        if code is not None:
+            summary += f" (Meta error {code}{'/' + str(subcode) if subcode else ''})"
+        raise WhatsAppError(summary, code=code, subcode=subcode,
+                            details=details or meta_msg, status=resp.status_code)
     return resp.json()
+
+
+def send_text(to: str, body: str) -> dict:
+    """Free-form text — only valid within the 24-hour window (within_24h_window)."""
+    return _post({"messaging_product": "whatsapp", "to": _digits(to), "type": "text",
+                  "text": {"body": body}}, "message")
 
 
 def send_template(to: str, template_name: str = None, params: list[str] = None,
@@ -84,15 +161,10 @@ def send_template(to: str, template_name: str = None, params: list[str] = None,
     template_name = template_name or WHATSAPP_UPDATE_TEMPLATE
     components = [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}] \
         if params else []
-    resp = requests.post(
-        f"{GRAPH_API_BASE}/{WHATSAPP_PHONE_NUMBER_ID}/messages",
-        headers=_headers(),
-        json={"messaging_product": "whatsapp", "to": _digits(to), "type": "template",
-              "template": {"name": template_name, "language": {"code": lang},
-                          "components": components}},
-        timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    return _post({"messaging_product": "whatsapp", "to": _digits(to), "type": "template",
+                  "template": {"name": template_name, "language": {"code": lang},
+                               "components": components}},
+                 f"template '{template_name}'")
 
 
 def send_best_effort(to: str, body: str) -> dict:
@@ -105,7 +177,22 @@ def send_best_effort(to: str, body: str) -> dict:
     from agents import secretary_store as store
     if within_24h_window(to, store=store):
         return send_text(to, body)
-    return send_template(to, WHATSAPP_UPDATE_TEMPLATE, [body])
+    try:
+        return send_template(to, WHATSAPP_UPDATE_TEMPLATE, [body])
+    except WhatsAppError as e:
+        # The window being shut is the REASON a template was attempted at all,
+        # and the caller never sees that decision - it happens in here. Without
+        # this, a failed fallback reads as "WhatsApp is broken" when the real
+        # situation is "they have not messaged in a day, and the one message
+        # type still allowed is not set up." Say both, and say what unsticks it.
+        raise WhatsAppError(
+            f"They have not messaged in the last 24 hours, so WhatsApp would only "
+            f"allow the pre-approved template '{WHATSAPP_UPDATE_TEMPLATE}', and that "
+            f"failed. Ask them to message Abigail's number first - that reopens the "
+            f"24-hour window and lets an ordinary message through. "
+            f"WhatsApp's reason: {e}",
+            code=e.code, subcode=e.subcode, details=e.details, status=e.status
+        ) from e
 
 
 def within_24h_window(phone: str, store=None) -> bool:
