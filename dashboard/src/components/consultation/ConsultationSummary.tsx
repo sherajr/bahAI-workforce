@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, FileText, Loader2, Trash2 } from "lucide-react";
+import { Copy, Download, FileText, Loader2, Network, Trash2 } from "lucide-react";
 import { api } from "../../lib/api";
+import type { ConsultationCapabilities } from "../../lib/consultationTypes";
 import { Button, Card, CardContent, ErrorNote, Modal } from "../ui";
+import { ConceptGraphView } from "./ConceptGraph";
 import { ConsultationDetailPanel } from "./ConsultationDetail";
 import { Markdown } from "./Markdown";
 
@@ -15,23 +17,37 @@ import { Markdown } from "./Markdown";
  * stopped being the first thing you see.
  */
 export function ConsultationSummary({
-  sessionId, onDeleted, onBack,
+  sessionId, capabilities, onDeleted, onBack,
 }: {
   sessionId: string;
+  capabilities: ConsultationCapabilities;
   onDeleted: () => void;
   onBack: () => void;
 }) {
   const qc = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [view, setView] = useState<"report" | "detail">("report");
+  const [view, setView] = useState<"report" | "map" | "detail">("report");
+  const [sourceTurns, setSourceTurns] = useState<string[] | null>(null);
 
   const { data, error } = useQuery({
     queryKey: ["consultation", sessionId],
     queryFn: () => api.getConsultation(sessionId),
   });
 
-  const refresh = () => void qc.invalidateQueries({ queryKey: ["consultation", sessionId] });
+  // Archived: no live analysis is ever running, so a slow, occasional poll is
+  // plenty, and it only runs while the map tab is actually open.
+  const { data: graphData, isError: graphErrored } = useQuery({
+    queryKey: ["consultation-graph", sessionId],
+    queryFn: () => api.getConsultationGraph(sessionId),
+    enabled: view === "map" || view === "report",
+    refetchInterval: false,
+  });
+
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["consultation", sessionId] });
+    void qc.invalidateQueries({ queryKey: ["consultation-graph", sessionId] });
+  };
 
   const remove = useMutation({
     mutationFn: () => api.deleteConsultation(sessionId),
@@ -117,7 +133,7 @@ export function ConsultationSummary({
       </div>
 
       <div className="flex gap-1 border-b border-slate-800">
-        {(["report", "detail"] as const).map((v) => (
+        {(["report", "map", "detail"] as const).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -127,7 +143,7 @@ export function ConsultationSummary({
                 : "text-slate-500 hover:text-slate-300"
             }`}
           >
-            {v === "report" ? "Report" : "Everything else"}
+            {v === "report" ? "Report" : v === "map" ? "Concept map" : "Everything else"}
           </button>
         ))}
       </div>
@@ -170,9 +186,49 @@ export function ConsultationSummary({
                   {buildReport.isPending ? "Rewriting…" : "Write it again"}
                 </Button>
               </div>
+              {/* A preview, not a second interactive copy — full editing lives
+                  in the Concept map tab (section 6: "a map preview within the
+                  report screen"). */}
+              {graphData && graphData.graph.nodes.length > 1 && (
+                <Card>
+                  <CardContent className="flex items-center justify-between gap-3 py-4">
+                    <div className="flex items-center gap-2 text-sm text-slate-300">
+                      <Network className="h-4 w-4 text-slate-500" />
+                      {graphData.graph.nodes.length - 1} points on the concept map,
+                      {" "}{graphData.graph.edges.filter((e) => !e.synthetic).length} connections
+                      drawn between them.
+                    </div>
+                    <Button variant="secondary" className="text-xs" onClick={() => setView("map")}>
+                      Open the map
+                    </Button>
+                  </CardContent>
+                </Card>
+              )}
             </>
           )}
         </div>
+      )}
+
+      {view === "map" && (
+        graphErrored ? (
+          <ErrorNote>The concept map could not be loaded.</ErrorNote>
+        ) : !graphData ? (
+          <p className="text-sm text-slate-400">Loading…</p>
+        ) : (
+          <div className="h-[70vh] min-h-[28rem]">
+            <ConceptGraphView
+              graph={graphData.graph}
+              capabilities={capabilities}
+              sessionId={sessionId}
+              title={session.title}
+              readOnly
+              decisions={data.decisions}
+              actions={data.action_items}
+              onChanged={refresh}
+              onShowSource={setSourceTurns}
+            />
+          </div>
+        )
       )}
 
       {view === "detail" && (
@@ -183,6 +239,34 @@ export function ConsultationSummary({
           onDiarize={() => diarize.mutate()}
           onMapSpeaker={(id, key) => mapSpeaker.mutate({ id, key })}
         />
+      )}
+
+      {sourceTurns && (
+        <Modal open onClose={() => setSourceTurns(null)} title="What was actually said">
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              The lines this came from. It shows what was said in the meeting — not
+              that what was said is correct.
+            </p>
+            {(data.final_turns ?? data.turns)
+              .filter((t) => sourceTurns.includes(String(t.id)))
+              .map((t) => (
+                <div key={t.id} className="rounded border border-slate-800 bg-slate-900/60 p-2">
+                  <p className="text-xs font-semibold text-slate-400">
+                    {t.role === "assistant" ? "Assistant" : t.speaker_label ?? "Participant"}
+                  </p>
+                  <p className="mt-0.5 text-sm text-slate-200">{t.text}</p>
+                </div>
+              ))}
+            {!(data.final_turns ?? data.turns).some((t) => sourceTurns.includes(String(t.id))) && (
+              <p className="text-sm text-slate-500">
+                {data.transcript_deleted
+                  ? "The transcript of this consultation was deleted; only the approved record remains."
+                  : "Those lines are no longer in the transcript."}
+              </p>
+            )}
+          </div>
+        </Modal>
       )}
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)}

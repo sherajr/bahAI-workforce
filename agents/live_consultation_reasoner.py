@@ -104,9 +104,9 @@ _SCHEMA = """{
   "objective": "what the group is actually trying to achieve, if it has become clear",
   "summary": "a rolling narrative summary of the consultation so far, <= %(words)d words",
   "add": {
-    "themes": [{"text": "two or three words naming a subject the group has actually discussed", "source_turn_ids": ["12"]}],
-    "facts": [{"text": "...", "status": "reported|disputed", "source_turn_ids": ["12", "14"]}],
-    "assumptions": [{"text": "...", "source_turn_ids": ["12"]}],
+    "themes": [{"tmp_id": "t1", "text": "two or three words naming a subject the group has actually discussed", "source_turn_ids": ["12"]}],
+    "facts": [{"tmp_id": "n1", "text": "...", "status": "reported|disputed", "source_turn_ids": ["12", "14"]}],
+    "assumptions": [{"tmp_id": "n2", "text": "...", "source_turn_ids": ["12"]}],
     "principles": [{"text": "...", "note": "why it bears on this consultation", "source_turn_ids": ["12"]}],
     "needs_and_concerns": [{"text": "...", "source_turn_ids": ["12"]}],
     "ideas": [{"text": "...", "source_turn_ids": ["12"]}],
@@ -121,6 +121,10 @@ _SCHEMA = """{
   },
   "update": [{"id": "fact_3", "text": "...", "status": "disputed", "source_turn_ids": ["18"]}],
   "addressed": [{"id": "tension_2", "note": "why it now appears addressed"}],
+  "edges": [{"from": "t1", "to": "n1", "relation": "contains",
+             "label": "", "stated": false, "source_turn_ids": ["12"]},
+            {"from": "n2", "to": "concern_1", "relation": "depends_on",
+             "label": "short optional label", "stated": true, "source_turn_ids": ["14"]}],
   "observations": [{
     "kind": "possible_synthesis|unaddressed_assumption|unrepresented_concern|convergence|"
             "term_used_differently|means_before_ends|open_question|note",
@@ -183,6 +187,28 @@ twelve accurate ones. Cite the transcript turn ids you actually relied on in
 "source_turn_ids" — the numbers in square brackets at the start of each line —
 so a person can go and read what was really said. Never cite a turn you were
 not given.
+
+THE CONCEPT MAP: THEMES AND CONNECTIONS
+Beyond the lists, you are keeping a GRAPH: themes are the topic branches of this
+particular meeting (e.g. "Venue", "Accessibility", "Programme" for a gathering —
+never a fixed list, always whatever this group is actually talking about), and
+"edges" are real connections between two items. Two things:
+- To place an item under a theme, add an edge {"from": <theme id>, "to": <item
+  id>, "relation": "contains"}. Only a theme may be the "from" of a "contains"
+  edge — never propose one item containing another. An item with no theme yet is
+  fine; do not force one.
+- To connect two items directly, use "supports", "challenges", "depends_on",
+  "addresses", "leads_to" or "related_to" — only when the group actually said or
+  clearly implied the connection, never merely because two things were said near
+  each other in time. Set "stated": true only when someone said the connection
+  itself out loud (e.g. "that depends on the budget"); leave it false when you
+  are the one noticing the link.
+- If you are adding a new item AND connecting it in the same pass, give the new
+  item a short "tmp_id" (anything, e.g. "n1") and use that in the edge instead of
+  a real id — the application resolves it. Never invent an id for something you
+  did not just add.
+- Prefer few, confident connections over many speculative ones. A wrong edge is
+  worse than a missing one; leave a genuine ambiguity unconnected.
 
 WHEN A CONCERN APPEARS TO HAVE BEEN DEALT WITH
 Put its id in "addressed", with a short note saying why. That marks it, and the
@@ -424,7 +450,7 @@ def _next_id(prefix: str, existing: list[dict]) -> str:
     return f"{prefix}_{n}"
 
 
-def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
+def merge(state: dict, patch: dict) -> tuple[dict, list[str], list[dict]]:
     """
     Apply a validated patch to the consultation map, in CODE.
 
@@ -432,9 +458,18 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
     they are stable and dense, near-duplicate text is dropped rather than piling
     up, and `confirmed_decision` is never writable from a patch — only a human
     pressing Confirm can populate it (rule 81).
+
+    Also resolves the concept map's proposed connections (`patch["edges"]`)
+    against the ids just assigned here — a "tmp_id" the model gave a brand-new
+    item in the SAME patch resolves to its real, stable id (section 3: "resolve
+    temporary ids deterministically"). The caller still has to validate the
+    result against `live_consultation_graph.validate_edges` (kind rules,
+    existence, rejection tombstones) before storing anything; this function only
+    resolves references, exactly as the rest of it only assigns identity.
     """
     out = json.loads(json.dumps(state or {}))  # deep copy, plain dicts throughout
     notes: list[str] = []
+    tmp_to_real: dict[str, str] = {}
 
     for key in ("question", "objective", "summary"):
         value = (patch.get(key) or "").strip()
@@ -462,6 +497,13 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
                 seen.add(key)
                 entry = dict(raw)
                 entry["id"] = _next_id(ID_PREFIX.get(name, name), current)
+                # A scratch id the model invented for THIS pass, so an edge in
+                # the same patch can reference a node that did not exist a
+                # moment ago. Resolved below, into `tmp_to_real`; never stored
+                # on the item itself.
+                tmp_id = str(entry.pop("tmp_id", "") or "").strip()
+                if tmp_id:
+                    tmp_to_real[tmp_id] = entry["id"]
                 entry["source_turn_ids"] = _clean_turn_ids(raw.get("source_turn_ids"))
                 # Nothing arriving from a model is human-touched, whatever the
                 # reply claims about itself (rule 95).
@@ -556,7 +598,24 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str]]:
     # Never writable by a patch. The only path to a confirmed decision is a
     # person pressing Confirm in the dashboard.
     out["confirmed_decision"] = (state or {}).get("confirmed_decision")
-    return out, notes
+
+    # The concept map's proposed connections. Only "from"/"to" are resolved
+    # here, against ids assigned in THIS merge — everything else (relation
+    # vocabulary, kind rules, existence, rejection tombstones) is validated by
+    # the caller against `live_consultation_graph.validate_edges`, which needs
+    # the full node set this function does not have a reason to know about.
+    resolved_edges: list[dict] = []
+    for raw in (patch.get("edges") or []):
+        if not isinstance(raw, dict):
+            continue
+        entry = dict(raw)
+        entry["from"] = tmp_to_real.get(str(raw.get("from") or raw.get("from_id") or "").strip(),
+                                        str(raw.get("from") or raw.get("from_id") or "").strip())
+        entry["to"] = tmp_to_real.get(str(raw.get("to") or raw.get("to_id") or "").strip(),
+                                      str(raw.get("to") or raw.get("to_id") or "").strip())
+        resolved_edges.append(entry)
+
+    return out, notes, resolved_edges
 
 
 def validate_state(state: dict) -> tuple[dict, Optional[str]]:
@@ -614,7 +673,7 @@ class AnalysisResult:
     def __init__(self, ok: bool, state: dict, observations: list[Observation],
                  writings_theme: str = "", note: str = "", raw_error: str = "",
                  notes: Optional[list[str]] = None, patch: Optional[dict] = None,
-                 base_revision: int = 0):
+                 base_revision: int = 0, resolved_edges: Optional[list[dict]] = None):
         # The validated patch this result came from, and the revision of the map
         # it was merged against. Both exist so a result that arrives late can be
         # REBASED onto whatever the map says now instead of overwriting it
@@ -629,6 +688,12 @@ class AnalysisResult:
         self.note = note
         self.raw_error = raw_error
         self.notes = notes or []
+        # The concept map's proposed connections, with any "tmp_id" already
+        # resolved against the ids `merge` just assigned. Still unvalidated
+        # against the full node set and the rejection tombstones — the caller
+        # (`_run_analysis`) does that, at the point it knows the SAVED map's
+        # real ids, exactly like the rebase this result already supports.
+        self.resolved_edges = resolved_edges or []
 
 
 def analyze(session: dict, state: dict, new_turns: list[dict], recent_turns: list[dict],
@@ -662,7 +727,7 @@ def analyze(session: dict, state: dict, new_turns: list[dict], recent_turns: lis
             "The analysis came back in a shape that could not be read. The map is "
             "unchanged — nothing was lost."), raw_error=(raw or "")[:400])
 
-    merged, notes = merge(state, patch)
+    merged, notes, resolved_edges = merge(state, patch)
     validated, problem = validate_state(merged)
     if problem:
         return AnalysisResult(False, state, [], note=(
@@ -670,7 +735,8 @@ def analyze(session: dict, state: dict, new_turns: list[dict], recent_turns: lis
     observations = parse_observations(patch, int(state.get("state_revision") or 0))
     theme = str(patch.get("writings_theme") or "").strip()[:200]
     return AnalysisResult(True, validated, observations, writings_theme=theme, notes=notes,
-                          patch=patch, base_revision=int(state.get("state_revision") or 0))
+                          patch=patch, base_revision=int(state.get("state_revision") or 0),
+                          resolved_edges=resolved_edges)
 
 
 # ── Context for a spoken answer ─────────────────────────────────────────────

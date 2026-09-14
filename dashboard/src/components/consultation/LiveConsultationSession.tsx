@@ -14,6 +14,7 @@ import type {
   ConsultationPresence,
 } from "../../lib/consultationTypes";
 import { BadgePill, Button, Card, CardContent, ErrorNote, Modal, RosterAvatar } from "../ui";
+import { ConceptGraphView } from "./ConceptGraph";
 import { ConsultationGlance } from "./ConsultationGlance";
 import { ConsultationMap } from "./ConsultationMap";
 import { ConsultationObservations } from "./ConsultationObservations";
@@ -44,6 +45,10 @@ export function LiveConsultationSession({
   const wasReadingRef = useRef(false);
   const [now, setNow] = useState(Date.now());
   const autoStarted = useRef(false);
+  // Concept map is the prominent live view; the four-card summary is the
+  // alternative (section 5). Its own poll, separate from the transcript's,
+  // and only while it is actually on screen.
+  const [sidebarView, setSidebarView] = useState<"map" | "glance">("map");
 
   // Read the whole session ONCE, then take deltas (rule 115). The four-second
   // full refetch that used to be here re-sent the entire transcript -- twice --
@@ -55,14 +60,31 @@ export function LiveConsultationSession({
   });
   useConsultationUpdates(sessionId, true);
 
+  // The map's OWN, slower poll — never folded into the four-second transcript
+  // poll, and only running while the map is actually the visible view (section
+  // 4: "avoid remounting the graph on every four-second session refresh").
+  const {
+    data: graphData, isLoading: graphLoading, isError: graphErrored, isFetching: graphFetching,
+    refetch: refetchGraph,
+  } = useQuery({
+    queryKey: ["consultation-graph", sessionId],
+    queryFn: () => api.getConsultationGraph(sessionId),
+    enabled: sidebarView === "map",
+    refetchInterval: sidebarView === "map" ? 6000 : false,
+  });
+
   const refresh = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["consultation", sessionId] });
+  }, [qc, sessionId]);
+
+  const refreshGraph = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["consultation-graph", sessionId] });
   }, [qc, sessionId]);
 
   const live = useRealtimeConsultation({
     session: data?.session,
     capabilities,
-    onRecordChanged: refresh,
+    onRecordChanged: useCallback(() => { refresh(); refreshGraph(); }, [refresh, refreshGraph]),
   });
 
   // Only ever started by a press: `autoStart` is true exactly because the user
@@ -442,7 +464,8 @@ export function LiveConsultationSession({
       )}
 
       {/* Body */}
-      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[1.1fr_1fr]">
+      <div className={`grid min-h-0 flex-1 gap-4 ${
+        sidebarView === "map" ? "lg:grid-cols-[0.7fr_1.3fr]" : "lg:grid-cols-[1.1fr_1fr]"}`}>
         <LiveTranscript
           sessionId={sessionId}
           turns={turns}
@@ -452,45 +475,104 @@ export function LiveConsultationSession({
           onLabelled={refresh}
           onCorrected={refresh}
         />
-        <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
-          <ConsultationGlance
-            state={state}
-            threads={data.open_threads}
-            decided={!!decisions.find((d) => d.status === "confirmed")}
-          />
-          <ConsultationObservations
-            observations={observations}
-            assistantName={live.name}
-            onAsk={askObservation}
-            onDismiss={(id) => {
-              void api.dismissConsultationObservation(sessionId, id).then(refresh);
-            }}
-            disabled={!isLive || !modeInfo?.speaks}
-          />
-          <ConsultationMap
-            state={state}
-            decisions={decisions}
-            actions={action_items}
-            writings={writings}
-            onConfirmDecision={(id) => {
-              void api.confirmConsultationDecision(sessionId, id).then(refresh);
-            }}
-            onRejectDecision={(id) => {
-              void api.rejectConsultationDecision(sessionId, id).then(refresh);
-            }}
-            onToggleAction={(id, status) => {
-              void api.setConsultationActionStatus(sessionId, id, status).then(refresh);
-            }}
-            /* Human authority over the map (rule 95). A correction made here
-               is protected from the next analysis pass by the server. */
-            onEditItem={(list, id, text) => {
-              void api.editConsultationMapItem(sessionId, list, id, { text }).then(refresh);
-            }}
-            onDeleteItem={(list, id) => {
-              void api.deleteConsultationMapItem(sessionId, list, id).then(refresh);
-            }}
-            onShowSource={setSourceTurns}
-          />
+        <div className="flex min-h-0 flex-col gap-3">
+          <div className="flex gap-1 border-b border-slate-800">
+            {(["map", "glance"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setSidebarView(v)}
+                className={`px-3 py-1.5 text-sm transition ${
+                  sidebarView === v
+                    ? "border-b-2 border-amber-400 text-slate-100"
+                    : "text-slate-500 hover:text-slate-300"}`}
+              >
+                {v === "map" ? "Concept map" : "Summary"}
+              </button>
+            ))}
+          </div>
+          {sidebarView === "map" ? (
+            graphErrored && !graphData ? (
+              <ErrorNote>
+                The concept map could not be loaded. Listening and the record are
+                unaffected.{" "}
+                <button className="underline" onClick={() => void refetchGraph()}>Retry</button>
+              </ErrorNote>
+            ) : !graphData ? (
+              <p className="text-sm text-slate-500">
+                {graphLoading ? "Loading the map…" : "Waiting for discussion…"}
+              </p>
+            ) : (
+              <div className="min-h-0 flex-1">
+                {/* The last good map stays on screen through a failed or slow
+                    refresh — a calm "Updating" note, never a blank or a jump
+                    back to a loading state (section 4). */}
+                {(graphFetching || graphErrored) && (
+                  <p className="mb-1 text-[11px] text-slate-600">
+                    {graphErrored ? "Update failed — showing the last good map. "
+                      : "Updating…"}
+                    {graphErrored && (
+                      <button className="ml-1 underline" onClick={() => void refetchGraph()}>
+                        Retry
+                      </button>
+                    )}
+                  </p>
+                )}
+                <ConceptGraphView
+                  graph={graphData.graph}
+                  capabilities={capabilities}
+                  sessionId={sessionId}
+                  title={session.title}
+                  readOnly={false}
+                  decisions={decisions}
+                  actions={action_items}
+                  onChanged={refreshGraph}
+                  onShowSource={setSourceTurns}
+                />
+              </div>
+            )
+          ) : (
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+              <ConsultationGlance
+                state={state}
+                threads={data.open_threads}
+                decided={!!decisions.find((d) => d.status === "confirmed")}
+              />
+              <ConsultationObservations
+                observations={observations}
+                assistantName={live.name}
+                onAsk={askObservation}
+                onDismiss={(id) => {
+                  void api.dismissConsultationObservation(sessionId, id).then(refresh);
+                }}
+                disabled={!isLive || !modeInfo?.speaks}
+              />
+              <ConsultationMap
+                state={state}
+                decisions={decisions}
+                actions={action_items}
+                writings={writings}
+                onConfirmDecision={(id) => {
+                  void api.confirmConsultationDecision(sessionId, id).then(refresh);
+                }}
+                onRejectDecision={(id) => {
+                  void api.rejectConsultationDecision(sessionId, id).then(refresh);
+                }}
+                onToggleAction={(id, status) => {
+                  void api.setConsultationActionStatus(sessionId, id, status).then(refresh);
+                }}
+                /* Human authority over the map (rule 95). A correction made
+                   here is protected from the next analysis pass by the
+                   server. */
+                onEditItem={(list, id, text) => {
+                  void api.editConsultationMapItem(sessionId, list, id, { text }).then(refresh);
+                }}
+                onDeleteItem={(list, id) => {
+                  void api.deleteConsultationMapItem(sessionId, list, id).then(refresh);
+                }}
+                onShowSource={setSourceTurns}
+              />
+            </div>
+          )}
         </div>
       </div>
 

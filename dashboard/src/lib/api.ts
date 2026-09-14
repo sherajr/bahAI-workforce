@@ -30,6 +30,7 @@ import type {
   VerifiedWriting,
   ConsultationParticipant, ConsultationTurn, DiarizeResult, ReportResult, ScheduledSpeech,
   ActionStatus, ConsultationAction, ConsultationDecision, ConsultationStateMap, MapItem,
+  ConceptGraph, GraphRelation,
 } from "./consultationTypes";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -1362,6 +1363,43 @@ export const api = {
     request<{ recorded: boolean }>(
       "POST", `/live-consultation/sessions/${id}/client-error`, body, { silent: true }),
   consultationExportUrl: (id: string) => `${BASE}/live-consultation/sessions/${id}/export`,
+
+  // ── The concept map ────────────────────────────────────────────────────
+  // Derived on every read, never a second copy (agents/live_consultation_graph.py).
+  getConsultationGraph: (id: string) =>
+    get<{ graph: ConceptGraph }>(`/live-consultation/sessions/${id}/graph`),
+  setGraphNodeView: (id: string, nodeId: string,
+                    body: { x?: number; y?: number; pinned?: boolean; collapsed?: boolean }) =>
+    request<{ view: unknown; session: ConsultationSession }>(
+      "PATCH", `/live-consultation/sessions/${id}/graph/nodes/${nodeId}/view`, body,
+      { silent: true }),
+  arrangeConsultationGraph: (id: string) =>
+    post<{ graph: ConceptGraph }>(`/live-consultation/sessions/${id}/graph/arrange`, {}),
+  addGraphEdge: (id: string, body: { from_id: string; to_id: string; relation: GraphRelation;
+                                     label?: string }) =>
+    post<{ edge: unknown; graph: ConceptGraph }>(
+      `/live-consultation/sessions/${id}/graph/edges`, body),
+  editGraphEdge: (id: string, edgeId: string,
+                 body: { relation?: GraphRelation; label?: string }) =>
+    request<{ edge: unknown; graph: ConceptGraph }>(
+      "PATCH", `/live-consultation/sessions/${id}/graph/edges/${edgeId}`, body),
+  rejectGraphEdge: (id: string, edgeId: string) =>
+    request<{ deleted: boolean; graph: ConceptGraph }>(
+      "DELETE", `/live-consultation/sessions/${id}/graph/edges/${edgeId}`),
+  mergeGraphNodes: (id: string, body: { list_name: string; keep_id: string; remove_id: string;
+                                        text?: string }) =>
+    post<{ state: ConsultationStateMap; graph: ConceptGraph }>(
+      `/live-consultation/sessions/${id}/graph/merge`, body),
+  downloadGraphSvg: (id: string, title: string) =>
+    downloadFile(`/live-consultation/sessions/${id}/graph/export.svg`, "GET", undefined,
+                `${(title || "concept-map").replace(/[^\w \-]+/g, "").trim() || "concept-map"}.svg`),
+  downloadGraphPng: (id: string, title: string) =>
+    downloadFile(`/live-consultation/sessions/${id}/graph/export.png`, "GET", undefined,
+                `${(title || "concept-map").replace(/[^\w \-]+/g, "").trim() || "concept-map"}.png`),
+  downloadGraphHtml: (id: string, title: string) =>
+    downloadFile(`/live-consultation/sessions/${id}/graph/export.html`, "GET", undefined,
+                `${(title || "consultation-report").replace(/[^\w \-]+/g, "").trim()
+                  || "consultation-report"}.html`),
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),

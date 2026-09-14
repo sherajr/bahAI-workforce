@@ -26,13 +26,14 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from agents import live_consultation as core
 from agents import live_consultation_audio as audio
 from agents import live_consultation_governor as governor
+from agents import live_consultation_graph as graph
 from agents import live_consultation_report as report
 from agents import live_consultation_realtime as realtime
 from agents import live_consultation_reasoner as reasoner
@@ -46,6 +47,11 @@ router = APIRouter(prefix="/live-consultation", tags=["live-consultation"])
 _ANALYSIS_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 _LAST_ANALYSIS: dict[str, float] = {}
+
+# How long `end_session` waits for an analysis already in flight before giving
+# up and building the report from whatever stands. Bounded on purpose — see
+# `_run_analysis`'s `wait_if_busy`.
+FINAL_ANALYSIS_WAIT_S = int(os.getenv("CONSULTATION_FINAL_WAIT_S", "20"))
 
 
 def _lock_for(session_id: str) -> threading.Lock:
@@ -297,6 +303,32 @@ class ApproveIn(BaseModel):
     revision: Optional[int] = None
 
 
+class NodeViewIn(BaseModel):
+    x: Optional[float] = None
+    y: Optional[float] = None
+    pinned: Optional[bool] = None
+    collapsed: Optional[bool] = None
+
+
+class EdgeIn(BaseModel):
+    from_id: str
+    to_id: str
+    relation: str
+    label: str = ""
+
+
+class EdgePatchIn(BaseModel):
+    relation: Optional[str] = None
+    label: Optional[str] = None
+
+
+class MergeNodesIn(BaseModel):
+    list_name: str
+    keep_id: str
+    remove_id: str
+    text: Optional[str] = None
+
+
 # ── Capabilities (rule 86) ──────────────────────────────────────────────────
 
 @router.get("/capabilities")
@@ -362,6 +394,13 @@ def capabilities():
                              "human_only": s not in core.MODEL_ACTION_STATUSES}
                             for s in core.ACTION_STATUSES],
         "map_lists": list(core.ITEM_LISTS.keys()),
+        # The concept map's vocabulary, served rather than duplicated in
+        # TypeScript for the same reason as every other list on this page
+        # (rule 87): a colour, a label and a legend that live in two places
+        # disagree eventually.
+        "graph_schema_version": graph.GRAPH_SCHEMA_VERSION,
+        "node_kinds": [{"id": k, **v} for k, v in graph.NODE_KIND_META.items()],
+        "edge_relations": [{"id": k, **v} for k, v in graph.RELATION_META.items()],
         "default_mode": core.DEFAULT_MODE,
         "default_framework": core.DEFAULT_FRAMEWORK,
         "default_presence": core.DEFAULT_PRESENCE,
@@ -773,7 +812,8 @@ def end_session(session_id: str, final_pass: bool = True):
     note = ""
     if final_pass and realtime.available():
         try:
-            result = _run_analysis(ended or session, final_pass=True)
+            result = _run_analysis(ended or session, final_pass=True,
+                                   wait_if_busy=FINAL_ANALYSIS_WAIT_S)
             note = result.get("note", "")
         except Exception as e:
             note = f"The closing summary could not be made ({type(e).__name__}). Everything said is saved."
@@ -844,10 +884,47 @@ def label_turn(session_id: str, turn_id: int, req: LabelIn):
 
 # ── Analysis ────────────────────────────────────────────────────────────────
 
-def _run_analysis(session: dict, force: bool = False, final_pass: bool = False) -> dict:
+def _apply_graph_patch(session_id: str, resolved_edges: list[dict], saved_state: dict) -> list[str]:
+    """
+    Validate the reasoner's proposed connections against the map as it ACTUALLY
+    stands after this pass, and store the ones that pass. Deliberately run
+    AFTER `save_state` rather than alongside the item rebase above: `saved_state`
+    is already whatever the map says now (rebased or not), so this is correct
+    in both cases without a second rebase of its own.
+    """
+    if not resolved_edges:
+        return []
+    node_ids, node_kind = graph.node_universe(saved_state)
+    rejected = store.rejected_edge_keys(session_id)
+    accepted, notes = graph.validate_edges(resolved_edges, {}, node_ids, node_kind, rejected)
+    changed = False
+    for e in accepted:
+        row = store.upsert_graph_edge(
+            session_id, e["from_id"], e["to_id"], e["relation"], label=e.get("label", ""),
+            inferred=e.get("inferred", True), source_turn_ids=e.get("source_turn_ids"))
+        if row:
+            changed = True
+    if changed:
+        store.bump_graph_revision(session_id)
+    return notes
+
+
+def _run_analysis(session: dict, force: bool = False, final_pass: bool = False,
+                  wait_if_busy: float = 0.0) -> dict:
     sid = session["id"]
     lock = _lock_for(sid)
-    if not lock.acquire(blocking=False):
+    # A closing pass waits BRIEFLY for one already in flight, rather than
+    # skipping straight past it. Skipping was a real seam: the concept map and
+    # the report are both built from the record right after this returns, and
+    # an end request that continued past a busy lock could finish the meeting
+    # without the discussion that was mid-analysis at that exact moment. The
+    # wait is bounded (never indefinite — a person leaving must not be made to
+    # wait for ever, rule 114's reasoning applied to ending rather than
+    # unmounting) and this thread's OWN pass still runs afterwards regardless,
+    # reading whatever is left unanalyzed by then.
+    got = (lock.acquire(blocking=True, timeout=wait_if_busy) if wait_if_busy > 0
+          else lock.acquire(blocking=False))
+    if not got:
         return {"ran": False, "note": "An analysis pass is already running."}
     try:
         new_turns = store.unanalyzed_turns(sid)
@@ -895,7 +972,7 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False) 
         fresh_revision = int(fresh.get("state_revision") or 0)
         rebased = False
         if fresh_revision != base_revision:
-            merged, merge_notes = reasoner.merge(fresh, result.patch)
+            merged, merge_notes, rebased_edges = reasoner.merge(fresh, result.patch)
             validated, problem = reasoner.validate_state(merged)
             if problem:
                 return {"ran": True, "ok": False, "note": (
@@ -906,6 +983,9 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False) 
             result.notes = list(result.notes) + list(merge_notes)
             result.notes.append(
                 f"re-applied onto revision {fresh_revision} after an edit during the pass")
+            # The FIRST merge's resolved edges named ids from the map as it
+            # stood before the edit; only this rebased set is safe to apply.
+            result.resolved_edges = rebased_edges
             rebased = True
 
         # Anything a person took out stays out, however the map got here.
@@ -940,6 +1020,14 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False) 
         for act in saved.get("action_items", []):
             store.upsert_action_item(sid, act.get("action", ""), act.get("owner"),
                                      act.get("due"), map_id=act.get("id") or None)
+
+        # The concept map's proposed connections — same "validate against what
+        # is ACTUALLY there, right now" discipline as the rebase above, which is
+        # exactly what makes a separate edge-rebase unnecessary: `saved` is
+        # already the final, post-rebase map, so validating against it is
+        # correct whether or not a rebase happened.
+        graph_notes = _apply_graph_patch(sid, result.resolved_edges, saved)
+        result.notes = list(result.notes) + graph_notes
 
         added = []
         for obs in result.observations:
@@ -2142,6 +2230,190 @@ def delete_transcript(session_id: str):
                  "removed from disk and are still there -- retry from the session.")
     detail["note"] = note
     return detail
+
+
+# ── The concept map ──────────────────────────────────────────────────────────
+#
+# The graph itself is DERIVED, never stored — same discipline as the
+# finished-video shelf (rule 58) and a gathering's commitments (rule 117).
+# `graph.build_graph` reads the existing state, decisions and action_items
+# rows plus this feature's own `graph_edges`/`graph_node_view` tables, and
+# returns a fresh graph on every call — live or archived alike, and always
+# without a network call, so "opening an archive never regenerates through AI"
+# is true by construction rather than by a special case for ended sessions.
+
+def _graph_snapshot(session_id: str, session: Optional[dict] = None,
+                    persist_positions: bool = True) -> dict:
+    session = session or _session_or_404(session_id)
+    state = store.get_state(session_id)
+    decisions = store.list_decisions(session_id)
+    actions = store.list_action_items(session_id)
+    edges_rows = store.list_graph_edges(session_id)
+    views = store.list_node_views(session_id)
+    built = graph.build_graph(session, state, decisions, actions, edges_rows, views)
+    new_positions = built.pop("new_positions", {})
+    if persist_positions:
+        for node_id, (x, y) in new_positions.items():
+            store.set_node_view(session_id, node_id, x=x, y=y, pinned=False)
+    return built
+
+
+@router.get("/sessions/{session_id}/graph")
+def get_graph(session_id: str):
+    return {"graph": _graph_snapshot(session_id)}
+
+
+@router.patch("/sessions/{session_id}/graph/nodes/{node_id}/view")
+def set_graph_node_view(session_id: str, node_id: str, req: NodeViewIn):
+    """
+    Where a node sits, whether it is pinned, whether its branch is collapsed.
+    Pure layout: never touches `state_revision` (the speech governor's
+    freshness check, rule 77) or `record_revision` (report approval, rule 102)
+    — a drag or a collapsed branch cannot change what the assistant may say or
+    stale an approved record.
+    """
+    _session_or_404(session_id)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="Nothing to change.")
+    view = store.set_node_view(session_id, node_id, **fields)
+    return {"view": view, "session": store.get_session(session_id)}
+
+
+@router.post("/sessions/{session_id}/graph/arrange")
+def arrange_graph(session_id: str):
+    """Recompute the layout for everything nobody has explicitly pinned. A
+    deliberate reset (section 5: "an explicit Arrange map control") — a
+    position someone dragged and pinned is left exactly where they put it."""
+    _session_or_404(session_id)
+    store.clear_unpinned_node_views(session_id)
+    return {"graph": _graph_snapshot(session_id)}
+
+
+def _edge_or_404(session_id: str, edge_id: str) -> dict:
+    for e in store.list_graph_edges(session_id):
+        if e["id"] == edge_id:
+            return e
+    raise HTTPException(status_code=404, detail="No such connection in this session.")
+
+
+@router.post("/sessions/{session_id}/graph/edges")
+def add_graph_edge(session_id: str, req: EdgeIn):
+    """
+    A human drawing a connection by hand. Bypasses the AI rejection tombstone —
+    a person adding back what they (or someone else) once rejected is a new,
+    later decision, not the model quietly undoing the old one.
+    """
+    session = _session_or_404(session_id)
+    relation = (req.relation or "").strip().lower()
+    if relation not in graph.EDGE_RELATIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown relation: {relation}")
+    state = store.get_state(session_id)
+    node_ids, node_kind = graph.node_universe(state)
+    if req.from_id not in node_ids or req.to_id not in node_ids:
+        raise HTTPException(status_code=400, detail="That connection names a node that does not exist.")
+    if req.from_id == req.to_id:
+        raise HTTPException(status_code=400, detail="A connection cannot point a node at itself.")
+    if relation == graph.HIERARCHY_RELATION and node_kind.get(req.from_id) != "theme":
+        raise HTTPException(status_code=400,
+                            detail="Only a theme can contain something on the map.")
+    edge = store.upsert_graph_edge(session_id, req.from_id, req.to_id, relation,
+                                   label=req.label, human_edited=True)
+    store.bump_graph_revision(session_id)
+    return {"edge": edge, "graph": _graph_snapshot(session_id, session)}
+
+
+@router.patch("/sessions/{session_id}/graph/edges/{edge_id}")
+def edit_graph_edge(session_id: str, edge_id: str, req: EdgePatchIn):
+    _session_or_404(session_id)
+    existing = _edge_or_404(session_id, edge_id)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if "relation" in fields:
+        relation = str(fields["relation"]).strip().lower()
+        if relation not in graph.EDGE_RELATIONS:
+            raise HTTPException(status_code=400, detail=f"Unknown relation: {relation}")
+        if relation == graph.HIERARCHY_RELATION:
+            state = store.get_state(session_id)
+            _, node_kind = graph.node_universe(state)
+            if node_kind.get(existing["from_id"]) != "theme":
+                raise HTTPException(status_code=400,
+                                    detail="Only a theme can contain something on the map.")
+        fields["relation"] = relation
+    if not fields:
+        raise HTTPException(status_code=400, detail="Nothing to change.")
+    edge = store.update_graph_edge(edge_id, session_id=session_id, **fields)
+    if not edge:
+        raise HTTPException(status_code=404, detail="No such connection in this session.")
+    store.bump_graph_revision(session_id)
+    return {"edge": edge, "graph": _graph_snapshot(session_id)}
+
+
+@router.delete("/sessions/{session_id}/graph/edges/{edge_id}")
+def reject_graph_edge(session_id: str, edge_id: str):
+    """A human taking a connection apart. Tombstoned so a later analysis pass
+    cannot quietly recreate it (section 3)."""
+    _session_or_404(session_id)
+    _edge_or_404(session_id, edge_id)
+    store.reject_graph_edge(edge_id, session_id=session_id)
+    store.bump_graph_revision(session_id)
+    return {"deleted": True, "graph": _graph_snapshot(session_id)}
+
+
+@router.post("/sessions/{session_id}/graph/merge")
+def merge_graph_nodes(session_id: str, req: MergeNodesIn):
+    """
+    Combine two nodes of the SAME kind into one — "node merging" (section 5).
+    The survivor keeps `keep_id`, the union of both items' transcript
+    provenance, and is marked human-edited; the other item is removed and
+    tombstoned (rule 104) so it cannot come back as a near-duplicate, and any
+    connection that named it is redirected to the survivor.
+    """
+    _session_or_404(session_id)
+    if req.list_name not in core.ITEM_LISTS:
+        raise HTTPException(status_code=400,
+                            detail=f"There is no '{req.list_name}' in the consultation map.")
+    saved = store.merge_map_items(session_id, req.list_name, req.keep_id, req.remove_id,
+                                  text=req.text)
+    if not saved:
+        raise HTTPException(status_code=404,
+                            detail="Both nodes must exist, in the same list, to be merged.")
+    _touch_record(session_id)
+    return {"state": saved, "graph": _graph_snapshot(session_id)}
+
+
+@router.get("/sessions/{session_id}/graph/export.svg")
+def export_graph_svg(session_id: str):
+    session = _session_or_404(session_id)
+    built = _graph_snapshot(session_id, session, persist_positions=False)
+    svg = graph.render_svg(built, title=session.get("title") or "Consultation")
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@router.get("/sessions/{session_id}/graph/export.png")
+def export_graph_png(session_id: str):
+    session = _session_or_404(session_id)
+    built = _graph_snapshot(session_id, session, persist_positions=False)
+    png = graph.render_png_bytes(built, title=session.get("title") or "Consultation")
+    return Response(content=png, media_type="image/png")
+
+
+@router.get("/sessions/{session_id}/graph/export.html")
+def export_graph_html(session_id: str):
+    """A self-contained page — the map, the narrative and the authoritative
+    outcomes — that opens with no app and no external service (section 6).
+    Never includes a transcript excerpt: only what is already on the map."""
+    session = _session_or_404(session_id)
+    built = _graph_snapshot(session_id, session, persist_positions=False)
+    try:
+        narrative = json.loads(session.get("report_narrative_json") or "{}")
+        if not isinstance(narrative, dict):
+            narrative = {}
+    except (ValueError, TypeError):
+        narrative = {}
+    html = graph.render_html_export(
+        session, built, narrative, store.list_decisions(session_id),
+        store.list_action_items(session_id), store.list_writings(session_id))
+    return Response(content=html, media_type="text/html")
 
 
 # ── Export ──────────────────────────────────────────────────────────────────

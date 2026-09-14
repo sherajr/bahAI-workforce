@@ -105,6 +105,7 @@ export function ConsultationPanel() {
       {view === "summary" && sessionId && (
         <ConsultationSummary
           sessionId={sessionId}
+          capabilities={capabilities}
           onDeleted={() => { setSessionId(null); setView("archive"); }}
           onBack={() => setView("archive")}
         />

@@ -31,6 +31,7 @@ renumber, only append.** They run in numeric order, grouped by subsystem:
 | 111 | Exact quotation verification |
 | 112–116 | What the dashboard costs to open, and to leave |
 | 117–120 | A gathering, and a place to start |
+| 121–127 | The concept map (Live Consultation) |
 
 ## Working norms
 
@@ -72,7 +73,7 @@ python scripts/test_nuclei.py              # Material World (nuclei): 281 checks
 python scripts/test_api_auth.py            # The API's owner gate: 66 checks
 python scripts/test_secretary_injection.py # Prompt-injection hold: 50 checks
 python scripts/test_live_consultation.py   # Live Consultation, the shelf,
-                                           # gatherings and Home: 730 checks
+                                           # gatherings and Home: 811 checks
 python scripts/test_quote_verify.py        # Exact quotation verification: 50 checks
 ```
 
@@ -1259,7 +1260,8 @@ speak), `live_consultation_reasoner.py` (the silent brain),
 `live_consultation_writings.py` (verified passages), `live_consultation_api.py`
 (the APIRouter `api.py` includes in four lines), `live_consultation_audio.py`
 (the recording, diarisation and dictation), `live_consultation_report.py` (the
-end-of-meeting report). Client:
+end-of-meeting report), `live_consultation_graph.py` (the concept map — rules
+121–127). Client:
 `dashboard/src/components/consultation/`, `hooks/useRealtimeConsultation.ts`,
 `lib/consultationGovernor.ts`.
 
@@ -2168,6 +2170,131 @@ the printed programme, `agents/home_api.py` the front page. Verify with
        reader and writes the combination nowhere — not to a log, not to a cache,
        not into a URL. Abigail's queue is shown by KIND, never by content: this
        is a screen somebody may walk past.
+
+## Rules 121–127 — the concept map (Live Consultation)
+
+Added 2026-09-14 (owner ask: see the structure of a consultation developing as
+people speak — a real connected graph, not another list of cards). `agents/
+live_consultation_graph.py` owns the contract, the validation and the exports;
+`dashboard/src/components/consultation/ConceptGraph.tsx` (React Flow,
+`@xyflow/react`) is the interactive view. Verify with
+`scripts/test_live_consultation.py`.
+
+121. **The graph is DERIVED, never a second copy of anything.** Same discipline
+     as the finished-video shelf (rule 58) and a gathering's commitments (rule
+     117), applied one level deeper: `graph.build_graph` reads the EXISTING
+     `session_state`, `decisions` and `action_items` rows on every call and
+     assembles a fresh graph — a node's `id` is the underlying map item's own
+     stable id, `record_ref` points back at it, and `label` is a short display
+     truncation computed fresh every time and NEVER stored, so `detail` is
+     always the exact, currently-approved wording (section 3: "a shorter node
+     label is only a display label"). A decision or action node's authoritative
+     status, owner, due date and acceptance are read from the `decisions` /
+     `action_items` TABLES via their existing `map_id` link (rule 95), not from
+     the map item, because the tables are what `accept_action` and
+     `confirm_decision` actually write. Only two things are real rows of their
+     own: the CONNECTIONS a person or the reasoner drew (`graph_edges`, plus a
+     rejection tombstone), and where a node sits on screen
+     (`graph_node_view`) — everything else would be a copy that can disagree
+     with the record. `build_graph` makes no database write and no network
+     call, so it is safe to call on every read, live or archived: "opening an
+     archive never regenerates through AI" is true by construction rather than
+     a special case for an ended session.
+122. **Relationship extraction reuses the existing analysis pass — not a second
+     always-running service.** The reasoner's one JSON schema (rule 79) gained
+     an `"edges"` array and an optional `"tmp_id"` on anything in `"add"`, so a
+     theme and the item it contains can be proposed and connected in the SAME
+     pass, resolved deterministically in `reasoner.merge` (never guessed at by
+     the model): a `tmp_id` becomes the real id `merge` just assigned, in code,
+     the same way every other id in this file always has been. The hierarchy is
+     acyclic BY CONSTRUCTION rather than by a cycle check: `contains` may only
+     ever originate from a node of kind `theme` (or the synthetic root, which
+     nothing external can target), so the tree is two layers, root → theme →
+     item, and a cycle cannot be built. Every other relation
+     (`supports`/`challenges`/`depends_on`/`addresses`/`leads_to`/`related_to`)
+     is a cross-link between any two non-root nodes and never affects layout.
+     `graph.validate_edges` then checks existence, the `contains`-from-theme
+     rule, self-loops and the rejection tombstone, dropping only the bad
+     element and reporting why — never the whole patch (rule 79's "bad output
+     loses the pass, not the meeting", applied to a connection instead of an
+     item). Applied AFTER `state.save_state` inside `_run_analysis`, against
+     whatever the map says right then: a concurrent human edit during the call
+     is handled for free, because the SAME already-rebased `saved` state (rule
+     104) is what a proposed edge is validated against, so no second rebase of
+     its own was needed.
+123. **A human's authority over a connection is the same as over an item, and
+     works the same way.** Rejecting a connection deletes the row and writes a
+     tombstone (`graph_edge_rejections`) that the reasoner's own proposals are
+     checked against on every future pass — a model cannot silently recreate
+     what a person took apart (section 3). A human adding the identical
+     connection back by hand bypasses the tombstone: that is a new, later
+     decision, not the model undoing the old one. "Node merging" is scoped
+     deliberately narrow — combining two items of the SAME map list into one,
+     because merging a fact into an action is not a content operation this
+     store can make sense of on its own. The survivor keeps its id, the union of
+     both items' `source_turn_ids`, and `human_edited=true`; the other item is
+     removed AND tombstoned in `removed_map_items` (rule 104), so it cannot
+     come back as a near-duplicate, and every stored connection naming it is
+     redirected to the survivor (`store.redirect_graph_edges`) rather than left
+     dangling. The AI-proposed side of `merge` already only ever de-duplicates
+     on an EXACT normalised-text match, never a fuzzy one, so distinct opposing
+     ideas were never at risk of being silently folded together by a model —
+     only a person merges nodes, deliberately, one pair at a time.
+124. **A node's position is layout, and layout is not content.** Dragging a
+     node, pinning it, or collapsing a branch writes to `graph_node_view` and
+     bumps its OWN counter (`graph_view_revision`) — never `state_revision`,
+     which the speech governor's freshness check reads (rule 77), and never
+     `record_revision`, which report approval is bound to (rule 102). A drag
+     during a live meeting therefore cannot go stale an observation or
+     invalidate an approved record. Positions are computed ONCE, the first time
+     a node appears with no stored view row, and kept exactly from then on —
+     the endpoint layer persists whatever `build_graph`'s pure layout function
+     newly computed, so the SAME node never moves again just because a sibling
+     was added next to it (section 5: "do not recenter or reshuffle the whole
+     diagram on every update"). "Arrange map" is the explicit, deliberate
+     reset: it clears every position nobody pinned and lets them be recomputed,
+     while a pinned position is left exactly where the person put it.
+125. **Exports derive from the stored graph, never a second AI interpretation,
+     and are safe to hand to someone else.** SVG and PNG share one pure layout
+     function with the live view; PNG is rendered with Pillow (already a hard
+     dependency, rule 9's convention) rather than adding an SVG-to-raster
+     library for one button, using the same explicit Windows font-path stack as
+     `agents/layout.py`'s `SERIF_STACK` — bare font names are never trusted to
+     resolve. All text is escaped (`xml.sax.saxutils.escape` for SVG, the same
+     for the HTML export) — a node's wording is participant-authored content and
+     is treated exactly as untrusted as anything else that reaches a rendered
+     page in this codebase. The HTML export is self-contained (the SVG inlined,
+     a textual outline alongside it for accessibility, the narrative and the
+     authoritative decision/action sections built directly from the stored
+     rows) and never includes a raw transcript excerpt — only wording already on
+     the map. An export always shows the FULL graph regardless of what is
+     currently collapsed on screen (section 5: "allow a complete map export
+     even when the screen currently has collapsed branches") — collapse is a
+     node's own view field the export layer simply does not read.
+126. **Ending a meeting waits BRIEFLY for an analysis already in flight, never
+     for ever.** `_run_analysis` returned "already running" immediately on a
+     busy lock, which meant an end request could complete while a pass that
+     would have added the last few minutes' themes and connections was still
+     mid-call — the concept map and the report are both built right after
+     `end_session` returns, so a skipped-past pass was a real gap in "the
+     feature includes the last accepted discussion" (section 6). `wait_if_busy`
+     (bounded, `CONSULTATION_FINAL_WAIT_S`, default 20s) makes the closing call
+     wait for the lock rather than skip it; this thread's own pass still runs
+     afterwards regardless, reading whatever is left unanalysed by then. Never
+     unbounded — a person leaving must not be made to wait forever, the same
+     reasoning as rule 114 applied to ending rather than unmounting.
+127. **An old session, or one still in its first few turns, gets a truthful
+     fallback view, never a false claim of structure.** With no themes and no
+     stored connections at all, `build_graph` groups items by category into
+     synthetic bucket nodes rather than drawing a flat, unreadable dump — every
+     one of those grouping edges is marked `synthetic` and the whole graph
+     carries `fallback: true`, which the screen shows as a plain banner ("grouped
+     automatically by category") rather than letting a fallback tree read as
+     something the group actually discussed (section 3: "clearly distinguishing
+     fallback grouping from extracted semantic relationships"). The moment a
+     real theme or a real connection exists, the fallback buckets stop being
+     generated at all — there is no migration step and none is needed, because
+     nothing about the fallback view was ever stored.
 
 ## Gotchas
 

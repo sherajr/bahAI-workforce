@@ -154,6 +154,7 @@ auth.KEY_PATH = _TMP / "api_key.txt"
 
 import agents.live_consultation as core  # noqa: E402
 import agents.live_consultation_governor as gov  # noqa: E402
+import agents.live_consultation_graph as lc_graph  # noqa: E402
 import agents.live_consultation_realtime as rt  # noqa: E402
 import agents.live_consultation_reasoner as brain  # noqa: E402
 import agents.live_consultation_store as store  # noqa: E402
@@ -647,7 +648,7 @@ patch = {
                      {"kind": "note", "importance": 0.9, "summary": "wants to speak",
                       "should_request_floor": True, "permission_request": ""}],
 }
-merged, notes = brain.merge(BEFORE, patch)
+merged, notes, _ = brain.merge(BEFORE, patch)
 check("duplicate facts are added once", len([f for f in merged["facts"]]) == 1)
 check("a bare string is accepted where an object was asked for",
       merged["ideas"][-1]["text"] == "Optional RSVP")
@@ -661,26 +662,26 @@ check("a decision candidate is only ever a candidate",
 check("a malformed concerns field degrades to empty, not to a crash",
       merged["decision_candidates"][0]["concerns"] == [])
 
-merged_conf, _ = brain.merge({"confirmed_decision": {"id": "dec_1", "text": "Saturday"}},
-                             {"confirmed_decision": {"id": "x", "text": "Sunday"},
-                              "add": {}})
+merged_conf, _, _ = brain.merge({"confirmed_decision": {"id": "dec_1", "text": "Saturday"}},
+                                {"confirmed_decision": {"id": "x", "text": "Sunday"},
+                                 "add": {}})
 check("a model can never write confirmed_decision (rule 81)",
       merged_conf["confirmed_decision"]["text"] == "Saturday")
 
-merged_none, _ = brain.merge({}, {"confirmed_decision": {"text": "Sunday"}})
+merged_none, _, _ = brain.merge({}, {"confirmed_decision": {"text": "Sunday"}})
 check("and cannot create one from nothing", merged_none["confirmed_decision"] is None)
 
 # This block used to assert the OPPOSITE -- that a "resolve" from the model
 # REMOVED the item. That was the bug (rule 97): a minority concern could vanish
 # from the record because a model decided it had been dealt with, taking the
 # route by which the group's understanding developed with it.
-kept, notes = brain.merge({"tensions": [{"id": "tension_1", "text": "structure vs openness"}]},
-                          {"resolve": ["tension_1"]})
+kept, notes, _ = brain.merge({"tensions": [{"id": "tension_1", "text": "structure vs openness"}]},
+                             {"resolve": ["tension_1"]})
 check("a model asking to delete a tension is refused", len(kept["tensions"]) == 1)
 check("and the refusal is reported rather than silent",
       any("never deleted" in n for n in notes), str(notes))
 
-marked, notes_a = brain.merge(
+marked, notes_a, _ = brain.merge(
     {"tensions": [{"id": "tension_1", "text": "structure vs openness", "lifecycle": "open"}]},
     {"addressed": [{"id": "tension_1", "note": "the group widened the invitation"}]})
 check("the model may mark a tension as appearing addressed",
@@ -692,7 +693,7 @@ check("and the merge says nothing was deleted",
       any("none deleted" in n for n in notes_a), str(notes_a))
 
 for _final in ("resolved", "deferred", "accepted_risk", "superseded"):
-    _out, _ = brain.merge(
+    _out, _, _ = brain.merge(
         {"tensions": [{"id": "tension_1", "text": "t", "lifecycle": "open"}]},
         {"addressed": [{"id": "tension_1", "lifecycle": _final}]})
     check(f"a model cannot mark a concern {_final}",
@@ -1361,7 +1362,7 @@ check("it is in the private consultation database, where it belongs",
 
 src = Path(__file__).parent.parent / "agents"
 live_files = sorted(p.name for p in src.glob("live_consultation*.py"))
-check("the subsystem is its own set of modules", len(live_files) == 9, str(live_files))
+check("the subsystem is its own set of modules", len(live_files) == 10, str(live_files))
 for name in live_files:
     text = (src / name).read_text(encoding="utf-8")
     check(f"{name} does not import the product consultation pipeline",
@@ -1790,9 +1791,9 @@ check("a HUMAN may record that the group established a fact",
       r.json()["item"]["status"] == "group_established")
 check("and the edit is marked as theirs", r.json()["item"]["human_edited"] is True)
 
-_merged, _ = brain.merge(store.get_state(_S),
-                         {"update": [{"id": "fact_1", "text": "the model's version",
-                                      "status": "disputed"}]})
+_merged, _, _ = brain.merge(store.get_state(_S),
+                            {"update": [{"id": "fact_1", "text": "the model's version",
+                                         "status": "disputed"}]})
 _fact = [f for f in _merged["facts"] if f["id"] == "fact_1"][0]
 check("and a later model pass cannot undo it",
       _fact["status"] == "group_established" and _fact["text"] == "The hall is free")
@@ -1898,7 +1899,7 @@ check("and the concern is carried WITH it, not tidied away",
 _md = client.get(f"/live-consultation/sessions/{_C}/export").text
 check("the export prints the retained concern beside the decision",
       "small children" in _md and "Confirmed" in _md)
-_sc, _ = brain.merge(store.get_state(_C), {"confirmed_decision": {"text": "something else"}})
+_sc, _, _ = brain.merge(store.get_state(_C), {"confirmed_decision": {"text": "something else"}})
 check("no model pass can touch a confirmed decision (rule 81 still holds)",
       (_sc.get("confirmed_decision") or {}).get("text") == "Hold it on Saturday")
 
@@ -3362,6 +3363,374 @@ check("Home degrades rather than failing when a subsystem is unhappy",
       isinstance(lc_api and True, bool)
       and "error" in json.dumps(home_api._safe(lambda: (_ for _ in ()).throw(
           RuntimeError("boom")), [])))
+
+
+section("the concept map: connections resolve and validate")
+
+# tmp_id resolution: a theme and an idea added in the SAME patch, connected by
+# an edge that names them by their scratch ids rather than a real one.
+_cm_state = {"question": "Where should we hold the gathering?", "state_revision": 1}
+_cm_patch = {
+    "add": {
+        "themes": [{"tmp_id": "t1", "text": "Venue", "source_turn_ids": ["1"]}],
+        "ideas": [{"tmp_id": "n1", "text": "Use the community hall", "source_turn_ids": ["1"]}],
+        "needs_and_concerns": [{"text": "Wheelchair access", "source_turn_ids": ["1"]}],
+    },
+    "edges": [
+        {"from": "t1", "to": "n1", "relation": "contains"},
+        {"from": "n1", "to": "concern_1", "relation": "addresses", "stated": True,
+         "source_turn_ids": ["1"]},
+    ],
+}
+_cm_merged, _cm_notes, _cm_resolved = brain.merge(_cm_state, _cm_patch)
+_theme_id = _cm_merged["themes"][0]["id"]
+_idea_id = _cm_merged["ideas"][0]["id"]
+check("a tmp_id resolves to the real id merge just assigned",
+      {e["from"] for e in _cm_resolved} == {_theme_id, _idea_id}, str(_cm_resolved))
+check("a stated connection is distinguishable from an inferred one",
+      any(e["relation"] == "addresses" and e.get("stated") is True for e in _cm_resolved))
+
+_node_ids, _node_kind = lc_graph.node_universe(_cm_merged)
+check("the node universe carries every real item plus the root",
+      _node_ids == {"root", _theme_id, _idea_id, "concern_1"}, str(_node_ids))
+check("and each one's kind", _node_kind[_theme_id] == "theme" and _node_kind[_idea_id] == "idea")
+
+_bad_edges = [
+    {"from": _theme_id, "to": _idea_id, "relation": "contains"},        # good
+    {"from": _idea_id, "to": "concern_1", "relation": "addresses"},     # good
+    {"from": _idea_id, "to": _theme_id, "relation": "contains"},        # an item cannot contain
+    {"from": _idea_id, "to": "concern_1", "relation": "nonsense"},      # not a real relation
+    {"from": _idea_id, "to": _idea_id, "relation": "related_to"},      # self-loop
+    {"from": _idea_id, "to": "ghost_9", "relation": "related_to"},     # names nothing real
+]
+_accepted, _val_notes = lc_graph.validate_edges(_bad_edges, {}, _node_ids, _node_kind, set())
+check("only the two valid connections survive validation", len(_accepted) == 2, str(_accepted))
+check("and the drops are explained", len(_val_notes) >= 2, str(_val_notes))
+
+_rejected_keys = {(_theme_id, _idea_id, "contains")}
+_accepted2, _ = lc_graph.validate_edges(
+    [{"from": _theme_id, "to": _idea_id, "relation": "contains"}], {}, _node_ids, _node_kind,
+    _rejected_keys)
+check("a connection matching a rejection tombstone is dropped", _accepted2 == [])
+
+
+section("the concept map: derived, never a second copy")
+
+_dg_state = {
+    "question": "Where should we hold the gathering, and who is it for?",
+    "themes": [{"id": "theme_1", "text": "Venue", "source_turn_ids": []}],
+    "ideas": [{"id": "idea_1", "text": "Use the community hall on the corner "
+              "of Elm Street, which has step-free access", "source_turn_ids": ["3"],
+              "human_edited": True}],
+    "needs_and_concerns": [{"id": "concern_1", "text": "Wheelchair access", "lifecycle": "open"}],
+    "decision_candidates": [{"id": "decision_1", "text": "Hold it at the community hall"}],
+    "action_items": [{"id": "action_1", "action": "Book the hall", "owner": None, "due": None}],
+    "state_revision": 5,
+}
+_dg_decisions = [{"id": "dec_x", "map_id": "decision_1", "status": "confirmed",
+                  "rationale": "Central and accessible", "support": "", "concerns": [],
+                  "retained_concerns": [], "confirmed_at": "2026-09-10 10:00:00"}]
+_dg_actions = [{"id": "act_x", "map_id": "action_1", "status": "accepted",
+               "owner": "Sam", "due": "Friday", "owner_accepted": True,
+               "accepted_by": "host", "blocker": "", "support_needed": "",
+               "success_criteria": ""}]
+_dg_edges_rows = [{"id": "e1", "from_id": "theme_1", "to_id": "idea_1", "relation": "contains",
+                  "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []}]
+_dg_graph = lc_graph.build_graph({"id": "cons_x", "question": _dg_state["question"]},
+                                 _dg_state, _dg_decisions, _dg_actions, _dg_edges_rows, {})
+_by_id = {n["id"]: n for n in _dg_graph["nodes"]}
+check("the root node carries the question", _by_id["root"]["detail"] == _dg_state["question"])
+check("a long item's label is a SHORT truncation",
+      len(_by_id["idea_1"]["label"]) < len(_by_id["idea_1"]["detail"]))
+check("but the full, exact wording is preserved in detail",
+      _by_id["idea_1"]["detail"] == _dg_state["ideas"][0]["text"])
+check("a decision node's status comes from the DECISIONS TABLE, not the stale state item",
+      _by_id["decision_1"]["status"] == "confirmed")
+check("and its rationale is the authoritative one",
+      _by_id["decision_1"]["extra"]["rationale"] == "Central and accessible")
+check("an action node's owner/due/status come from the ACTIONS TABLE",
+      _by_id["action_1"]["extra"]["owner"] == "Sam"
+      and _by_id["action_1"]["status"] == "accepted"
+      and _by_id["action_1"]["extra"]["owner_accepted"] is True)
+check("a human-edited item's node says so", _by_id["idea_1"]["human_edited"] is True)
+check("the graph is not marked as fallback grouping when a real theme exists",
+      _dg_graph["fallback"] is False)
+_contains = [e for e in _dg_graph["edges"] if e["relation"] == "contains"]
+check("the theme really does contain the idea",
+      any(e["from_id"] == "theme_1" and e["to_id"] == "idea_1" for e in _contains))
+check("every theme is reachable from the root",
+      any(e["from_id"] == "root" and e["to_id"] == "theme_1" for e in _contains))
+check("an item with no theme still hangs off the root rather than vanishing",
+      any(e["from_id"] == "root" and e["to_id"] == "concern_1" for e in _contains))
+
+_fb_state = {"question": "An old session", "ideas": [{"id": "idea_1", "text": "Something"}],
+            "needs_and_concerns": [{"id": "concern_1", "text": "Something else"}],
+            "state_revision": 1}
+_fb_graph = lc_graph.build_graph({"id": "cons_old"}, _fb_state, [], [], [], {})
+check("a session with no themes and no connections falls back to grouping",
+      _fb_graph["fallback"] is True)
+check("fallback grouping uses category buckets, not a flat dump",
+      any(n["kind"] == "bucket" for n in _fb_graph["nodes"]))
+check("and the fallback edges are marked synthetic, never claimed as extracted",
+      all(e["synthetic"] for e in _fb_graph["edges"]))
+
+_svg = lc_graph.render_svg(_dg_graph, title="Test export")
+_html = lc_graph.render_html_export({"id": "cons_x", "title": "Test", "question": "Q?"},
+                                    _dg_graph, {}, _dg_decisions, _dg_actions, [])
+check("SVG export contains the node's own wording", "community hall" in _svg or "Idea" in _svg)
+_xss_state = dict(_dg_state)
+_xss_state["ideas"] = [{"id": "idea_1", "text": "<script>evil()</script> & <b>bold</b>",
+                        "source_turn_ids": []}]
+_xss_graph = lc_graph.build_graph({"id": "cons_xss", "question": "Q"}, _xss_state, [], [], [], {})
+_xss_svg = lc_graph.render_svg(_xss_graph)
+_xss_html = lc_graph.render_html_export({"id": "cons_xss", "title": "X", "question": "Q"},
+                                        _xss_graph, {}, [], [], [])
+check("SVG export escapes untrusted node text", "<script>" not in _xss_svg, _xss_svg[:400])
+check("HTML export escapes untrusted node text", "<script>" not in _xss_html, _xss_html[:2000])
+check("the escaped text is still present, just safely",
+      "&lt;script&gt;" in _xss_svg and "&lt;script&gt;" in _xss_html)
+
+_png = lc_graph.render_png_bytes(_dg_graph, title="Test")
+check("PNG export produces a real PNG", _png[:8] == b"\x89PNG\r\n\x1a\n")
+
+
+section("the concept map: endpoints")
+
+_G = client.post("/live-consultation/sessions",
+                 json={"title": "Gathering plan", "question": "Where should we hold the "
+                       "neighbourhood gathering?"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_G}/turns",
+            json={"text": "Let's think about the venue first.",
+                  "realtime_item_id": "g1", "is_final": True})
+
+_GRAPH_REPLY = json.dumps({
+    "summary": "Planning the gathering.",
+    "add": {
+        "themes": [{"tmp_id": "t1", "text": "Venue", "source_turn_ids": ["1"]}],
+        "ideas": [{"tmp_id": "n1", "text": "Use the community hall",
+                  "source_turn_ids": ["1"]}],
+        "needs_and_concerns": [{"text": "Wheelchair access", "source_turn_ids": ["1"]}],
+    },
+    "edges": [
+        {"from": "t1", "to": "n1", "relation": "contains"},
+        {"from": "n1", "to": "concern_1", "relation": "addresses", "stated": True,
+         "source_turn_ids": ["1"]},
+    ],
+})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: _GRAPH_REPLY)
+_ares = client.post(f"/live-consultation/sessions/{_G}/analyze", json={"force": True}).json()
+check("the analysis pass succeeded", _ares.get("ok") is True, json.dumps(_ares)[:300])
+
+_g1 = client.get(f"/live-consultation/sessions/{_G}/graph").json()["graph"]
+check("the graph now has a real theme branch",
+      any(n["kind"] == "theme" and n["label"] == "Venue" for n in _g1["nodes"]))
+_gnodes = {n["kind"]: n for n in _g1["nodes"]}
+check("themes are not fallback-grouped once a real one exists", _g1["fallback"] is False)
+_contains_ids = {(e["from_id"], e["to_id"]) for e in _g1["edges"] if e["relation"] == "contains"}
+_theme_node = next(n for n in _g1["nodes"] if n["kind"] == "theme")
+_idea_node = next(n for n in _g1["nodes"] if n["kind"] == "idea")
+_concern_node = next(n for n in _g1["nodes"] if n["kind"] == "concern")
+check("the theme really contains the idea, end to end through the API",
+      (_theme_node["id"], _idea_node["id"]) in _contains_ids)
+_cross = [e for e in _g1["edges"] if e["relation"] == "addresses"]
+check("the cross-link the model proposed made it onto the live graph",
+      any(e["from_id"] == _idea_node["id"] and e["to_id"] == _concern_node["id"]
+          for e in _cross))
+check("a stated connection is marked NOT inferred",
+      next(e for e in _cross)["inferred"] is False)
+check("every node was given a position", all("x" in n and "y" in n for n in _g1["nodes"]))
+
+# Positions are computed once and then STABLE -- a second read must not move
+# anything that was not just added (section 5: "do not reshuffle on update").
+_g2 = client.get(f"/live-consultation/sessions/{_G}/graph").json()["graph"]
+_pos1 = {n["id"]: (n["x"], n["y"]) for n in _g1["nodes"]}
+_pos2 = {n["id"]: (n["x"], n["y"]) for n in _g2["nodes"]}
+check("node positions are stable across reads", _pos1 == _pos2, str((_pos1, _pos2)))
+
+# Dragging a node persists, and never touches state_revision or record_revision
+# (rules 77/102 applied to layout).
+_before_state_rev = client.get(f"/live-consultation/sessions/{_G}").json()["state"]["state_revision"]
+_before_rec_rev = client.get(f"/live-consultation/sessions/{_G}").json()["record_revision"]
+_vr = client.patch(f"/live-consultation/sessions/{_G}/graph/nodes/{_idea_node['id']}/view",
+                   json={"x": 500, "y": 900, "pinned": True})
+check("dragging a node is accepted", _vr.status_code == 200, _vr.text[:160])
+_after_state_rev = client.get(f"/live-consultation/sessions/{_G}").json()["state"]["state_revision"]
+_after_rec_rev = client.get(f"/live-consultation/sessions/{_G}").json()["record_revision"]
+check("a drag never bumps state_revision (the speech governor's freshness check)",
+      _after_state_rev == _before_state_rev)
+check("a drag never bumps record_revision (report approval)",
+      _after_rec_rev == _before_rec_rev)
+_g3 = client.get(f"/live-consultation/sessions/{_G}/graph").json()["graph"]
+_moved = next(n for n in _g3["nodes"] if n["id"] == _idea_node["id"])
+check("the dragged position is exactly what was saved",
+      _moved["x"] == 500 and _moved["y"] == 900 and _moved["pinned"] is True)
+
+# Arrange resets everything UNPINNED, and leaves the pin exactly where it was.
+_theme_before = next(n for n in _g3["nodes"] if n["id"] == _theme_node["id"])
+client.patch(f"/live-consultation/sessions/{_G}/graph/nodes/{_theme_node['id']}/view",
+            json={"x": 111, "y": 222})   # NOT pinned -- an earlier auto-placement
+_arranged = client.post(f"/live-consultation/sessions/{_G}/graph/arrange").json()["graph"]
+_arr_by_id = {n["id"]: n for n in _arranged["nodes"]}
+check("arrange leaves a PINNED node exactly where the person put it",
+      _arr_by_id[_idea_node["id"]]["x"] == 500 and _arr_by_id[_idea_node["id"]]["y"] == 900)
+check("arrange recomputes anything nobody pinned",
+      (_arr_by_id[_theme_node["id"]]["x"], _arr_by_id[_theme_node["id"]]["y"]) != (111, 222))
+
+# Human authority over connections.
+_bad = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                   json={"from_id": _idea_node["id"], "to_id": _theme_node["id"],
+                         "relation": "contains"})
+check("a human cannot make an item contain a theme either", _bad.status_code == 400)
+_selfloop = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                        json={"from_id": _idea_node["id"], "to_id": _idea_node["id"],
+                              "relation": "related_to"})
+check("a self-loop is refused", _selfloop.status_code == 400)
+_unknownrel = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                          json={"from_id": _idea_node["id"], "to_id": _concern_node["id"],
+                                "relation": "not_a_real_relation"})
+check("an unrecognised relation is refused", _unknownrel.status_code == 400)
+
+_manual = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                      json={"from_id": _idea_node["id"], "to_id": _concern_node["id"],
+                            "relation": "supports", "label": "a good fit"})
+check("a human can draw a connection by hand", _manual.status_code == 200, _manual.text[:160])
+_manual_edge_id = _manual.json()["edge"]["id"]
+check("it is marked as a human's connection, not the model's",
+      bool(_manual.json()["edge"]["human_edited"]))
+
+_edited = client.patch(f"/live-consultation/sessions/{_G}/graph/edges/{_manual_edge_id}",
+                       json={"label": "a strong fit"})
+check("a human can correct a connection's label", _edited.json()["edge"]["label"] == "a strong fit")
+
+_rej = client.delete(f"/live-consultation/sessions/{_G}/graph/edges/{_manual_edge_id}")
+check("a human can reject a connection", _rej.status_code == 200)
+_g4 = client.get(f"/live-consultation/sessions/{_G}/graph").json()["graph"]
+check("the rejected connection is gone from the map",
+      not any(e["id"] == _manual_edge_id for e in _g4["edges"]))
+
+# The tombstone: the SAME connection, re-proposed by the model, must not come back.
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: json.dumps({
+                      "edges": [{"from": _idea_node["id"], "to": _concern_node["id"],
+                                "relation": "supports"}]}))
+client.post(f"/live-consultation/sessions/{_G}/turns",
+           json={"text": "One more thing.", "realtime_item_id": "g2", "is_final": True})
+client.post(f"/live-consultation/sessions/{_G}/analyze", json={"force": True})
+_g5 = client.get(f"/live-consultation/sessions/{_G}/graph").json()["graph"]
+check("a model cannot silently recreate a connection a human rejected",
+      not any(e["from_id"] == _idea_node["id"] and e["to_id"] == _concern_node["id"]
+              and e["relation"] == "supports" for e in _g5["edges"]))
+
+# Merging two nodes.
+_merge_resp = client.post(f"/live-consultation/sessions/{_G}/graph/merge",
+                          json={"list_name": "ideas", "keep_id": _idea_node["id"],
+                                "remove_id": "idea_ghost", "text": "Use the hall"})
+check("merging a nonexistent node is refused", _merge_resp.status_code == 404)
+
+_second_idea = client.post(f"/live-consultation/sessions/{_G}/turns",
+                           json={"text": "Or the school gym.", "realtime_item_id": "g3",
+                                 "is_final": True})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                  call=lambda m: json.dumps(
+                      {"add": {"ideas": [{"text": "The school gym", "source_turn_ids": ["3"]}]}}))
+client.post(f"/live-consultation/sessions/{_G}/analyze", json={"force": True})
+_state_now = client.get(f"/live-consultation/sessions/{_G}").json()["state"]
+_gym_id = next(i["id"] for i in _state_now["ideas"] if "gym" in i["text"])
+_merged_ok = client.post(f"/live-consultation/sessions/{_G}/graph/merge",
+                         json={"list_name": "ideas", "keep_id": _idea_node["id"],
+                               "remove_id": _gym_id, "text": "The community hall (or the gym)"})
+check("merging two real nodes succeeds", _merged_ok.status_code == 200, _merged_ok.text[:200])
+_after_merge_state = client.get(f"/live-consultation/sessions/{_G}").json()["state"]
+check("the survivor carries the combined wording",
+      any(i["id"] == _idea_node["id"] and "gym" in i["text"] for i in _after_merge_state["ideas"]))
+check("the merged-away item is gone",
+      not any(i["id"] == _gym_id for i in _after_merge_state["ideas"]))
+check("the survivor is marked human-edited so it cannot be overwritten",
+      next(i for i in _after_merge_state["ideas"] if i["id"] == _idea_node["id"])["human_edited"])
+
+# Cross-session isolation (rule 100's discipline, extended to the graph).
+_OTHER = client.post("/live-consultation/sessions", json={"title": "Somewhere else"}).json()["id"]
+_wrong = client.delete(f"/live-consultation/sessions/{_OTHER}/graph/edges/{_manual_edge_id}")
+check("a connection id from another session cannot be reached", _wrong.status_code == 404)
+_wrong2 = client.patch(f"/live-consultation/sessions/{_OTHER}/graph/nodes/"
+                       f"{_idea_node['id']}/view", json={"x": 1, "y": 1})
+check("a node-view write always succeeds scoped to ITS OWN session "
+      "(there is no cross-session id collision to defend against here)",
+      _wrong2.status_code == 200)
+_other_graph = client.get(f"/live-consultation/sessions/{_OTHER}/graph").json()["graph"]
+check("but it created nothing visible in the other session's own graph",
+      not any(n["id"] == _idea_node["id"] and n["kind"] != "root" for n in _other_graph["nodes"]))
+
+# Exports.
+_exp_svg = client.get(f"/live-consultation/sessions/{_G}/graph/export.svg")
+check("SVG export answers", _exp_svg.status_code == 200)
+check("with the right content type", "svg" in _exp_svg.headers["content-type"])
+check("and the node wording is on it", "hall" in _exp_svg.text or "gym" in _exp_svg.text)
+check("but never the raw transcript sentence",
+      "Let's think about the venue first" not in _exp_svg.text)
+
+_exp_png = client.get(f"/live-consultation/sessions/{_G}/graph/export.png")
+check("PNG export answers", _exp_png.status_code == 200)
+check("with the right content type", "png" in _exp_png.headers["content-type"])
+check("and is a real PNG", _exp_png.content[:8] == b"\x89PNG\r\n\x1a\n")
+
+_exp_html = client.get(f"/live-consultation/sessions/{_G}/graph/export.html")
+check("HTML export answers", _exp_html.status_code == 200)
+check("self-contained: it inlines the map as SVG", "<svg" in _exp_html.text)
+check("and never leaks the raw transcript",
+      "Let's think about the venue first" not in _exp_html.text)
+check("HTML export includes the record section",
+      "What happens next" in _exp_html.text or "What was decided" in _exp_html.text)
+
+# Capabilities carry the vocabulary, served rather than duplicated (rule 87).
+_caps2 = client.get("/live-consultation/capabilities").json()
+check("capabilities names the graph schema version",
+      _caps2.get("graph_schema_version") == lc_graph.GRAPH_SCHEMA_VERSION)
+check("and the node/edge vocabulary, for the legend",
+      {k["id"] for k in _caps2["node_kinds"]} >= {"theme", "idea", "decision", "action"}
+      and {k["id"] for k in _caps2["edge_relations"]} == set(lc_graph.EDGE_RELATIONS))
+
+# Opening an ended session never starts anything paid -- build_graph makes no
+# network call at all, live or archived, so this is true structurally.
+client.post(f"/live-consultation/sessions/{_G}/end", json={"final_pass": False})
+_ended_graph = client.get(f"/live-consultation/sessions/{_G}/graph")
+check("an archived session's map still loads, from saved data",
+      _ended_graph.status_code == 200)
+_ended_export = client.get(f"/live-consultation/sessions/{_G}/graph/export.html")
+check("and can still be exported", _ended_export.status_code == 200)
+
+
+section("ending waits briefly for an in-flight analysis, but never for ever (rule 90/104)")
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+_W = store.create_session("Wait test")["id"]
+_wlock = lc_api._lock_for(_W)
+check("the lock starts free", _wlock.acquire(blocking=False))
+
+_immediate = lc_api._run_analysis({"id": _W}, force=True, wait_if_busy=0.0)
+check("with no wait requested, a busy lock is reported at once, not blocked on",
+      _immediate == {"ran": False, "note": "An analysis pass is already running."})
+
+def _release_soon():
+    time.sleep(0.2)
+    _wlock.release()
+
+threading.Thread(target=_release_soon, daemon=True).start()
+_started = time.time()
+_waited = lc_api._run_analysis({"id": _W}, force=True, wait_if_busy=2.0)
+_elapsed = time.time() - _started
+check("a bounded wait lets a closing pass run once the busy lock frees up",
+      _waited.get("ran") is not False or _waited.get("note") != "An analysis pass is already running.",
+      json.dumps(_waited))
+check("and it did not wait the full timeout -- it proceeded as soon as the lock freed",
+      _elapsed < 1.5, str(_elapsed))
+check("FINAL_ANALYSIS_WAIT_S is a real, bounded number", 0 < lc_api.FINAL_ANALYSIS_WAIT_S <= 120)
 
 
 # --- Summary -----------------------------------------------------------------

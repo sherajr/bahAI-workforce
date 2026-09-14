@@ -91,6 +91,26 @@ export interface ConsultationCapabilities {
   item_lifecycle: VocabEntry[];
   action_statuses: VocabEntry[];
   map_lists: string[];
+  /** The concept map's vocabulary — colours and labels served from the API
+   *  rather than duplicated here (rule 87's reasoning: two copies of a legend
+   *  disagree eventually). */
+  graph_schema_version: number;
+  node_kinds: GraphNodeKindInfo[];
+  edge_relations: GraphRelationInfo[];
+}
+
+export interface GraphNodeKindInfo {
+  id: GraphNodeKind;
+  label: string;
+  plural: string;
+  color: string;
+}
+
+export interface GraphRelationInfo {
+  id: GraphRelation;
+  label: string;
+  style: "solid" | "dashed" | "dotted";
+  hierarchy: boolean;
 }
 
 export interface RetentionPolicy {
@@ -447,6 +467,82 @@ export interface SpeechDecision {
   instructions?: string;
   modalities?: string[];
   observation_id?: string;
+}
+
+// ── The concept map ──────────────────────────────────────────────────────
+//
+// Mirrors `agents/live_consultation_graph.py`. The graph is DERIVED, never a
+// second copy of a decision's text or an action's owner: `record_ref` points
+// back at the canonical map item (or `null` for the root/a fallback bucket),
+// and `label` is a display-only truncation computed fresh on every read —
+// `detail` always carries the exact, currently-approved wording.
+
+export type GraphNodeKind =
+  | "root" | "theme" | "fact" | "assumption" | "principle" | "concern" | "idea"
+  | "agreement" | "tension" | "question" | "investigate" | "synthesis"
+  | "decision" | "action" | "bucket";
+
+export type GraphRelation =
+  | "contains" | "supports" | "challenges" | "depends_on" | "addresses"
+  | "leads_to" | "related_to";
+
+export interface GraphNode {
+  id: string;
+  kind: GraphNodeKind;
+  /** A short DISPLAY truncation — never the whole story. Read `detail` for the
+   *  exact, currently-approved wording. */
+  label: string;
+  detail: string;
+  status: string | null;
+  status_label: string | null;
+  human_edited: boolean;
+  source_turn_ids: string[];
+  /** Which list and item this node is derived from, so a correction goes
+   *  through the EXISTING map-item / decision / action endpoints — there is no
+   *  separate "edit this node" write path. `null` for the root and a fallback
+   *  category bucket, neither of which is a real map item. */
+  record_ref: { list: string; id: string } | null;
+  /** Kind-specific authoritative fields (an action's owner/due/acceptance, a
+   *  decision's rationale/retained concerns, a fact's evidence note). */
+  extra: Record<string, unknown>;
+  origin: "model" | "human" | "root" | "fallback_grouping";
+  x: number;
+  y: number;
+  pinned: boolean;
+  collapsed: boolean;
+}
+
+export interface GraphEdge {
+  id: string;
+  from_id: string;
+  to_id: string;
+  relation: GraphRelation;
+  label: string;
+  /** "hierarchy" is the tree (`contains`, theme/root only); everything else is
+   *  a cross-link and does not affect layout. */
+  kind: "hierarchy" | "cross";
+  inferred: boolean;
+  human_edited: boolean;
+  source_turn_ids: string[];
+  /** True for an implicit root→theme or root→orphan attachment that is never
+   *  a stored row — drawn so the tree has no dangling branch, not a claim
+   *  anyone made a connection. */
+  synthetic: boolean;
+}
+
+export interface ConceptGraph {
+  schema_version: number;
+  session_id: string;
+  /** = the consultation map's own `state_revision`. */
+  content_revision: number;
+  graph_revision: number;
+  view_revision: number;
+  /** True when there are no themes and no extracted connections yet, so the
+   *  tree shown is CATEGORY grouping (a fallback), not something the group
+   *  discussed — the screen must say so plainly (section 3). */
+  fallback: boolean;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
 }
 
 export interface RealtimeCredential {

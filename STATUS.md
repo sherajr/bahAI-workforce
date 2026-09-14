@@ -106,8 +106,39 @@ it is exercised by the suite and over HTTP:
   `HomePanel.tsx`, `GatheringsPanel.tsx`, `PanelBoundary.tsx`,
   `lib/navGuard.ts`, `hooks/useConsultationUpdates.ts`.
 
+- 2026-09-14: **UNCOMMITTED** -- Live Consultation gained a real concept map
+  (rules 121-127): a root (the question), theme branches, and every fact,
+  idea, concern, decision and action as its own node, joined by typed
+  connections (containment under a theme, plus real cross-links -- supports,
+  challenges, depends on, addresses, leads to, related to) that the SAME
+  analysis pass proposes alongside its existing lists. New module
+  `agents/live_consultation_graph.py`; new store tables (`graph_edges`,
+  `graph_edge_rejections`, `graph_node_view`); a new dashboard component
+  (`ConceptGraph.tsx`, on `@xyflow/react`, newly added to `dashboard/
+  package.json`). The graph is DERIVED on every read, never a second copy of a
+  decision's text or an action's owner -- same discipline as the finished-video
+  shelf and a gathering's commitments. Live view: a "Concept map" / "Summary"
+  toggle in the Consultation tab, map prominent by default, with pan/zoom/
+  search/collapse/Arrange and an expanded overlay for a projected display.
+  Archived view: a "Concept map" tab beside Report and Everything else, plus a
+  small preview card in the Report tab. Humans can correct a connection's
+  label, reject one (tombstoned so the model cannot quietly recreate it), draw
+  one by hand, or merge two nodes of the same kind. Exports (SVG, PNG via
+  Pillow, and a self-contained downloadable HTML report) are pure renders of
+  the stored graph with all text escaped. Also fixed in passing: `end_session`
+  used to skip straight past an analysis already in flight; it now waits up to
+  `CONSULTATION_FINAL_WAIT_S` (default 20s) so the closing report and the final
+  map include the last accepted discussion. Verified: 811 offline checks (was
+  734), `npx tsc --noEmit` and `npm run build` clean (entry bundle unchanged at
+  247 kB -- React Flow lives entirely in the Consultation tab's own lazy chunk,
+  rule 112). **Not exercised in a real meeting or a real browser** -- no
+  browser-automation tool was available in this session, so every frontend
+  claim here rests on typecheck, the production build, and reading the code,
+  same limitation STATUS.md has recorded for this subsystem before.
+
 Nothing in this subsystem has been reviewed by hand. **The closeout, the map
-editing and the transcript correction have never been used in a real meeting.**
+editing, the transcript correction and the new concept map have never been
+used in a real meeting.**
 
 **A real loss, on 2026-09-03:** roughly 426 lines of UNCOMMITTED tests covering
 rules 89-93 (the opening, the clock, participants and diarisation, dictation,
@@ -164,6 +195,103 @@ scratch):
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-14 -- Claude Code (Sonnet 5) -- a real concept map for Live Consultation
+
+Sheraj (via a detailed written brief) asked for the consultation map to become
+an actual connected graph — a root, topic branches, and typed connections
+between ideas, concerns, decisions and actions — rather than the existing four
+summary cards, while keeping every human-authority and report guarantee those
+cards already carry (rules 90-98). Rules 121-127 in `AGENTS.md` say why each
+piece of the design exists.
+
+**The design choice that kept this from becoming a second data store:** a
+node's content is never copied. `agents/live_consultation_graph.py`'s
+`build_graph` reads the EXISTING `session_state`, `decisions` and
+`action_items` rows on every call — a node's id is the underlying map item's
+own stable id, and a decision/action node's authoritative status, owner and
+acceptance come from the `decisions`/`action_items` tables via their existing
+`map_id` link (rule 95), not from the map item, because those tables are what
+`accept_action`/`confirm_decision` actually write. Only connections
+(`graph_edges`, new table) and where a node sits on screen (`graph_node_view`,
+new table, its own revision counter) are real rows of their own. This is the
+same "derived, never copied" discipline the finished-video shelf and a
+gathering's commitments already use (rules 58/117), one level deeper.
+
+**Relationship extraction reuses the existing analysis pass rather than adding
+a second always-running model service** (an explicit requirement, to avoid
+another silent-cost surface like realtime voice, rule 85). The reasoner's one
+JSON schema gained an `"edges"` array and an optional `"tmp_id"` on new items,
+resolved deterministically in `reasoner.merge` — never guessed at by the model
+— so a theme and the item it contains can be proposed together in one pass.
+The hierarchy is acyclic BY CONSTRUCTION: `contains` may only ever originate
+from a `theme` node (or the synthetic root), so the tree is two layers and a
+cycle cannot be built — no general cycle check was needed. A rejected
+connection is tombstoned (`graph_edge_rejections`) so the model cannot quietly
+recreate what a person took apart; a human adding the same connection back by
+hand bypasses the tombstone on purpose, because that is a new decision, not
+the model undoing the old one.
+
+**Layout is deliberately isolated from everything that matters.** A drag, a
+pin or a collapsed branch bumps only `graph_view_revision` — never
+`state_revision` (the speech governor's freshness check, rule 77) or
+`record_revision` (report approval, rule 102). A position is computed once,
+the first time a node appears with no stored view row, and never recomputed
+for that node again, which is what keeps the map from reshuffling itself every
+time someone adds a fact.
+
+**Found and fixed in passing, because the graph's final snapshot needed it to
+be true:** `end_session` returned "already running" the instant it found a
+prior analysis pass still in flight, rather than waiting for it — so a closing
+report and the very first concept-map read could both be built one pass short
+of the actual last few minutes of discussion. `_run_analysis` now takes a
+bounded `wait_if_busy` (`CONSULTATION_FINAL_WAIT_S`, default 20s, never
+unbounded — rule 114's reasoning applied to ending rather than leaving), and
+`end_session` uses it.
+
+**The interactive view** (`ConceptGraph.tsx`, on `@xyflow/react` — newly added
+to `dashboard/package.json`, MIT, no production-audit findings): pan, zoom,
+fit, search/focus, branch collapse via double-click, a detail panel per node
+(full wording, status, provenance via the existing "what was actually said"
+modal, connections with reject buttons, an add-connection form, a same-kind
+merge control, a pin-position checkbox kept separate from content editing per
+the brief), Arrange map as an explicit reset, and SVG/PNG/HTML export buttons.
+Live view: a "Concept map" / "Summary" tab pair in the session sidebar, map
+prominent by default (given more of the row's width than the four-card
+summary), with an Expand button for a laptop or projected display, on its own
+6-second poll separate from the transcript's 4-second one. Archived view: a
+third tab beside Report and Everything else, plus a small node/edge-count
+preview card in the Report tab linking to the full map. An old session with no
+themes or connections yet renders as category buckets rather than a flat dump,
+clearly marked `fallback: true` so it can never be read as something the group
+actually discussed.
+
+**Verified:** 811 offline checks in `test_live_consultation.py` (was 734,
++77) — tmp-id resolution, edge validation (unknown node, self-loop, an item
+trying to `contain`, a tombstoned connection), the derived-not-copied
+overlay from the decisions/actions tables, position stability across reads,
+drag/pin never bumping `state_revision` or `record_revision`, Arrange
+preserving a pinned position, cross-session isolation for edges and node
+views (the rule 100 pattern, extended), node merging with edge redirection,
+SVG/PNG/HTML export content-type and XSS-escaping checks (an XSS payload put
+in an idea's text came back escaped in both, with the escaped form present),
+never leaking a raw transcript sentence into an export, the `end_session`
+wait-vs-no-wait timing behaviour, and every existing check in the suite
+(three direct callers of the now three-tuple `reasoner.merge` were the only
+breakage, all in this suite itself, fixed). `npx tsc --noEmit` and
+`npm run build` both clean; the production entry bundle is unchanged at
+247 kB because React Flow lives entirely inside the Consultation tab's own
+lazy-loaded chunk (rule 112), which grew to 311 kB (96 kB gzip) on its own.
+`npm audit --omit=dev` still reports zero.
+
+**Not done, honestly:** no browser-automation tool was available in this
+session, so nothing here has been clicked through in an actual browser or
+exercised with a real microphone — every frontend claim rests on typecheck,
+the production build, and reading the code. Keyboard access and
+reduced-motion support were coded to the same conventions the rest of this
+dashboard uses but were not separately audited. `AGENTS.md` rule 90's
+four-card live view is explicitly evolved rather than replaced, per the
+brief; it is still there as "Summary".
 
 ### 2026-09-11 -- Claude Code (Opus 5) -- a WhatsApp send that failed for a reason nobody could read
 

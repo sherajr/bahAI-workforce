@@ -296,6 +296,55 @@ def init_db(db_path: Path | str | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_participant_session
                 ON participants(session_id);
+            -- The concept map's cross-links and theme containment
+            -- (`agents/live_consultation_graph.py`). The NODES are never stored
+            -- here -- they are derived on every read from `session_state`,
+            -- `decisions` and `action_items`, the same discipline as the
+            -- finished-video shelf (rule 58). Only the CONNECTIONS a person or
+            -- the reasoner drew between them are real rows.
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                inferred INTEGER NOT NULL DEFAULT 1,
+                source_turn_ids_json TEXT NOT NULL DEFAULT '[]',
+                human_edited INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_edge_session ON graph_edges(session_id);
+            -- What a human REJECTED. A tombstone, checked before an
+            -- AI-proposed connection is ever stored again, so the model
+            -- cannot silently recreate what a person took apart (section 3).
+            -- A human adding the SAME connection back by hand is a different,
+            -- later decision and is not blocked by this.
+            CREATE TABLE IF NOT EXISTS graph_edge_rejections (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                rejected_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (session_id, from_id, to_id, relation)
+            );
+            -- Layout only: a dragged position, a pin, a collapsed branch.
+            -- Deliberately its own table with its own revision counter,
+            -- never touching `state_revision` -- dragging a node must not
+            -- invalidate an otherwise-fresh observation or change what the
+            -- assistant may say (the speech governor reads `state_revision`
+            -- alone; see AGENTS.md on the concept map).
+            CREATE TABLE IF NOT EXISTS graph_node_view (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL,
+                x REAL,
+                y REAL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                collapsed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                PRIMARY KEY (session_id, node_id)
+            );
         """)
         # Migrations. CREATE TABLE IF NOT EXISTS is a no-op on a database that
         # already exists on disk, so a column added later needs its own ALTER
@@ -412,6 +461,16 @@ def init_db(db_path: Path | str | None = None) -> None:
             # paying for the narrative again (rule 102).
             ("report_narrative_json", "ALTER TABLE sessions ADD COLUMN "
                                       "report_narrative_json TEXT NOT NULL DEFAULT '{}'"),
+            # The concept map's two counters (`agents/live_consultation_graph.py`).
+            # Separate from `state_revision` on purpose: `graph_revision` counts
+            # CONNECTIONS (a human or the reasoner adding, editing or rejecting
+            # an edge), and `graph_view_revision` counts LAYOUT only (a drag, a
+            # pin, a collapsed branch) -- neither may touch `state_revision`,
+            # which the speech governor's freshness check reads (rule 77).
+            ("graph_revision", "ALTER TABLE sessions ADD COLUMN graph_revision "
+                               "INTEGER NOT NULL DEFAULT 0"),
+            ("graph_view_revision", "ALTER TABLE sessions ADD COLUMN graph_view_revision "
+                                    "INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 conn.execute(ddl)
@@ -425,6 +484,12 @@ def init_db(db_path: Path | str | None = None) -> None:
             "ON action_items(session_id, map_id) WHERE map_id IS NOT NULL",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_map "
             "ON decisions(session_id, map_id) WHERE map_id IS NOT NULL",
+            # One connection per (from, to, relation) per session -- what makes
+            # a re-proposed edge an UPDATE rather than a duplicate, the same
+            # identity discipline as `idx_action_map` above (rule 95's reasoning,
+            # applied to a connection instead of an item).
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edge_key "
+            "ON graph_edges(session_id, from_id, to_id, relation)",
         ):
             try:
                 conn.execute(index)
@@ -589,7 +654,8 @@ def delete_session(session_id: str, db_path: Path | str | None = None) -> dict:
         # Explicit child deletes: PRAGMA foreign_keys is per-connection, and a
         # database made before it was set would otherwise leave orphans behind.
         for table in ("turns", "session_state", "observations", "decisions",
-                      "action_items", "writings", "speech_events"):
+                      "action_items", "writings", "speech_events",
+                      "graph_edges", "graph_edge_rejections", "graph_node_view"):
             conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
@@ -2002,3 +2068,280 @@ def project_commitments(project_id: str, db_path: Path | str | None = None) -> l
         for item in list_action_items(sid, db_path=db_path):
             out.append({**item, "session_id": sid})
     return out
+
+
+# ── The concept map: connections and layout ─────────────────────────────────
+#
+# The NODES are never stored here — they are derived on every read from
+# `session_state`, `decisions` and `action_items` by
+# `agents/live_consultation_graph.py`, the same discipline as the finished-video
+# shelf (rule 58) and a gathering's commitments just above. Only two kinds of
+# thing are real rows: the CONNECTIONS somebody drew (`graph_edges`, plus the
+# tombstone of one a person took apart), and where a node sits on screen
+# (`graph_node_view`), which is layout, not content, and touches neither
+# `state_revision` nor `record_revision`.
+
+def _edge_out(row: dict) -> dict:
+    out = dict(row)
+    try:
+        out["source_turn_ids"] = json.loads(out.pop("source_turn_ids_json", None) or "[]")
+    except Exception:
+        out["source_turn_ids"] = []
+    return out
+
+
+def bump_graph_revision(session_id: str, db_path: Path | str | None = None) -> int:
+    with _connect(db_path) as conn:
+        conn.execute("UPDATE sessions SET graph_revision = graph_revision + 1 WHERE id = ?",
+                     (session_id,))
+        conn.commit()
+        row = conn.execute("SELECT graph_revision FROM sessions WHERE id = ?",
+                           (session_id,)).fetchone()
+    return int(row["graph_revision"]) if row else 0
+
+
+def list_graph_edges(session_id: str, db_path: Path | str | None = None) -> list[dict]:
+    with _connect(db_path) as conn:
+        rows = _rows(conn.execute(
+            "SELECT * FROM graph_edges WHERE session_id = ? ORDER BY created_at, id",
+            (session_id,)))
+    return [_edge_out(r) for r in rows]
+
+
+def rejected_edge_keys(session_id: str, db_path: Path | str | None = None) -> set[tuple]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT from_id, to_id, relation FROM graph_edge_rejections WHERE session_id = ?",
+            (session_id,)).fetchall()
+    return {(r["from_id"], r["to_id"], r["relation"]) for r in rows}
+
+
+def upsert_graph_edge(session_id: str, from_id: str, to_id: str, relation: str,
+                      label: str = "", inferred: bool = True,
+                      source_turn_ids: Optional[list] = None, human_edited: bool = False,
+                      db_path: Path | str | None = None) -> Optional[dict]:
+    """
+    Add a connection, or refine one that already exists at this (from, to,
+    relation) key — the same identity discipline as `_find_row` for an action or
+    a decision (rule 95): a re-proposed edge is an UPDATE, not a second row.
+
+    A human-edited edge is left alone by anything that is not itself a human
+    edit (`human_edited=True` here): the model may go on proposing the same
+    connection; it does not get to put its own label back over a correction.
+    """
+    from_id, to_id = (from_id or "").strip(), (to_id or "").strip()
+    relation = (relation or "").strip().lower()
+    if not from_id or not to_id or not relation or from_id == to_id:
+        return None
+    with _connect(db_path) as conn:
+        existing = conn.execute(
+            """SELECT * FROM graph_edges
+                WHERE session_id = ? AND from_id = ? AND to_id = ? AND relation = ?""",
+            (session_id, from_id, to_id, relation)).fetchone()
+        if existing:
+            row = dict(existing)
+            if row.get("human_edited") and not human_edited:
+                return _edge_out(row)
+            sets, values = [], []
+            if human_edited:
+                sets.append("human_edited = 1")
+            if label:
+                sets += ["label = ?"]; values.append(label[:200])
+            if source_turn_ids:
+                merged = sorted(set(json.loads(row["source_turn_ids_json"] or "[]"))
+                                | {str(t) for t in source_turn_ids})
+                sets += ["source_turn_ids_json = ?"]; values.append(json.dumps(merged))
+            if not sets:
+                return _edge_out(row)
+            sets.append("updated_at = ?"); values.append(_now())
+            values.append(row["id"])
+            conn.execute(f"UPDATE graph_edges SET {', '.join(sets)} WHERE id = ?", values)
+            conn.commit()
+            return _edge_out(dict(conn.execute(
+                "SELECT * FROM graph_edges WHERE id = ?", (row["id"],)).fetchone()))
+        eid = new_id("edge")
+        conn.execute(
+            """INSERT INTO graph_edges (id, session_id, from_id, to_id, relation, label,
+                                        inferred, source_turn_ids_json, human_edited)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (eid, session_id, from_id, to_id, relation, (label or "")[:200],
+             0 if human_edited else (1 if inferred else 0),
+             json.dumps([str(t) for t in (source_turn_ids or [])]),
+             1 if human_edited else 0))
+        conn.commit()
+        return _edge_out(dict(conn.execute(
+            "SELECT * FROM graph_edges WHERE id = ?", (eid,)).fetchone()))
+
+
+def update_graph_edge(edge_id: str, session_id: str, db_path: Path | str | None = None,
+                      **fields) -> Optional[dict]:
+    """A human correcting a connection's relation or label. Endpoints are
+    immutable by design — moving an edge to a different node is a reject-and-add,
+    the same as any other identity change in this file."""
+    allowed = {"relation", "label"}
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in allowed or value is None:
+            continue
+        if key == "relation":
+            value = str(value).strip().lower()
+        sets.append(f"{key} = ?")
+        values.append(value)
+    if not sets:
+        return None
+    sets += ["human_edited = 1", "updated_at = ?"]
+    values.append(_now())
+    where, params = _scope("id = ?", [edge_id], session_id)
+    with _connect(db_path) as conn:
+        conn.execute(f"UPDATE graph_edges SET {', '.join(sets)} WHERE {where}", [*values, *params])
+        conn.commit()
+        row = conn.execute(f"SELECT * FROM graph_edges WHERE {where}", params).fetchone()
+    return _edge_out(dict(row)) if row else None
+
+
+def reject_graph_edge(edge_id: str, session_id: str,
+                      db_path: Path | str | None = None) -> bool:
+    """A human taking a connection apart. Removes the row AND leaves a
+    tombstone, so the reasoner cannot quietly recreate it on a later pass
+    (section 3: "a model cannot silently recreate a rejected edge")."""
+    where, params = _scope("id = ?", [edge_id], session_id)
+    with _connect(db_path) as conn:
+        row = conn.execute(f"SELECT * FROM graph_edges WHERE {where}", params).fetchone()
+        if not row:
+            return False
+        conn.execute(f"DELETE FROM graph_edges WHERE {where}", params)
+        conn.execute(
+            """INSERT OR IGNORE INTO graph_edge_rejections
+                   (session_id, from_id, to_id, relation) VALUES (?,?,?,?)""",
+            (session_id, row["from_id"], row["to_id"], row["relation"]))
+        conn.commit()
+    return True
+
+
+def list_node_views(session_id: str, db_path: Path | str | None = None) -> dict[str, dict]:
+    with _connect(db_path) as conn:
+        rows = _rows(conn.execute(
+            "SELECT * FROM graph_node_view WHERE session_id = ?", (session_id,)))
+    return {r["node_id"]: r for r in rows}
+
+
+def set_node_view(session_id: str, node_id: str, db_path: Path | str | None = None,
+                  x: float | None = None, y: float | None = None,
+                  pinned: bool | None = None, collapsed: bool | None = None) -> dict:
+    """
+    Save where a node sits, or that its branch is collapsed. Pure layout: this
+    never touches `state_revision` or `record_revision`, so dragging a node or
+    collapsing a branch can never change what the assistant may say (rule 77) or
+    invalidate an approved record (rule 102). It bumps its OWN counter
+    (`graph_view_revision`) so a second device can still notice the change.
+    """
+    with _connect(db_path) as conn:
+        existing = conn.execute(
+            "SELECT * FROM graph_node_view WHERE session_id = ? AND node_id = ?",
+            (session_id, node_id)).fetchone()
+        cur = dict(existing) if existing else {"x": None, "y": None, "pinned": 0, "collapsed": 0}
+        if x is not None: cur["x"] = x
+        if y is not None: cur["y"] = y
+        if pinned is not None: cur["pinned"] = 1 if pinned else 0
+        if collapsed is not None: cur["collapsed"] = 1 if collapsed else 0
+        conn.execute(
+            """INSERT INTO graph_node_view (session_id, node_id, x, y, pinned, collapsed, updated_at)
+                   VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(session_id, node_id) DO UPDATE SET
+                   x = excluded.x, y = excluded.y, pinned = excluded.pinned,
+                   collapsed = excluded.collapsed, updated_at = excluded.updated_at""",
+            (session_id, node_id, cur["x"], cur["y"], cur["pinned"], cur["collapsed"], _now()))
+        conn.execute("UPDATE sessions SET graph_view_revision = graph_view_revision + 1 WHERE id = ?",
+                     (session_id,))
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM graph_node_view WHERE session_id = ? AND node_id = ?",
+            (session_id, node_id)).fetchone()
+    return dict(row)
+
+
+def clear_unpinned_node_views(session_id: str, db_path: Path | str | None = None) -> int:
+    """"Arrange map": drop every position nobody explicitly pinned, so the next
+    read recomputes a fresh layout for them. A pinned position is left exactly
+    where the person put it — "arrange" is not "discard everyone's work"."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM graph_node_view WHERE session_id = ? AND pinned = 0", (session_id,))
+        conn.execute("UPDATE sessions SET graph_view_revision = graph_view_revision + 1 WHERE id = ?",
+                     (session_id,))
+        conn.commit()
+    return cur.rowcount
+
+
+def redirect_graph_edges(session_id: str, old_id: str, new_id_: str,
+                         db_path: Path | str | None = None) -> int:
+    """After a human merges two nodes, point any connection that named the
+    now-gone id at the survivor instead of just losing it. A collision with a
+    connection the survivor already has is resolved by keeping one row (the
+    unique key would otherwise refuse the second)."""
+    changed = 0
+    with _connect(db_path) as conn:
+        for column in ("from_id", "to_id"):
+            rows = conn.execute(
+                f"SELECT id, from_id, to_id, relation FROM graph_edges "
+                f"WHERE session_id = ? AND {column} = ?", (session_id, old_id)).fetchall()
+            for row in rows:
+                new_from = new_id_ if column == "from_id" else row["from_id"]
+                new_to = new_id_ if column == "to_id" else row["to_id"]
+                if new_from == new_to:
+                    conn.execute("DELETE FROM graph_edges WHERE id = ?", (row["id"],))
+                    continue
+                clash = conn.execute(
+                    """SELECT id FROM graph_edges WHERE session_id = ? AND from_id = ?
+                           AND to_id = ? AND relation = ? AND id != ?""",
+                    (session_id, new_from, new_to, row["relation"], row["id"])).fetchone()
+                if clash:
+                    conn.execute("DELETE FROM graph_edges WHERE id = ?", (row["id"],))
+                else:
+                    conn.execute(f"UPDATE graph_edges SET {column} = ? WHERE id = ?",
+                                (new_id_, row["id"]))
+                changed += 1
+        conn.execute("DELETE FROM graph_node_view WHERE session_id = ? AND node_id = ?",
+                     (session_id, old_id))
+        conn.commit()
+    return changed
+
+
+def merge_map_items(session_id: str, list_name: str, keep_id: str, remove_id: str,
+                    text: str | None = None,
+                    db_path: Path | str | None = None) -> Optional[dict]:
+    """
+    A human combining two map items into one — "node merging" (section 5),
+    scoped to two items of the SAME list, because merging a fact into an action
+    is not a content operation this store can make sense of on its own.
+
+    The surviving item keeps `keep_id`, gets the union of both items'
+    `source_turn_ids`, and is marked human-edited so the reasoner does not
+    overwrite the merge. The other item is removed from the map AND recorded in
+    `removed_map_items` (rule 104's tombstone) so a later pass cannot quietly
+    resurrect it as a near-duplicate. Every stored connection naming the removed
+    id is redirected to the survivor rather than silently dropped.
+    """
+    if keep_id == remove_id:
+        return None
+    state = get_state(session_id, db_path=db_path)
+    items = state.get(list_name)
+    if not isinstance(items, list):
+        return None
+    keep = next((i for i in items if isinstance(i, dict) and i.get("id") == keep_id), None)
+    remove = next((i for i in items if isinstance(i, dict) and i.get("id") == remove_id), None)
+    if not keep or not remove:
+        return None
+    field = "action" if list_name == "action_items" else "text"
+    if text and text.strip():
+        keep[field] = text.strip()
+    keep["source_turn_ids"] = sorted(set(keep.get("source_turn_ids") or [])
+                                     | set(remove.get("source_turn_ids") or []))
+    keep["human_edited"] = True
+    keep["human_reviewed"] = True
+    state[list_name] = [i for i in items if not (isinstance(i, dict) and i.get("id") == remove_id)]
+    saved = save_state(session_id, state, db_path=db_path)
+    record_removed_map_item(session_id, list_name, remove_id, db_path=db_path)
+    redirect_graph_edges(session_id, remove_id, keep_id, db_path=db_path)
+    bump_graph_revision(session_id, db_path=db_path)
+    return saved
