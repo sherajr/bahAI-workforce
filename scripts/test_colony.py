@@ -704,7 +704,8 @@ check("chatting with the Secretary through the Colony is refused",
 
 section("Goal launch reuses the real pipelines")
 launched: dict = {}
-_real_start_job = api._start_job
+import agents.colony_api as colony_api  # noqa: E402
+_real_start_job = colony_api._start_job
 
 
 def _fake_start_job(kind, runner, started_by="sheraj"):
@@ -713,7 +714,12 @@ def _fake_start_job(kind, runner, started_by="sheraj"):
     return "job123"
 
 
-api._start_job = _fake_start_job
+# Patched on colony_api, not api: launch_team_pipeline (moved to
+# agents/colony_api.py) reads its own module's `_start_job` name, bound at
+# import time from agents.jobs -- reassigning the re-exported `api._start_job`
+# alias would rebind only api's copy of the name and never be seen by it
+# (same class of gotcha as agents/jobs.py's _MAX_JOBS, see test_job_cancel.py).
+colony_api._start_job = _fake_start_job
 r = client.post("/colony/goals", json={"team": "print_studio", "goal": "Cards on service",
                                        "target_count": 5})
 gid = r.json()["id"]
@@ -740,7 +746,7 @@ check("a film goal CREATES a project instead of rendering (rules 31/33)",
       r.status_code == 200 and r.json()["result"] == "project_created", r.text[:300])
 check("the created video project really exists",
       video_store.get_project(r.json()["video_project_id"]) is not None)
-api._start_job = _real_start_job
+colony_api._start_job = _real_start_job
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────

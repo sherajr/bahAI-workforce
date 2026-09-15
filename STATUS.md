@@ -19,191 +19,105 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-08-24)
+## Snapshot (as of 2026-09-14)
 
-**Live and working** (committed, in production):
-- **Bookmark pipeline** (Librarian → Artist → consultation → Scribe → Reviewer
-  → Compositor) and the **quote-card giveaway pipeline** (owner-selectable
-  sources, default Ruhi Book 1, optional translation). Etsy publishing is built
-  but has never run; Canva autofill is built, broken (0/10) and now off by
-  default.
-- **The visual layout editor** for both product types, **print sheets**
-  (single + multi-product gathering sheets), the **X-post giveaway pipeline**,
-  and the **named roster + avatars** on the dashboard.
-- **Abigail (the Secretary)** Phases 1–3: dashboard chat + WhatsApp (owner tier
-  and a tool-less guest tier), real Claude tool-calling for every read/write,
-  Google Workspace. Phase 4 (recovery rhythms) not started.
+**Live and committed:**
+- Bookmark + quote-card pipelines, the visual layout editor, print sheets, and
+  the X giveaway pipeline. Etsy publishing exists in code but has never been
+  connected (0 products ever published). Canva autofill exists in code, is
+  broken (0/10 attempts ever succeeded), and is off by default.
+- The Secretary (Abigail): Phases 1-3 live (chat, Google Workspace, WhatsApp).
+  Phase 4 (recovery rhythms) not started.
+- The Video pipeline, the Colony (+ the Material World / nuclei), the project
+  wallet, the API's owner gate, and the prompt-injection hold.
+- Live Consultation: the human-owned record (rules 94-99), request-ordering
+  survival (rules 100-110), and the concept graph (rules 121-130, commits
+  `fcd8307` + `509aeb0` -- the second fixed 11 defects an external review
+  found). Closeout has not yet been used in a real meeting.
+- Agent orientation split (`ed21927`): root `AGENTS.md` is a thin routing
+  table; the numbered rules live in `docs/rules/*.md`, split by subsystem.
 
-Also committed: the **Video Generation pipeline** (`58a785f`), the quote-card
-redesign and exactness work, print sheets and the giving ledger. (Earlier
-Snapshots claimed video and the card work were still uncommitted long after they
-had landed — check `git status` rather than trusting a line like this.)
+**"Committed" means it is in the codebase and the offline test suites pass --
+it does NOT mean Sheraj has reviewed it by hand.** Several Live Consultation
+features (closeout, the concept graph, diarisation) have never been exercised
+in a real meeting with real people.
 
-Also committed in `cf599aa` (2026-08-16), after this section spent three days
-claiming otherwise: **the Colony** (rules 35–41a), **the project wallet** (42–49),
-**Abigail ↔ the teams** (50–54), **run cancellation** (55–57) and the
-**finished-video shelf** (58). Sheraj has still not reviewed that pile by hand —
-"committed" is not "reviewed".
+**Read before starting anything nontrivial:** root `AGENTS.md`'s routing
+table plus the `docs/rules/*.md` file(s) for the subsystem you're touching,
+and the nearest nested `AGENTS.md` if the file you're editing has one above
+it. Then check the "In flight" table below so you don't collide with another
+tool working the same paths right now.
 
-Also committed in `5ee4044` (2026-08-16): the **Material World view** of the Colony
-(nuclei and friends) — `agents/nuclei_store.py`, `agents/nuclei_layout.py`,
-`/nuclei/*` endpoints, the Colony tab's Digital/Material World toggle, rules 59–64.
-Design lives in `private/nuclei/` (git-ignored). Not reviewed by hand yet.
+---
 
-Also committed in `d2b4609` (2026-08-17): the **Bahá'í Workforce light** on the
-Material World map (rules 65–68).
+## In flight (parallel lock)
 
-Also committed in `a306551` (2026-08-19): the **API's owner gate** (rules 70-71)
-and the **prompt-injection hold** (rule 72). This section claimed for two days
-that those were still uncommitted -- check `git status` rather than a line like
-this.
+One row per active tool. If your paths overlap another row, stop.
+Empty when nothing is in flight.
 
-Committed and pushed 2026-08-21: **Live Consultation** (rules 73-88) -- the
-Consultation tab, `agents/live_consultation*.py`,
-`dashboard/src/components/consultation/`, `docs/consultation-constitution.md`,
-`scripts/test_live_consultation.py`. Abigail sits in on a real meeting over the
-OpenAI Realtime API. That commit also fixes a repo-wide OpenAI bug: the router
-always sent a `temperature`, which the GPT-5.x family refuses, so the Colony's
-OpenAI provider (rule 41a) had never actually worked.
-
-Sheraj has now run TWO real sessions, and the tab has changed a lot since the
-second one. **Everything below through rules 94-99 is now COMMITTED** (the last
-of it as `20ea32c`, 2026-09-09) -- this section claimed otherwise for days, which
-is exactly what the note at the top of this file warns about; check `git log`,
-not a line like this. None of it has been used in a real room yet, though all of
-it is exercised by the suite and over HTTP:
-- 2026-08-24: she was cancelling her own answers, and the presence dial was
-  missing its biggest lever (rule 89, and the amendment to rule 87).
-- 2026-08-27: the spend-ceiling dead end, benign realtime errors no longer
-  shown, the opening passage collapses, and the glance panel (rule 93).
-- 2026-08-25: the live map is four things instead of ten lists; a readable
-  REPORT is written when the meeting ends and can be copied or downloaded;
-  participants can be named and matched to voices from a recording afterwards;
-  the setup boxes can be dictated; she opens the meeting with the consultation
-  passage and keeps time (rules 90-92).
-
-- 2026-09-03: **the record became true and human-owned** (rules 94-99).
-  Privacy copy that was false is corrected and starting is gated on the host
-  attesting the room was told; the owner/deadline persistence defects are
-  fixed; the map, the transcript and the commitments can all be corrected by
-  hand and are then protected from the model; a fact says who established it; a
-  concern is never deleted; End session opens a closeout where a person
-  confirms what actually happened; and `Consultation: A Compilation` is
-  ingested as a verified corpus in its own collection. The offline suite was
-  found to be making three real paid calls per run and now proves it is
-  offline.
-
-- 2026-09-09: **UNCOMMITTED** -- the record now survives real request ordering,
-  quotations are verified exactly, the dashboard costs a fraction of what it did
-  to open, and there is a **Gatherings** tab and a **Home** screen
-  (rules 100-120). See the Activity Log entry below; the short version is that
-  eight P0-class defects found in a review were each reproduced against the
-  code, fixed, and pinned by a test that fails without the fix -- and then the
-  deeds-first flagship (the gathering kit) was built on top of the corrected
-  records. New modules: `agents/quote_verify.py`, `agents/products_api.py`,
-  `agents/gathering.py`, `agents/gathering_api.py`, `agents/program_sheet.py`,
-  `agents/home_api.py`, `scripts/test_quote_verify.py`, and on the dashboard
-  `HomePanel.tsx`, `GatheringsPanel.tsx`, `PanelBoundary.tsx`,
-  `lib/navGuard.ts`, `hooks/useConsultationUpdates.ts`.
-
-- 2026-09-14: Live Consultation gained a real concept map (rules 121-130,
-  committed as `fcd8307`): a root (the question), theme branches, and every
-  fact, idea, concern, decision and action as its own node, joined by typed
-  connections (containment under a theme, plus real cross-links -- supports,
-  challenges, depends on, addresses, leads to, related to) that the SAME
-  analysis pass proposes alongside its existing lists. New module
-  `agents/live_consultation_graph.py`; new store tables (`graph_edges`,
-  `graph_edge_rejections`, `graph_node_view`); a new dashboard component
-  (`ConceptGraph.tsx`, on `@xyflow/react`). Live view: a "Concept map" /
-  "Summary" toggle in the Consultation tab. Archived view: a "Concept map" tab
-  beside Report and Everything else, plus a small preview card in the Report
-  tab.
-
-  **UNCOMMITTED, same day -- a repair pass** on that commit, from an external
-  review that reproduced eleven defects against the running code before
-  anything was changed. All fixed and pinned; see the Activity Log entry
-  below for the full account. The short version: a decision/action node's
-  WORDING was still read from the working-map item rather than the row
-  `edit_action`/`edit_decision` actually writes, so a correction never
-  reached the map; a map item whose canonical row was deleted reappeared as a
-  fresh "proposed" phantom, and a human-created action or a confirmed
-  decision surviving transcript deletion could disappear from the map
-  instead; merging two decision/action nodes left both canonical rows
-  existing; `contains` was only half acyclic (a theme could contain another
-  theme, or the root itself); layout could overlap a new node onto an
-  existing one; the report's cached-narrative reuse path silently dropped the
-  "How the group got there" section under a key that was never written; and
-  an incomplete closing analysis pass was reported only in one HTTP response
-  that got thrown away on the way to closeout. An immutable APPROVED graph
-  snapshot now exists alongside the approved report (rule 128), and the
-  archived Concept map is editable, not permanently read-only (rule 130).
-  Verified: 867 offline checks (was 811 before this pass, 734 before the
-  original concept-map commit), `npx tsc --noEmit` and `npm run build` clean
-  (entry bundle still 247 kB gzip-equivalent; the Consultation chunk grew to
-  314 kB carrying the archived-view fixes). **Not exercised in a real meeting
-  or a real browser** -- no browser-automation tool was available in this
-  session either, so every frontend claim rests on typecheck, the production
-  build, and reading the code.
-
-Nothing in this subsystem has been reviewed by hand. **The closeout, the map
-editing, the transcript correction and the concept map have never been
-used in a real meeting.**
-
-**A real loss, on 2026-09-03:** roughly 426 lines of UNCOMMITTED tests covering
-rules 89-93 (the opening, the clock, participants and diarisation, dictation,
-the glance panel and the report) were destroyed by a bad file write during that
-session and could not be recovered -- not from git (never staged), a stash, a
-worktree or editor history. Replacement coverage for those rules was written
-fresh against the source and passes, but it is a rebuild, not the original, and
-is probably thinner. The lesson, in case it saves someone else: work in that
-tree was uncommitted for two weeks, and nothing else would have made it
-recoverable.
-
-**Also uncommitted:** the `npm run dev` startup work of 2026-08-24
-(`dashboard/scripts/`, `scripts/ensure_backend.ps1`,
-`scripts/clear_stale_dashboards.ps1`).
-
-Committed and pushed to `origin/master` on 2026-08-18: the GPT-5.6/OpenAI
-provider option and the rule 69 junior youth work. Neither has been reviewed by
-hand yet: "committed" is not "reviewed".
-
-**Deferred / proposed, not started** (nobody should re-discover these from
-scratch):
-- ~~**Devotional-gathering KIT pipeline**~~ — BUILT 2026-09-09 as the
-  **Gatherings** tab (rules 117-120), generalised beyond devotionals: a project
-  carries purpose → consultation → approved outcomes → who accepted what →
-  materials → a printed programme and card sheet → reflection. Uncommitted and
-  never used for a real gathering. The one piece deliberately NOT built is the
-  "generate N new cards from inside the kit" step: new cards are made in the
-  Pipeline tab, so the batch caps, the review and the metering all apply
-  unchanged (rule 40).
-- Abigail **Phase 4** (recovery rhythms) — read
-  `docs/fable5-briefing-secretary.md` first.
-- Grounding-bar tightening for bookmarks; retrieval enrichment; free
-  share-image exports; multilingual packs.
-- Relabel the Canva-autofill `log_run` entry from `"artist"` to whichever
-  persona represents publishing (publish itself already logs under `steward`).
-  Low value while autofill is switched off.
-- Splitting `agents/api.py` (6,400 lines). Recommended only AFTER the tree
-  above is committed, as pure extraction guarded by the test suites.
-
-**Blocked on Sheraj:**
-- **Create the WhatsApp `secretary_update` template** (UTILITY, body exactly
-  `{{1}}`, English US, in WhatsApp Manager). Without it the outside-24h-window
-  reminder fallback cannot send — it errored 132001 on 2026-07-11 and has not
-  been re-checked. `GET /whatsapp/setup` has the walkthrough.
-- Whether to move Abigail off Meta's sandbox test number (5-recipient limit,
-  so every allowlisted guest must also sit in Meta's test-recipient list).
-- **WhatsApp groups cannot be posted to by any software** — Meta's Cloud API
-  has no group endpoint, so the workforce drafts a group message and Sheraj
-  pastes it in. If automatic posting into nucleus groups ever matters more than
-  staying on the official API, that is a decision about a different (unofficial,
-  ban-risking) transport, not a code gap to fix.
-- Reviewing and committing the pile above.
+| Tool | Branch / worktree | Paths owned | Do not touch |
+|---|---|---|---|
+| — | — | — | — |
 
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-14 (later) -- Claude Code (Sonnet 5) -- agents/api.py split into per-subsystem routers
+
+Mechanical extraction, no behaviour change: `agents/api.py` was 7002 lines /
+310 KB and owned nearly every HTTP route plus both product pipelines. It is
+now 889 lines / 38 KB -- the app factory (middleware, CORS, startup), the
+job-store routes, product-type-agnostic product routes (list/get/edit/layout/
+print-sheet), and Steward/deeds/trust reporting, plus the `include_router`
+calls that bring in everything else. New routers, each a thin extraction with
+its logic untouched: `agents/jobs.py` (the background job store + shared
+helpers `_web_image_path`/`_badge`/`_esc`/`_load_product_or_404`/
+`_require_bookmark`/`_require_card`/`_print_pairs_for` -- has NO dependency on
+api.py or any `*_api.py`, so nothing can circular-import through it),
+`pipeline_api.py` (bookmark pipeline + Canva/Etsy), `card_api.py` (quote-card
+pipeline + quote sources + the Librarian's finder), `video_api.py`,
+`colony_api.py` (Colony + the Material World/nuclei + `launch_team_pipeline`),
+`secretary_api.py` (Google OAuth + WhatsApp + Secretary), `x_api.py`,
+`wallet_api.py`.
+
+Verified, not claimed: `app.routes` dumped before and after every single
+extraction step and diffed -- identical path/method set throughout, all 255
+routes. `python -c "import agents.api"` after each step. All ten offline
+suites pass (colony 135, secretary-colony 92, job-cancel 24, wallet 90,
+nuclei 281, api-auth 66, secretary-injection 50, quote-verify 50, video
+288 -- 1076 checks), `npx tsc --noEmit` clean, and dashboard/src path strings
+spot-checked unchanged (no dashboard file touched).
+
+Two real bugs this surfaced and fixed, both the same shape: a test
+monkey-patched `api._start_job` / `api._MAX_JOBS` / `api.pipeline_run_card_batch`
+to intercept a call, but the function that actually reads that name now lives
+in a different module (`agents/jobs.py` or `agents/colony_api.py`) and reads
+its OWN module's global, so patching the re-exported `api.` alias silently did
+nothing -- `test_job_cancel.py`, `test_colony.py` and `test_secretary_colony.py`
+now patch the module where the name is actually resolved at call time, with a
+comment explaining why for the next person who hits this. `agents.api` still
+re-exports everything external code reaches into directly (`JOBS`,
+`_start_job`, `create_task`, `launch_team_pipeline`, `_check_quote_grounding`,
+several card/x-post internals) for `agents/colony.py`, `agents/secretary_colony.py`
+and the test suite's own direct-attribute access -- confirmed by grepping
+every `api.<name>` / `api_module.<name>` reference outside api.py itself.
+
+### 2026-09-14 -- Claude Code (Sonnet 5) -- nested AGENTS.md and a parallel lock
+
+Nested AGENTS.md under `agents/` and `dashboard/` (plus
+`dashboard/src/components/{consultation,colony,video}/`), each pointing at
+`docs/rules/*.md` and its verify command rather than duplicating rule text --
+so Codex/Cursor/Claude, which walk from the edited file toward the repo root
+loading every AGENTS.md they hit, pick up subsystem orientation without
+loading the rest. Root `AGENTS.md` gained a "Parallel work" file-ownership
+table (which tool owns which paths, so two tools running at once don't
+collide) and a working-norms bullet to stop and tell Sheraj on an overlap.
+STATUS.md's Snapshot was rewritten as current reality (dated today, down from
+1227 lines/78 KB) and gained the "In flight" table above it so tools can see
+each other's claimed paths; the Activity Log was trimmed to the newest 12
+entries plus this one -- older history is in `git log`. No product code
+changed.
 
 ### 2026-09-14 (later still) -- Claude Code (Sonnet 5) -- AGENTS.md split so coding tools stop eating 70k tokens
 
@@ -931,297 +845,3 @@ done. Note also that `start_secretary_server.ps1` OVERWRITES `logs/api.*.log`
 on every start, so a restart destroys the evidence of the crash that caused it.
 
 
-### 2026-08-21 (later) -- Claude Code (Opus 5) -- the consultation assistant is Abigail, and she waits less
-
-Sheraj ran the first real session and gave two pieces of feedback: "a little too
-unresponsive", and "let's actually make it like it's Abigail, my secretary".
-Both are done (rules 87-88).
-
-**She waits less.** The old defaults were a formal body's pace: six seconds
-before a floor could even be CONSIDERED open, two minutes before offering
-anything, five minutes between offers. The new attentive baseline is floor-open
-3s, invited grace 0.4s, warmup 45s, cooldown 2min, importance 0.62 -- and
-`CONSULTATION_VAD_EAGERNESS` went `low` -> `medium`, which is the single biggest
-thing a person actually feels, because nothing downstream can start until the
-detector reports the turn has ended. The analysis debounce came down too (2
-turns / 25 words / 12s), so the map fills in during the meeting rather than
-after it.
-
-**And how long she waits is now a dial**, not a constant: `presence` is
-`reserved | attentive | present`, a per-session setting changeable MID-MEETING,
-because the moment you notice she is too slow is while you are sitting there
-waiting for her. `resolve_policy()` is the only place any of it is computed --
-the browser is served one resolved set of numbers per preset, so
-`consultationGovernor.ts` still contains no timing constant and no arithmetic of
-its own. **What the dial cannot do at any setting is make silence into
-permission**; the suite now asserts a ten-minute silence is refused at every
-preset in every mode.
-
-**She is Abigail.** Same name, same manner, same face (`RosterAvatar` with
-`/abigail.jpg`, served from `capabilities` so the tab hardcodes nothing), and
-her name is a wake word in both governors. The boundary that makes this safe is
-the interesting part: **in a room she carries none of his private world** -- no
-memory notes, no tasks, no calendar, no messages, no custom instructions -- and
-can act on nothing from in there. That is the reasoning behind her tool-less
-guest-WhatsApp tier (rule 27) applied to a room, and it is structural: nothing
-in `live_consultation_*` imports `secretary_store`, the suite asserts it, and
-the subsystem has no tools at all. The setup screen says so in plain words,
-because the people in the room deserve to know what she is and is not.
-
-Worth being explicit about, since it looks like a rule-16 problem and is not:
-**she is not on Claude in here and cannot be** -- there is no Claude realtime
-voice, so the words heard in the room come from the realtime model. Rules 16 and
-41a reserve Claude FOR her and pin her CHAT to it; neither says the person
-cannot have a mouth somewhere else. Her dashboard chat and WhatsApp are
-untouched, and the setup screen says which model is speaking rather than leaving
-it to be assumed.
-
-`presence` needed a real migration (`ALTER TABLE`, since `CREATE TABLE IF NOT
-EXISTS` is a no-op on a database that already exists) -- his `private/
-consultation.db` already had sessions in it from the first run. The suite builds
-a pre-`presence` database and proves an existing meeting survives with the
-default.
-
-**Verified:** 296 offline checks, all other suites unchanged, `tsc` and the
-build clean. The API was restarted onto this code and answers
-`/live-consultation/capabilities` with her name, her avatar and all three
-presets. Not yet re-run in a real room -- that is Sheraj's next session.
-
-### 2026-08-21 -- Claude Code (Opus 5) -- Live Consultation: an assistant that listens to a real meeting and almost never speaks
-
-New dashboard tab, **Consultation**, and a whole subsystem behind it (rules
-73-86, `docs/consultation-constitution.md`). A meeting of actual people is heard
-through the browser on the **OpenAI Realtime API** (WebRTC, `gpt-realtime-2.1`),
-transcribed live, and read continuously by a second, slower model
-(`gpt-5.6-sol`) that keeps a structured map of the consultation -- facts,
-assumptions, principles, concerns, ideas, agreements, tensions, questions,
-possible syntheses, decision candidates, action items. The assistant's mouth is
-usually closed: **listen constantly, understand continuously, speak rarely.**
-
-The hard part is not the transcription, it is the restraint. **Silence is never
-permission to speak** -- and that is enforced in code, in two places, not asked
-of a prompt. The realtime session is configured `create_response: false`, so
-voice-activity detection can report that a turn seems to have ended and
-*cannot* make the model talk; the decision belongs to a Speech Governor
-(`agents/live_consultation_governor.py`, mirrored in
-`dashboard/src/lib/consultationGovernor.ts` for barge-in latency, with every
-timing number served from Python so the two cannot drift). The floor check runs
-LAST and can only ever withhold: something material has to have been noticed
-first. A human starting to speak wins from any state, including mid-sentence --
-cancel, clear the audio buffer, truncate the unheard tail, never resume. For an
-unsolicited thought the assistant may at most ask one short question ("I think I
-see a possible synthesis. Would it be useful to hear it?") and then stop; if
-nobody answers, that is a no, and it is never asked again.
-
-Everything said lives in `private/consultation.db` and nowhere else (rule 73).
-The suite proves it the strong way -- it reads `workforce.db` as bytes and
-requires a sentence spoken in a test meeting to be absent. `OPENAI_API_KEY`
-never reaches the browser: the API mints a short-lived client secret and the
-page does its own handshake. Quotations come only from the verified Librarian
-index and a near miss is a failure, not a correction -- the voice says a passage
-is on screen rather than reciting it. Nothing is ever a decision until Sheraj
-(or whoever is in the room) presses Confirm; a meeting that ends undecided says
-so.
-
-**Two real bugs found while wiring this up, both live-checked, both fixed:**
-- `router._call_openai` always sent a `temperature`, and the GPT-5.x family
-  refuses any but its default -- so **every** OpenAI call from this repo came
-  back 400. That means the Colony's OpenAI provider (rule 41a, shipped
-  2026-08-18) has never actually worked. It now retries once without the field,
-  the same shape as the existing `response_format` retry.
-- The bare `gpt-5.6` id 404s on this account (`GET /v1/models/gpt-5.6` ->
-  model_not_found) even though `models.py` offers it as a documented alias. The
-  real ids are `gpt-5.6-sol` / `-terra` / `-luna`. The consultation reasoner
-  defaults to `-sol`, and `capabilities` now reports a configured model the
-  account does not have -- only when the lookup succeeded and said 404, never
-  from a network failure (rule 41a's discipline).
-
-**Verified:** `scripts/test_live_consultation.py` -- 247 offline checks (296 after the retune), no
-network, no keys, no paid calls. All other suites still pass (api_auth 66,
-colony 135, secretary_colony 92, job_cancel 24, wallet 90, nuclei 281,
-injection 50). `npx tsc --noEmit` and `npm run build` clean. Live checks that
-cost nothing: OpenAI accepted the realtime session config and echoed
-`create_response: false` back. One genuinely paid check (~2 calls, a few cents):
-a real analysis pass on an invented five-turn transcript, which produced a
-correct map -- facts marked *uncertain* rather than confirmed, the unexamined
-assumption caught, a synthesis offered, a decision *candidate* and no confirmed
-decision, and one observation it judged not worth interrupting for.
-
-**What is NOT done, deliberately:** no audio recording (the endpoint refuses
-`record_audio` rather than accepting a flag that would read as "you are being
-recorded"), no diarisation (a turn says "Participant" until a human types a
-name), no post-session re-transcription.
-
-**Sheraj has to do the last mile by hand:** restart the API to pick up the new
-router, then run a real meeting with a real microphone. Nobody has yet heard
-this thing speak. The step-by-step first run is at the end of
-`docs/consultation-constitution.md` ("Trying it for the first time"). Note that
-a realtime meeting is the most expensive thing in this repo per minute (metered
-as `openai_realtime`; the client-secret endpoint refuses over the monthly
-ceiling unless you explicitly accept it).
-
-### 2026-08-20 -- Claude Code (Opus 5) -- Qwen3.8-27B pulled and measured: too big for this laptop
-
-Sheraj asked for the new 27B Qwen as another local option. It is real --
-Qwen3.8-27B, released 2026-08-14, 27.8B dense multimodal, Apache 2.0 -- but
-Ollama's official build is 18GB against 8GB of VRAM and 13.7GB of system RAM,
-so that build cannot load here at all. With his go-ahead I pulled Unsloth's
-IQ3_XXS instead (~11GB) and made `qwen3.8-27b-16k`, a derived tag pinning
-num_ctx to 16384; the stock 256K context would spend more on KV cache than the
-card holds. Modelfile mirrors qwen3-16k so the A/B is like-for-like.
-
-**It works and it is unusably slow: 2.5 tok/s against qwen3-16k's 29** -- 11x,
-because only 43% of it fits on the card (`ollama ps`: 57%/43% CPU/GPU). An 8K
-variant reached only 2.8 tok/s, so this is not a tuning problem; a 27B does not
-fit in 8GB at any quant worth running. QUALITY was not the problem: on the three
-machine-parsed contracts this repo actually depends on -- the Librarian's
-VERDICT block (rule 10), Reviewer JSON (rule 5), video shot JSON (rule 33b) --
-it passed all three, same as the 8B, checked with the repo's own parsers
-(`_parse_verdict_grounded`, `_parse_review`). Bench script is in the scratchpad,
-not committed.
-
-No code changed. It appears in the Colony dropdown on its own because rule 41a
-discovers Ollama tags rather than hardcoding them; `validate_choice` accepts it
-for a workforce agent and still refuses it for Abigail. **Left NOT selected** --
-at 2.5 tok/s a video plan (already 10-15 min on the 8B, rule 33b) would run
-into hours. Worth it only for a single high-value pass where Sheraj can wait.
-
-One footgun left deliberately, for Sheraj to decide: the raw
-`hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ3_XXS` tag ALSO shows in the dropdown and
-carries the 256K context. Picking that one instead of `qwen3.8-27b-16k` would
-try to allocate a KV cache far past the card. Removing that tag is one
-`ollama rm`, but it is an 11GB re-download to undo, so it was not done
-unilaterally.
-
-### 2026-08-19 -- Claude Code (Opus 5) -- the API had no lock on the door
-
-Sheraj had ChatGPT scan the repo. Its headline finding was real and I confirmed
-it against the code: `agents/api.py` had no authentication on any of its 165
-endpoints and carried `allow_origins=["*"]`. Loopback was doing the work of a
-password, and it cannot -- with wildcard CORS, any web page open in Sheraj's
-browser could call this API *and read the answer*: Abigail's chat history, the
-Material World map, the approval queue, the trusted-contacts list, and a wallet
-chain that adds an address to the allowlist and then spends to it. Mainnet
-being off is what kept that last one theoretical.
-
-Fixed by `agents/auth.py`, one middleware ahead of routing (rules 70-71). The
-key generates itself into `private/api_key.txt` and `dashboard/vite.config.ts`
-attaches it in the **proxy** -- the only layer that also covers `<img>` and
-`<video>`, and it keeps the key in Node, out of the browser bundle. No
-component changed. Also: `__main__` no longer binds `0.0.0.0` (the file's own
-docstring told you to start it that way, which put the whole thing on the LAN),
-the three OAuth callbacks now escape what they echo instead of interpolating
-query strings into HTML, and `.gitignore` picked up `canva_pkce_state.json` and
-`.env.*`.
-
-Then the second finding, which is the one that will keep mattering: Gmail/Docs/
-Sheets/Slides content went straight into the loop that can call write tools,
-with nothing marking it as written by someone else. Rule 72 puts the hold in
-`secretary_tools.make_executor` rather than in her prompt -- a prompt is
-precisely what an injection attacks. Once a turn has read outside content,
-tools that REACH (WhatsApp, calendar, Drive, products, team goals) queue into
-the existing approval queue instead of firing; `remember`/`add_task`/
-`set_reminder` stay immediate so "read that email and note it down" still
-works. Approval re-enters the same executor with the hold lifted and every
-ownership gate still running.
-
-Two new suites: `scripts/test_api_auth.py` (66) walks the real route table so a
-future unprotected endpoint fails there rather than in the wild, and
-`scripts/test_secretary_injection.py` (50) stubs the Google clients and tests
-the executor, not the model. All six existing suites still pass (135/92/24/90/
-281/288) -- they needed a key, so each now sets `DASHBOARD_API_KEY`; there is
-deliberately no switch that disables the gate. `npx tsc --noEmit` clean.
-
-**Sheraj has to do two things once, or the dashboard will look broken:** restart
-the API (`Start-ScheduledTask -TaskName "bahAI Secretary API"` after killing
-whatever holds :8765) and restart `npm run dev`. The key is made automatically;
-there is nothing to type. WhatsApp is unaffected -- the webhook stays public
-behind its HMAC signature, and the Cloudflare tunnel already exposed only that
-path.
-
-**Deliberately NOT done, so nobody thinks it was:** secrets at rest are still
-plaintext in `private/` (Google/Canva/Etsy tokens, Abigail's DB) -- real
-protection there is OS-level disk encryption, not application code, and it is
-Sheraj's call. Dev-only npm advisories (Vite/esbuild/PostCSS) are untouched;
-`npm audit --omit=dev` reports zero. Python deps still have no lockfile.
-ChatGPT's report also listed one thing that was already handled -- the
-Cloudflare tunnel's ingress is restricted to `/whatsapp/webhook` and
-`/whatsapp/privacy` in `~/.cloudflared/config.yml`, verified this session.
-
-### 2026-08-18 -- Claude Code (Opus 5) -- model picker 500, then committed the tree
-Owner report: the per-agent Model dropdown showed "Could not load the model
-list: 500". Not a bug in the picker -- the API had been running since before
-this session's edits to `agents/router.py` / `agents/models.py`, so it held the
-OLD router in `sys.modules`. `/colony/models` lazy-imports `models.py` at
-request time, which asked that cached old router for `OPENAI_BASE` and got
-`ImportError`. The traceback was in `logs/api.err.log`, not the browser.
-
-Fix was a restart, done the documented way (kill the process on :8765, then
-`Start-ScheduledTask "bahAI Secretary API"`) after checking it was safe to:
-`import agents.api` clean, `test_colony.py` 135/135. Endpoint now returns 200
-with 102 models and all four providers reachable. Worth knowing: `gpt-5.6`,
-`-sol`, `-terra` and `-luna` ARE discovered live from the OpenAI key, so the
-hardcoded `_OPENAI_DOCUMENTED_ALIASES` fallback may now be redundant -- and
-that fallback is a deliberate softening of rule 41a's "discovered, never
-hardcoded", which deserves a look before anyone leans on it.
-
-Then committed and pushed both pending chunks at Sheraj's request. Verified
-first: `test_nuclei.py` 281/281, `test_colony.py` 135/135, dashboard
-`tsc --noEmit` clean, no BOM/mojibake in the diff, `private/` still ignored.
-Nothing in the push was my own code -- it is Grok 4.6's and Codex's work.
-
-### 2026-08-18 — Codex (GPT-5) — GPT-5.6 in Colony model choices
-Owner ask: make `gpt-5.6` another `/models` option. OpenAI is now a paid
-workforce provider in `agents/models.py`, with live `/models` discovery when
-`OPENAI_API_KEY` is set and a short documented `gpt-5.6` fallback alias. The
-router can actually run a saved OpenAI choice through Chat Completions and meters
-it as `openai_chat`; the dashboard picker and chat cost note know about OpenAI.
-Rule 16 still holds: Abigail remains Claude-only and workforce agents still
-cannot use Claude. Verified `python -c "import agents.api"`,
-`python scripts/test_colony.py` (135/135), and dashboard `npx tsc --noEmit`.
-
-### 2026-08-18 — Grok 4.6 — tick a family member into the JY group
-Owner ask: a checkbox next to each name in a JY family box, and no extra
-dot because they are already in the family light. Checking them now adds
-them as junior youth (the role can be changed beside the tick); unchecking
-takes them out. Layout skips a membership at a table the family already
-sits at, so they stay inside the household light and bloom as a petal when
-the family opens (rules 62 / 69). A seat somewhere else still gives them
-their own light. `scripts/test_nuclei.py` 276 -> 281.
-
-### 2026-08-18 — Grok 4.6 — JY lists the youth and the animators
-Owner ask: the junior youth group should name the people who are actually in
-it — the junior youth, and the animators (primary or sub) — instead of only
-listing families. Rule 69. Those parts are exclusive `group_role` facets
-(`jy_youth`, `primary_animator`, `sub_animator`), only on a person in a
-junior youth grouping; a household cannot be a youth or an animator.
-Marking an animator also sets the existing `animating` service on that
-membership, so they sit closer the same way any animator does.
-
-The JY drawer now has two lists (Junior youth / Animators), a role when
-adding someone new or already on the map, and "Add as…" on people inside a
-family that sits with the group. You can change the part later from the
-group or from the person's own drawer. `scripts/test_nuclei.py` 257 -> 276.
-Dashboard typecheck is clean. The API must be restarted for the new kinds to
-appear on the live map.
-
-### 2026-08-18 — Grok 4.6 — selected family member stays on the map
-Owner report: open a family on the Material World map, click a member, the
-family closes (wanted) but the member's dot vanished while the line to them
-stayed. Family-only people have no light of their own (rule 62) — they only
-exist as petals while the family is open — so selecting one tore the petal
-down and left the selection line pointing at empty sky.
-
-`RealWorldGraph.tsx` now pins that one petal after the bloom folds: the rest
-of the family still closes, the selected person stays at the same seat with
-the same line, and a person picked from the family drawer (never opened on
-the map) appears the same way. Dashboard typecheck is clean. Could not click
-through it in a browser from this session — please try opening a family and
-tapping one of the people inside.
-
-
----
-
-Older entries trimmed 2026-09-14 per this file's own "keep to roughly the
-last 15-20 entries" convention (see the top of this file) — full history for
-anything older than 2026-08-18 is in `git log`.

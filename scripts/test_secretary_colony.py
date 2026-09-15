@@ -221,10 +221,17 @@ except sc.PrivateLeak:
 section("request_team_job queues and starts NOTHING")
 
 import agents.api as api  # noqa: E402
+import agents.colony_api as colony_api  # noqa: E402
+import agents.card_api as card_api  # noqa: E402
 
 started: list = []
 starters: list = []
-_real_start_job = api._start_job
+# Patched on colony_api, not api: launch_team_pipeline (agents/colony_api.py)
+# reads its own module's `_start_job` name, bound at import time from
+# agents.jobs -- reassigning the re-exported `api._start_job` alias rebinds
+# only api's copy of the name and is never seen by it (same class of gotcha
+# as agents/jobs.py's _MAX_JOBS in scripts/test_job_cancel.py).
+_real_start_job = colony_api._start_job
 
 
 def _fake_start_job(kind, runner, started_by="sheraj"):
@@ -233,7 +240,7 @@ def _fake_start_job(kind, runner, started_by="sheraj"):
     return "job-abc"
 
 
-api._start_job = _fake_start_job
+colony_api._start_job = _fake_start_job
 
 before = len(store.get_pending_actions())
 job = sc.request_team_job("quote_card", "Cards on unity for the weekly gathering")
@@ -307,7 +314,12 @@ check("the quotes are shown to Sheraj before he approves",
       "Verified passage 1" in batch["text"])
 
 batched: dict = {}
-_real_run_batch = api.pipeline_run_card_batch
+# Patched on card_api: launch_team_pipeline's quote_card>1 branch imports
+# pipeline_run_card_batch FRESH from agents.card_api on every call (a lazy
+# import, re-read each time), so patching agents.card_api's own attribute is
+# what a fresh lazy import will actually see -- the re-exported `api.` alias
+# is a separate, one-time-bound name that this call path never reads.
+_real_run_batch = card_api.pipeline_run_card_batch
 
 
 def _fake_run_batch(req, started_by="sheraj"):
@@ -317,7 +329,7 @@ def _fake_run_batch(req, started_by="sheraj"):
     return {"job_id": "batch-1", "status": "running", "total": len(req.quotes)}
 
 
-api.pipeline_run_card_batch = _fake_run_batch
+card_api.pipeline_run_card_batch = _fake_run_batch
 started.clear()
 outcome = secretary.execute_pending_action(batch["action_id"])
 check("approving runs the REAL batch endpoint with all four quotes",
@@ -346,8 +358,8 @@ check("nothing found means nothing queued, said plainly",
       none["ok"] is False and "Nothing was queued" in none["text"], none["text"][:140])
 
 api.suggest_ruhi_quotes = _real_suggest
-api.pipeline_run_card_batch = _real_run_batch
-api._start_job = _real_start_job
+card_api.pipeline_run_card_batch = _real_run_batch
+colony_api._start_job = _real_start_job
 
 
 # ── What the teams are doing, on the map ──────────────────────────────────────
@@ -474,14 +486,14 @@ text = executor("workforce_report", {"team": "Print Studio"})
 check("the executor dispatches workforce_report", "PRINT STUDIO" in text, text[:120])
 
 started.clear()
-api._start_job = _fake_start_job
+colony_api._start_job = _fake_start_job
 text = executor("request_team_job", {"kind": "quote_card", "theme": "Cards on service"})
 check("the executor queues a job and starts nothing",
       started == [] and len(effects["queued_for_approval"]) == 1,
       f"{started} {effects['queued_for_approval']}")
 check("the queued job shows in the code-authored confirmation line",
       "Needs your approval" in secretary._ground_truth_confirmation(effects))
-api._start_job = _real_start_job
+colony_api._start_job = _real_start_job
 
 text = executor("brief_agent", {"agent": "Theo", "instructions": "Warmer palettes."})
 check("a brief through the executor lands and is recorded as a real effect",

@@ -1,0 +1,1381 @@
+"""
+The bookmark pipeline's HTTP routes (rules 1-14, 29), extracted from api.py:
+the write/approve/revision cycle, the full theme-to-bookmark run, targeted
+regeneration (quote/image/everything), and the Canva + Etsy integrations
+(both bookmark-only -- Etsy publishing and Canva autofill have no quote-card
+equivalent, rule 8/13).
+
+`_run_full_pipeline` and `launch_team_pipeline` (agents/colony_api.py) are
+the two entry points that start a bookmark run; nothing outside this file
+should ever call `_pipeline_write_approve_sync` or the revision helpers
+directly -- they exist to be shared by exactly those two paths.
+
+No prefix on this router -- see wallet_api.py's docstring for why.
+"""
+
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+from agents.librarian import retrieve
+from agents.state import create_product, log_run, update_product, update_task_status
+from agents.jobs import (
+    _badge, _esc, _load_product_or_404, _require_bookmark, _start_job,
+    _web_image_path, create_task,
+)
+
+router = APIRouter()
+
+
+# --- Pipeline: write + approval cycle ---
+
+class WriteApproveRequest(BaseModel):
+    theme: str
+    image_prompt: str
+    citations: Optional[list] = None
+    image_url: Optional[str] = None
+    task_id: Optional[str] = None
+    target_score: float = 9.0
+    max_attempts: int = 3
+
+def _diff_summary(find: str, replace: str, context: int = 24) -> str:
+    """
+    Summarize a find->replace edit by trimming the common prefix/suffix so the
+    log shows only what actually differs. A raw head-truncation of both
+    strings (the previous approach) made real edits look like no-ops whenever
+    find/replace shared a long opening quote — which is the common case,
+    since 'find' must quote existing listing text verbatim. Showing only the
+    delta is what makes a genuine change visibly distinguishable from "nothing
+    happened", which was the direct cause of a real user complaint.
+    """
+    i = 0
+    while i < len(find) and i < len(replace) and find[i] == replace[i]:
+        i += 1
+    j = 0
+    while (j < len(find) - i and j < len(replace) - i and
+           find[len(find) - 1 - j] == replace[len(replace) - 1 - j]):
+        j += 1
+    prefix, suffix = find[:i], (find[len(find) - j:] if j else "")
+    find_mid, replace_mid = find[i:len(find) - j], replace[i:len(replace) - j]
+
+    lead = ("…" + prefix[-context:]) if len(prefix) > context else prefix
+    tail = (suffix[:context] + "…") if len(suffix) > context else suffix
+
+    if not find_mid and not replace_mid:
+        return f'no visible change ("{find[:60]}")'
+    if not find_mid:
+        return f'{lead}[+ "{replace_mid[:200]}"]{tail}'
+    if not replace_mid:
+        return f'{lead}[- "{find_mid[:200]}"]{tail}'
+    return f'{lead}["{find_mid[:150]}" -> "{replace_mid[:150]}"]{tail}'
+
+
+# Matches a quoted span of 15+ chars inside a Fix note, tolerant of straight
+# and curly quotes — used to catch a Fix note re-describing an edit that was
+# already applied mechanically (see _apply_review_feedback).
+_QUOTED_SPAN_RE = re.compile(r'[\'"“‘]([^\'"”’]{15,})[\'"”’]')
+
+
+def _apply_review_feedback(listing: dict, review: dict, verified_quote: str,
+                           extra_instructions: list[str] = None) -> tuple[dict, str, list]:
+    """
+    Turn a review into a revised listing.
+    1. The Reviewer's surgical find-and-replace edits are applied MECHANICALLY —
+       compliance no longer depends on the small local model obeying prose
+       (observed failing three attempts in a row on 'remove every reference to 9').
+    2. Every principle scored below 7 gets its 'Fix:' note surfaced as an
+       instruction EVERY round, not just when the Reviewer supplied zero edits —
+       previously a round with 2 edits covering one principle silently dropped
+       Fix: notes for every other weak principle, so the Scribe only ever saw
+       a fraction of the feedback it should have (the user's core complaint).
+    3. Edits targeting bookmark_quote are rejected outright (that field is
+       Librarian-locked and the Scribe cannot touch it either) and reported
+       back to the Reviewer as blocked, so it stops re-requesting something
+       structurally impossible and instead reframes the DESCRIPTION.
+    Returns (revised_listing, note for the editing log, changes list for the
+    next Reviewer call — so it knows exactly what was executed and never
+    re-requests a change that already happened).
+    """
+    from agents.scribe import apply_edits, revise_listing_light
+
+    edits = [e for e in (review.get("edits") or []) if isinstance(e, dict)]
+    revised, unapplied, rejected_locked = apply_edits(listing, edits)
+    applied = [e for e in edits if e not in unapplied and e not in rejected_locked]
+
+    changes = []
+    for e in applied:
+        find, repl = str(e.get("find") or ""), str(e.get("replace") or "")
+        field = e.get("field", "description")
+        changes.append(f'{field}: {_diff_summary(find, repl)}')
+    for e in rejected_locked:
+        changes.append(
+            'REJECTED: bookmark_quote is Librarian-locked and can never be edited — '
+            "address any quote/theme mismatch by reframing the description instead"
+        )
+
+    instructions = list(extra_instructions or [])
+    for e in unapplied:
+        find, repl = str(e.get("find") or ""), str(e.get("replace") or "")
+        field = e.get("field", "description")
+        if repl:
+            instructions.append(f'In the {field}, replace "{find}" with "{repl}".')
+        else:
+            instructions.append(f'Delete "{find}" from the {field}.')
+
+    if not edits:
+        # No surgical edits at all — the recommendation is the only lever we
+        # have, since it isn't already implemented by anything mechanical.
+        rec = (review.get("recommendation") or "").strip()
+        if rec and not rec.lower().startswith("ship"):
+            instructions.append(rec)
+
+    # Surface every weak principle's Fix: note EVERY round, regardless of how
+    # many edits were supplied — an edit array covers what it covers, but a
+    # 9-principle review often has more weak spots than the edits address
+    # (observed: 2 edits for one principle while two OTHER weak principles'
+    # Fix notes were silently dropped because edits existed at all).
+    edit_text = " ".join(f"{e.get('find','')} {e.get('replace','')}" for e in edits).lower()
+    for v in (review.get("scores") or {}).values():
+        if isinstance(v, dict) and v.get("score", 10) < 7 and "Fix:" in (v.get("note") or ""):
+            fix = v["note"].split("Fix:", 1)[1].strip()
+            if not fix or fix in instructions:
+                continue
+            # A Fix note is usually the Reviewer re-describing one of its own
+            # `edits` entries in prose ("Replace 'A' with 'B'", "Add the
+            # sentence 'C' after..."), so its wording never matches edit_text
+            # verbatim even though the underlying change is identical — the
+            # old whole-string check below always missed this. Concretely: a
+            # mechanical edit already inserted sentence C, then this loop
+            # ALSO turned the Fix note into a Scribe instruction to insert C
+            # again, producing back-to-back near-duplicate sentences that
+            # tanked Moderation/Craft scores every single revision attempt.
+            # Comparing just the quoted span(s) inside the Fix note catches
+            # this even though the surrounding instructional phrasing differs.
+            quoted = _QUOTED_SPAN_RE.findall(fix)
+            if quoted and all(q.lower() in edit_text for q in quoted):
+                continue
+            if fix.lower() in edit_text:
+                continue
+            instructions.append(fix)
+
+    note_parts = []
+    if applied:
+        note_parts.append(f"{len(applied)} surgical edit{'s' if len(applied) != 1 else ''} applied mechanically")
+    if rejected_locked:
+        note_parts.append(f"{len(rejected_locked)} edit{'s' if len(rejected_locked) != 1 else ''} rejected (locked quote)")
+    if instructions:
+        revised = revise_listing_light(revised, instructions, verified_quote)
+        note_parts.append(f"{len(instructions)} instruction{'s' if len(instructions) != 1 else ''} via Scribe")
+        changes.extend(f"Scribe was instructed: {ins[:120]}" for ins in instructions)
+    if verified_quote:
+        revised["bookmark_quote"] = verified_quote
+
+    # Unconditional claim scrub — runs regardless of which path produced this
+    # revision. revise_listing_light already scrubs its own output, but a
+    # round whose edits were fully covered by mechanical apply_edits (no
+    # Scribe instructions needed) would otherwise skip sanitization entirely,
+    # letting a Reviewer-authored false claim (e.g. an invented exact motif
+    # count) ship untouched. This closes that gap for every path uniformly.
+    from agents.scribe import _sanitize_claims
+    revised = _sanitize_claims(revised)
+
+    return revised, ("; ".join(note_parts) or "no actionable feedback"), changes
+
+
+# RETIRED 2026-09-09, and left here as a warning rather than deleted silently.
+#
+# This was the stop-word list for the word-overlap grounding check: common
+# function words excluded so a quote could not pass just by sharing "the/and/
+# unto" with a passage. Reasonable-looking, and it is exactly what made the
+# check unsafe -- read the list. `not` is in it, and `no`, and `all`. A
+# candidate with the negation deleted therefore scored 100% and was reported
+# as "100% of content words traceable", i.e. VERIFIED.
+#
+# The lesson is not "fix the list". It is that a bag of words cannot decide
+# whether something is a quotation, because the words that carry the meaning
+# are often the shortest ones. Verification is now exact and lives in
+# `agents/quote_verify.py` (rule 111).
+
+
+def verify_bookmark_quote(quote: str, citations: list[dict]) -> "quote_verify.Verdict":
+    """
+    The one place a bookmark quote earns a "verified" label (rule 111).
+
+    It checks the words against the passages that were actually RETRIEVED for
+    this run -- the authorised corpus for this product -- using the shared exact
+    verifier. What it replaced was word overlap at 60%, which is a similarity
+    score, and similarity is not quotation: it passed a candidate with the word
+    "not" deleted, reporting "100% of content words traceable".
+
+    An unverifiable result is reported as unverifiable. It is never upgraded by
+    an embedding score or by the Librarian's own say-so -- the previous version
+    fell back to `librarian.verify()` when retrieval was empty and let a close
+    embedding match print as a verified quotation, which is the same mistake one
+    layer down.
+    """
+    from agents import quote_verify
+
+    if not citations:
+        return quote_verify.Verdict(
+            False, ("no passages were retrieved for this run, so there is nothing to "
+                    "check the quotation against -- it cannot be called verified"))
+    passages = [{"text": str(c.get("text") or ""),
+                 "source": str(c.get("source") or ""),
+                 "section": str(c.get("section") or ""),
+                 "link": str(c.get("link") or "")}
+                for c in citations if str(c.get("text") or "").strip()]
+    return quote_verify.verify_quotation(quote, passages)
+
+
+def eligible_excerpt(citations: list[dict]) -> dict:
+    """A real, exactly-verifiable excerpt from the retrieved passages.
+
+    Bounded recovery (rule 111): when a generated quotation fails, the useful
+    thing to hand back is not an error but an excerpt that WOULD pass, for a
+    person to look at. It is offered, never substituted -- nothing here rewrites
+    a product on its own.
+    """
+    from agents import quote_verify
+
+    for c in citations or []:
+        text = str(c.get("text") or "").strip()
+        if not text:
+            continue
+        # The first complete sentence of the passage, which is the shortest
+        # thing that can satisfy the boundary rules.
+        for match in re.finditer(r"[^.!?]*[.!?]", text):
+            candidate = match.group(0).strip()
+            if len(candidate.split()) < 6:
+                continue
+            verdict = quote_verify.verify_quotation(candidate, [c])
+            if verdict.verified:
+                return {"text": verdict.canonical_text, "source": verdict.source,
+                        "locator": verdict.locator}
+            break
+    return {}
+
+
+def _check_quote_grounding(quote: str, citations: list[dict]) -> tuple[bool, str]:
+    """Backwards-compatible wrapper: (traceable, reason). See
+    `verify_bookmark_quote`, which is where the actual decision is made."""
+    verdict = verify_bookmark_quote(quote, citations)
+    return verdict.verified, verdict.reason
+
+
+def _pipeline_write_approve_sync(req: WriteApproveRequest, progress=None, on_turn=None,
+                                 request_human_input=None) -> dict:
+    """
+    Core write-approve logic, callable from the sync endpoint, the async job
+    wrapper, and the full /pipeline/run pipeline.
+    1. Agents consult about the image (Artist describes, Scribe proposes, Reviewer guides).
+       on_turn streams each turn live; request_human_input (if given) pauses after round 2
+       so Sheraj can steer the team before the Scribe writes.
+    2. If consultation agreed the artwork must change, the Artist regenerates it ONCE
+       with the agreed adjustment — so the shipped image honours the consultation.
+    3. Scribe writes a listing informed by the consultation.
+    4. Reviewer scores it; Scribe revises if below target_score.
+    Loops up to max_attempts times; stops early if revisions stall.
+    Returns: {listing, review, attempts, target_reached, consultation,
+              image_path, image_prompt} — image fields reflect any regeneration.
+    """
+    from agents.consultation import run_consultation
+    from agents.scribe import write_listing
+    from agents.reviewer import score as reviewer_score
+
+    def _progress(msg: str):
+        if progress:
+            progress(msg)
+
+    def _weakest(review: dict, n: int = 2) -> str:
+        """Human-readable list of the n lowest-scoring principles."""
+        scores = review.get("scores") or {}
+        items = sorted(
+            ((k.split("_", 1)[-1].replace("_", " "), v.get("score", 0))
+             for k, v in scores.items() if isinstance(v, dict)),
+            key=lambda kv: kv[1],
+        )
+        return ", ".join(f"{name} ({s}/10)" for name, s in items[:n]) or "n/a"
+
+    def _review_summary(review: dict) -> str:
+        overall = review.get("overall", 0)
+        verdict = "meets the pass threshold" if review.get("passed") else "below the pass threshold"
+        return (
+            f"Overall {overall}/10 — {verdict}.\n"
+            f"Weakest principles: {_weakest(review)}.\n"
+            f"Recommendation: {review.get('recommendation', '')}"
+        )
+
+    def _log(agent, step, output):
+        if req.task_id:
+            # Rule 14: only Reviewer verdicts move trust here. Scribe field
+            # presence is mechanical completeness, not a quality judgment.
+            passed = output.get("passed") if agent == "reviewer" else None
+            log_run(req.task_id, agent, step, req.theme[:200], json.dumps(output)[:400],
+                    passed_review=passed)
+
+    # ── Step 1: Consultation ─────────────────────────────────────────────────
+    def _preview_front(quote: str, transcript: list) -> str:
+        """LLM-free front-face render for the pause — Sheraj steers from the
+        actual printed look, not a text description of it."""
+        from agents.compositor import render_bookmark_pair
+        return _web_image_path(render_bookmark_pair(req.image_url, quote)["front_path"])
+
+    consultation = {"transcript": [], "context": ""}
+    if req.image_url:
+        try:
+            consultation = run_consultation(
+                req.image_url, req.theme, req.image_prompt, req.citations or [],
+                progress=progress, on_turn=on_turn, request_human_input=request_human_input,
+                render_preview=_preview_front,
+                preview_note=("The image above is the bookmark's front face as it would "
+                              "print right now, with the team's verified quote."),
+            )
+            if req.task_id:
+                vq = (consultation.get("verified_quote") or "").strip()
+                # passed_review=None — holding a consultation is process, not judged.
+                log_run(req.task_id, "consultation", "consult", req.theme[:200],
+                        f"{len(consultation['transcript'])} turns completed"
+                        + (f"; quote len={len(vq)}" if vq else ""))
+        except Exception as e:
+            consultation["transcript"] = [{"agent": "System", "role": "error",
+                                            "message": f"Consultation skipped: {e}"}]
+            if req.task_id:
+                log_run(req.task_id, "consultation", "consult", req.theme[:200],
+                        f"failed: {e}"[:400])
+
+    # ── Step 2: Honour the consultation's image decision ─────────────────────
+    # If the team agreed the artwork itself must change, regenerate it once with
+    # the agreed adjustment. Without this, the Reviewer scores an image that
+    # ignores the consultation and (rightly) marks the whole product down.
+    image_path = req.image_url
+    image_prompt = req.image_prompt
+    image_revision_log = []
+    brief = consultation.get("brief") or {}
+    adjustment = (brief.get("image_adjustment") or "").strip()
+    if adjustment and image_path:
+        _progress(f"Artist is repainting per the consultation: {adjustment[:120]}...")
+        try:
+            from agents.artist import generate_image
+            revised_prompt = (
+                f"{req.image_prompt}\n\n"
+                f"IMPORTANT adjustment agreed in team consultation: {adjustment}"
+            )
+            gen = generate_image(revised_prompt, "2:3")
+            new_path = gen.get("image_url", "")
+            if new_path and Path(new_path).exists():
+                image_path = new_path
+                image_prompt = revised_prompt
+                image_revision_log.append(
+                    {"agent": "Artist", "role": "image revision (consultation)",
+                     "message": f"Repainted the artwork per the team's agreed adjustment:\n{adjustment}"})
+                _log("artist", "regenerate", {"adjustment": adjustment, "image": new_path})
+        except Exception as e:
+            image_revision_log.append(
+                {"agent": "Artist", "role": "image revision (consultation)",
+                 "message": f"Regeneration failed ({e}) — continuing with the original artwork."})
+            if req.task_id:
+                log_run(req.task_id, "artist", "regenerate", adjustment[:200],
+                        f"failed: {e}"[:400])
+
+    # ── Step 3: Write → Score → Revise loop ──────────────────────────────────
+    verified_quote = consultation.get("verified_quote", "")
+    quote_grounded = consultation.get("quote_grounded", False)
+
+    # Deterministic grounding backstop: the Librarian's GROUNDED verdict is a
+    # self-report, and this quote gets locked for the rest of the run — check
+    # it against the actual retrieved passages before letting "verified" stick.
+    quote_verification: dict = {}
+    if verified_quote and quote_grounded:
+        verdict = verify_bookmark_quote(verified_quote, req.citations or [])
+        quote_verification = verdict.as_dict()
+        if not verdict.verified:
+            quote_grounded = False
+            # Bounded recovery: say what WOULD have passed, so a person has
+            # something to act on rather than only a refusal (rule 111).
+            offer = eligible_excerpt(req.citations or [])
+            suggestion = ""
+            if offer:
+                suggestion = ("\n\nAn exactly-verifiable passage from the same retrieval, "
+                              "if the team wants to quote rather than paraphrase:\n"
+                              f"“{offer['text']}” - {offer['source']}")
+            consultation["transcript"].append({
+                "agent": "System", "role": "grounding check",
+                "message": ("The Librarian called this quote GROUNDED, but the exact check "
+                            f"could not confirm it is the source's own words ({verdict.reason}). "
+                            "The listing will present it as the team's phrase, not a verified "
+                            "quotation." + suggestion),
+            })
+            consultation["context"] += (
+                "\n\nCORRECTION (exact quotation check): the quote above could NOT be "
+                "confirmed as the source's own words - do not describe it as a verified "
+                "scriptural quotation; call it the team's guiding phrase instead."
+            )
+        else:
+            # The source's own characters, so a diacritic or a curly apostrophe
+            # retyped by the model never reaches the printed face (rule 111).
+            verified_quote = verdict.canonical_text or verified_quote
+        if req.task_id:
+            log_run(req.task_id, "librarian", "grounding_check", verified_quote[:200],
+                    f"[{verdict.method}] {verdict.reason}"[:400],
+                    passed_review=verdict.verified)
+
+    _progress(f"Scribe is writing the listing (attempt 1/{req.max_attempts})...")
+    listing = write_listing(
+        req.theme, image_prompt, req.citations or [], image_path,
+        consultation_context=consultation["context"],
+        verified_quote=verified_quote,
+        quote_grounded=quote_grounded,
+    )
+    # Force-inject verified_quote — don't rely on LLM to follow the instruction
+    if verified_quote:
+        listing["bookmark_quote"] = verified_quote
+    _progress("Reviewer is scoring against the 9 principles (seeing the artwork)...")
+    consult_transcript = consultation.get("transcript", [])
+    consult_decision = consultation.get("brief") or {}
+    review  = reviewer_score(req.theme, image_prompt, listing,
+                              consultation_transcript=consult_transcript,
+                              image_path=image_path,
+                              consultation_decision=consult_decision,
+                              quote_grounded=quote_grounded if verified_quote else None)
+    _log("scribe",   "write",   listing)
+    _log("reviewer", "score_1", review)
+
+    # Editing log — shown in the dashboard transcript viewer so the revision
+    # work is visible. Kept separate from consult_transcript so the Reviewer's
+    # Principle-4 evidence stays pure consultation.
+    editing_log = image_revision_log + [
+        {"agent": "Scribe", "role": "listing draft — attempt 1 (editing)",
+         # Full description, not a head-truncated preview — edits in later
+         # rounds land in paragraph 2+, and a fixed [:500] cap always showed
+         # the same unchanged opening paragraph, making real revisions look
+         # like no-ops even when the score was visibly moving.
+         "message": f"Title: {listing.get('title', '')}\n\n"
+                    f"{str(listing.get('description', ''))}"},
+        {"agent": "Reviewer", "role": "score — attempt 1 (editing)",
+         "message": _review_summary(review)},
+    ]
+
+    best_listing, best_review = listing, review
+    # The revision chain always builds on the LATEST listing and review — never
+    # on stale 'best' state. Revising best-with-best after a worse score just
+    # reproduces the identical text and re-rolls the scoring dice (observed:
+    # attempts 3 and 4 byte-identical, scored 6.2 then 6.8). Forward chaining
+    # also guarantees the Reviewer's 'find' strings match the text they edit.
+    cur_listing, cur_review = listing, review
+    attempt = 1
+    stalled = 0  # consecutive revisions that failed to beat the best score
+
+    while best_review.get("overall", 0) < req.target_score and attempt < req.max_attempts:
+        attempt += 1
+        _progress(
+            f"Score {cur_review.get('overall', 0)}/10 — weakest: {_weakest(cur_review)}. "
+            f"Scribe is revising (attempt {attempt}/{req.max_attempts})..."
+        )
+        revised, revise_note, changes = _apply_review_feedback(cur_listing, cur_review, verified_quote)
+        if revised == cur_listing:
+            editing_log.append(
+                {"agent": "System", "role": "editing stopped",
+                 "message": "The review produced no applicable text changes — "
+                            f"keeping the best version ({best_review.get('overall', 0)}/10)."})
+            break
+        changes_preview = "\n".join(f"  - {c[:220]}" for c in changes[:8])
+        editing_log.append(
+            {"agent": "Scribe", "role": f"revision — attempt {attempt} (editing)",
+             "message": f"Addressing: {cur_review.get('recommendation', '')[:300]}\n"
+                        f"How: {revise_note}\n"
+                        + (f"Changes:\n{changes_preview}\n" if changes_preview else "")
+                        # Full description (see attempt-1 comment above) — the
+                        # point of this log is to let a human confirm the text
+                        # actually changed, which a fixed head-truncation defeats.
+                        + f"\nNew title: {revised.get('title', '')}\n\n"
+                        f"{str(revised.get('description', ''))}"})
+        _progress(f"Reviewer is re-scoring revision {attempt}/{req.max_attempts}...")
+        review = reviewer_score(req.theme, image_prompt, revised,
+                                 consultation_transcript=consult_transcript,
+                                 image_path=image_path,
+                                 previous_review=cur_review,
+                                 changes_applied=changes,
+                                 consultation_decision=consult_decision,
+                                 quote_grounded=quote_grounded if verified_quote else None)
+        prev_overall = cur_review.get("overall", 0)
+        new_overall = review.get("overall", 0)
+        trend = "improved" if new_overall > prev_overall else "did not improve"
+        editing_log.append(
+            {"agent": "Reviewer", "role": f"score — attempt {attempt} (editing)",
+             "message": f"Overall {new_overall}/10 (was {prev_overall}/10 — {trend}).\n"
+                        f"{_review_summary(review)}"})
+        _log("scribe",   f"revise_{attempt}", revised)
+        _log("reviewer", f"score_{attempt}",  review)
+
+        cur_listing, cur_review = revised, review
+        best_overall = best_review.get("overall", 0)
+        if new_overall > best_overall:
+            best_listing, best_review = revised, review
+            stalled = 0
+        elif new_overall == best_overall:
+            # Tie goes to the newer listing — it has incorporated more feedback
+            # (a tie previously discarded the revision that finally fixed the
+            # redundancy the Reviewer had flagged for three rounds). A tie is
+            # NOT counted toward the stall budget: real (if score-invisible)
+            # progress was made, and it previously got stopped one attempt
+            # short of a fix (e.g. 'remove mismatched tags') that was queued
+            # up but never tried because a tie was treated as a failure.
+            best_listing, best_review = revised, review
+        else:
+            # Only a genuine regression counts against the stall budget.
+            stalled += 1
+        if stalled >= 2:
+            editing_log.append(
+                {"agent": "System", "role": "editing stopped",
+                 "message": f"Two revisions in a row scored worse than the best — "
+                            f"keeping the best version ({best_review.get('overall', 0)}/10)."})
+            break
+
+    return {
+        "listing":        best_listing,
+        "review":         best_review,
+        "attempts":       attempt,
+        "target_reached": best_review.get("overall", 0) >= req.target_score,
+        "consultation":   consultation["transcript"] + editing_log,
+        "image_path":     image_path,
+        "image_prompt":   image_prompt,
+        # How the quotation was checked, and what it was checked against
+        # (rule 111). Carried so a product can say which verifier passed it --
+        # an old word-overlap pass and a new exact one must never look the same,
+        # and a later regeneration must not lean on a stale verified flag.
+        "quote_verification": quote_verification,
+    }
+
+
+# --- Pipeline: full theme → bookmark run (dashboard entry point) ---
+
+class PipelineRunRequest(BaseModel):
+    theme: str
+    target_score: float = 9.0
+    max_attempts: int = 3
+    aspect_ratio: str = "2:3"
+
+
+def _generate_bookmark(theme: str, task_id: str, target_score: float, max_attempts: int,
+                       aspect_ratio: str, progress, on_turn=None, request_human_input=None) -> dict:
+    """
+    Shared core of the bookmark pipeline: Librarian retrieval → Artist brief +
+    generate → consultation/write/score/revise. Used both for a fresh
+    /pipeline/run and for a product's targeted or full regeneration — those
+    differ only in what happens to the RESULT (create a new product row vs.
+    overwrite an existing one), never in how the result is produced.
+    on_turn/request_human_input pass through to the consultation for the live
+    chat view and the post-round-2 pause for Sheraj's input.
+    Returns: {image_prompt, image_path, listing, review, attempts,
+              target_reached, consultation}
+    """
+    from agents.artist import build_image_prompt, generate_image
+
+    progress("Librarian is gathering passages from the writings...")
+    try:
+        citations = retrieve(theme, n_results=3) or []
+    except Exception as e:
+        # Retrieval failure is reported honestly but doesn't kill the run —
+        # consultation Turn 4 has a designed fallback for zero citations.
+        citations = []
+        progress(f"Librarian retrieval unavailable ({e}) — continuing; "
+                 "the Librarian will verify against known texts in consultation.")
+    # Retrieval count is mechanical — trust moves on grounding/reviewer only.
+    log_run(task_id, "librarian", "retrieve", theme[:200],
+            f"{len(citations)} passages retrieved")
+
+    progress("Artist is composing the image brief (local Qwen3)...")
+    image_prompt = build_image_prompt(theme, citations)
+    log_run(task_id, "artist", "brief", theme[:200], image_prompt[:200])
+
+    progress("Artist is generating the artwork (xAI)...")
+    gen = generate_image(image_prompt, aspect_ratio)
+    image_path = gen.get("image_url", "")
+    log_run(task_id, "artist", "generate", image_prompt[:200], image_path[:200])
+
+    wa_req = WriteApproveRequest(
+        theme=theme, image_prompt=image_prompt, citations=citations,
+        image_url=image_path, task_id=task_id,
+        target_score=target_score, max_attempts=max_attempts,
+    )
+    wa = _pipeline_write_approve_sync(wa_req, progress, on_turn=on_turn,
+                                      request_human_input=request_human_input)
+    # The consultation may have agreed on an image adjustment, in which case the
+    # Artist regenerated the artwork — everything downstream uses the final image.
+    image_path = wa.get("image_path") or image_path
+    image_prompt = wa.get("image_prompt") or image_prompt
+
+    return {
+        "image_prompt":   image_prompt,
+        "image_path":     image_path,
+        "listing":        wa["listing"],
+        "review":         wa["review"],
+        "attempts":       wa["attempts"],
+        "target_reached": wa["target_reached"],
+        "consultation":   wa["consultation"],
+        # Carried through to the product row (rule 111).
+        "quote_verification": wa.get("quote_verification") or {},
+    }
+
+
+def _render_and_publish(product_id: str, task_id: str, image_path: str, listing: dict, progress) -> dict:
+    """
+    Shared finishing steps once a product row exists: Compositor front/back
+    render + Canva autofill. Returns {front_path, back_path, compositor_error, canva}.
+    """
+    from agents.compositor import render_bookmark_pair
+
+    progress("Compositor is rendering front and back halves...")
+    front_path, back_path = "", ""
+    compositor_error = None
+    quote = (listing.get("bookmark_quote") or "").strip()
+    try:
+        if not quote:
+            raise ValueError("Listing has no bookmark_quote to overlay")
+        rendered = render_bookmark_pair(image_path, quote)
+        front_path, back_path = rendered["front_path"], rendered["back_path"]
+        update_product(product_id, front_image=front_path, back_image=back_path)
+        log_run(task_id, "compositor", "render", image_path[:200], front_path[:200])
+    except Exception as e:
+        compositor_error = str(e)
+        log_run(task_id, "compositor", "render", image_path[:200],
+                f"failed: {e}"[:400])
+
+    # Canva autofill is dead commerce weight (0/10 successful autofills ever) —
+    # parked behind an off-by-default switch so it never blocks a clean run.
+    canva_enabled = os.getenv("CANVA_AUTOFILL_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    canva = {"skipped": True, "reason": "Canva not configured", "design_url": None}
+    if not canva_enabled:
+        progress("Canva autofill is turned off — skipped")
+        canva = {"skipped": True, "reason": "Canva autofill is turned off — skipped",
+                 "design_url": None}
+    else:
+        progress("Sending front image to Canva (skips gracefully if not connected)...")
+        try:
+            from agents.canva import autofill_bookmark, CANVA_CLIENT_ID, CANVA_TEMPLATE_ID
+            if CANVA_CLIENT_ID and CANVA_TEMPLATE_ID and front_path:
+                canva = autofill_bookmark(front_path)
+                # Steward owns publishing/packaging (same as etsy_publish).
+                log_run(task_id, "steward", "canva_autofill",
+                        front_path[:200], (canva.get("design_url") or "")[:200])
+        except Exception as e:
+            canva = {"skipped": True, "reason": str(e), "design_url": None}
+            log_run(task_id, "steward", "canva_autofill",
+                    front_path[:200], f"failed: {e}"[:400])
+
+    return {"front_path": front_path, "back_path": back_path,
+            "compositor_error": compositor_error, "canva": canva}
+
+
+def _run_full_pipeline(req: PipelineRunRequest, progress, on_turn=None, request_human_input=None) -> dict:
+    """
+    The whole bookmark pipeline in one background job:
+    task → Librarian → Artist brief → Artist generate → consultation/write/score
+    → save product → Compositor → Canva autofill.
+    """
+    progress("Creating task...")
+    task_id = create_task(req.theme, "design", assigned_to="pipeline")
+
+    gen = _generate_bookmark(req.theme, task_id, req.target_score, req.max_attempts,
+                             req.aspect_ratio, progress, on_turn=on_turn,
+                             request_human_input=request_human_input)
+    listing, review = gen["listing"], gen["review"]
+    image_path, image_prompt = gen["image_path"], gen["image_prompt"]
+
+    progress("Saving product...")
+    product_id = create_product(
+        task_id=task_id,
+        title=listing.get("title", req.theme),
+        image_url=image_path,
+        listing_copy=json.dumps(listing),
+        image_prompt=image_prompt,
+        theme=req.theme,
+    )
+    # Persist the consultation transcript so later re-scoring (e.g. the Improve
+    # button) can present the same Principle-4 evidence the original score saw.
+    # target_reached/attempts persist too: a stalled best-effort ship must stay
+    # distinguishable from a clean pass after the in-memory job record is gone.
+    update_product(product_id, reviewer_scores=json.dumps(review),
+                   consultation=json.dumps(gen["consultation"]),
+                   target_reached=1 if gen["target_reached"] else 0,
+                   attempts=gen["attempts"],
+                   # Which check passed this quotation, and against what
+                   # (rule 111). A product carrying no entry was verified by the
+                   # retired overlap check, and the dashboard can say so rather
+                   # than implying it met today's standard.
+                   quote_verification=json.dumps(gen.get("quote_verification") or {}))
+
+    finish = _render_and_publish(product_id, task_id, image_path, listing, progress)
+
+    update_task_status(task_id, "completed")
+    overall = review.get("overall", 0)
+
+    return {
+        "task_id":          task_id,
+        "product_id":       product_id,
+        "theme":            req.theme,
+        "image_prompt":     image_prompt,
+        "image_path":       image_path,
+        "image_web":        _web_image_path(image_path),
+        "front_image_path": finish["front_path"],
+        "front_image_web":  _web_image_path(finish["front_path"]),
+        "back_image_path":  finish["back_path"],
+        "back_image_web":   _web_image_path(finish["back_path"]),
+        "compositor_error": finish["compositor_error"],
+        "listing":          listing,
+        "review":           review,
+        "attempts":         gen["attempts"],
+        "target_reached":   gen["target_reached"],
+        "badge":            _badge(overall),
+        "consultation":     gen["consultation"],
+        "canva":            finish["canva"],
+    }
+
+
+@router.post("/pipeline/run")
+def pipeline_run(req: PipelineRunRequest):
+    """
+    Dashboard entry point: run the ENTIRE bookmark pipeline from a theme.
+    Returns {job_id} immediately; poll GET /pipeline/status/{job_id}.
+    """
+    if not req.theme.strip():
+        raise HTTPException(status_code=422, detail="theme is required")
+    job_id = _start_job(
+        "full-pipeline",
+        lambda progress, on_turn, ask: _run_full_pipeline(req, progress, on_turn, ask),
+    )
+    return {"job_id": job_id, "status": "running"}
+class RegenerateQuoteRequest(BaseModel):
+    guidance: str = ""   # e.g. "make it about detachment instead of unity"
+
+@router.post("/products/{product_id}/regenerate-quote")
+def regenerate_quote(product_id: str, req: RegenerateQuoteRequest):
+    """
+    Replace ONLY the printed quote. Re-searches the Librarian's index (steered
+    by guidance if given), re-renders front/back with the new quote overlaid
+    on the SAME artwork, lightly adjusts the description to introduce the new
+    quote instead of the old one, and re-scores. Always saves — this is a
+    deliberate creative decision, not a quality-gated auto-improve like
+    /improve, so an unchanged or lower score is not a reason to discard it.
+    """
+    from agents.scribe import revise_listing_light, _sanitize_claims
+    from agents.compositor import render_bookmark_pair
+    from agents.reviewer import score as reviewer_score
+
+    product = _load_product_or_404(product_id)
+    _require_bookmark(product)
+    listing = json.loads(product.get("listing_copy") or "{}")
+    image_url    = product.get("image_url", "")
+    image_prompt = product.get("image_prompt", "")
+    theme        = product.get("theme") or listing.get("title", "")
+    old_quote    = (listing.get("bookmark_quote") or "").strip()
+
+    # Guidance alone, not theme+guidance — the whole point of asking for a new
+    # quote is to steer AWAY from the current theme, but embedding similarity
+    # is dominated by whichever text is longer/more specific, so appending
+    # guidance to the theme buried it and just re-found the old quote's
+    # passage (verified live: "detachment from the world" alone retrieves
+    # Bahá'u'lláh's actual detachment passage; theme+guidance combined
+    # retrieved the original UHJ passage again instead).
+    query = req.guidance.strip() or theme
+    passages = retrieve(query, n_results=3) or []
+    if not passages:
+        raise HTTPException(
+            status_code=422,
+            detail="No matching passage found in the indexed writings for that guidance. "
+                   "Try different wording, or run scripts/ingest_texts.py if the index isn't built.",
+        )
+
+    candidate = passages[0]["text"].strip()
+    # Trim to a bookmark-length excerpt at a sentence boundary — matches the
+    # 120-250 char quote length the Scribe targets elsewhere in the pipeline.
+    if len(candidate) > 260:
+        cut = candidate.rfind(".", 0, 260)
+        candidate = candidate[:cut + 1] if cut > 60 else candidate[:260]
+    new_quote = candidate
+
+    instruction = (
+        f'The bookmark\'s printed quote has changed from "{old_quote}" to "{new_quote}" '
+        f"(source: {passages[0].get('source', '')}). Rewrite the description so it introduces "
+        "and reflects THIS quote instead of the old one"
+        + (f", per Sheraj's guidance: {req.guidance}" if req.guidance.strip() else "") + "."
+    )
+    listing = revise_listing_light(listing, [instruction], new_quote)
+    listing["bookmark_quote"] = new_quote  # force — light editor must never miss the new lock
+    listing = _sanitize_claims(listing)
+
+    try:
+        rendered = render_bookmark_pair(image_url, new_quote)
+        front_path, back_path = rendered["front_path"], rendered["back_path"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not re-render the bookmark: {e}")
+
+    try:
+        consult_transcript = json.loads(product.get("consultation") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        consult_transcript = []
+    old_review = json.loads(product.get("reviewer_scores") or "{}")
+    review = reviewer_score(theme, image_prompt, listing,
+                            consultation_transcript=consult_transcript,
+                            image_path=image_url, previous_review=old_review or None)
+
+    update_product(
+        product_id, title=listing.get("title", theme), listing_copy=json.dumps(listing),
+        reviewer_scores=json.dumps(review), front_image=front_path, back_image=back_path,
+    )
+    log_run(product_id, "librarian", "regenerate_quote", query[:200], new_quote[:200])
+
+    return {
+        "product_id": product_id,
+        "old_quote": old_quote, "new_quote": new_quote, "source": passages[0].get("source", ""),
+        "old_score": old_review.get("overall", 0), "new_score": review.get("overall", 0),
+        "listing": listing, "review": review,
+        "front_image_web": _web_image_path(front_path), "back_image_web": _web_image_path(back_path),
+    }
+
+
+class RegenerateImageRequest(BaseModel):
+    guidance: str   # required — e.g. "more vibrant colors, remove the lotus, add mountains"
+
+@router.post("/products/{product_id}/regenerate-image")
+def regenerate_image(product_id: str, req: RegenerateImageRequest):
+    """
+    Replace ONLY the artwork. Repaints from the original image prompt plus
+    fresh guidance, keeps the existing (locked) quote, re-renders front/back
+    on the new artwork, lightly adjusts the description for any visual
+    details that no longer apply, and re-scores. Always saves.
+    """
+    from agents.artist import generate_image
+    from agents.scribe import revise_listing_light, _sanitize_claims
+    from agents.compositor import render_bookmark_pair
+    from agents.reviewer import score as reviewer_score
+
+    if not req.guidance.strip():
+        raise HTTPException(status_code=422,
+                            detail="guidance is required — describe what should change about the artwork")
+
+    product = _load_product_or_404(product_id)
+    _require_bookmark(product)
+    listing = json.loads(product.get("listing_copy") or "{}")
+    old_image_prompt = product.get("image_prompt", "")
+    theme = product.get("theme") or listing.get("title", "")
+    quote = (listing.get("bookmark_quote") or "").strip()
+    if not quote:
+        raise HTTPException(status_code=422, detail="Listing has no bookmark_quote to overlay")
+
+    new_prompt = f"{old_image_prompt}\n\nIMPORTANT new direction from Sheraj: {req.guidance}"
+    try:
+        gen = generate_image(new_prompt, "2:3")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image generation error: {e}")
+    new_image_path = gen.get("image_url", "")
+
+    try:
+        rendered = render_bookmark_pair(new_image_path, quote)
+        front_path, back_path = rendered["front_path"], rendered["back_path"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not render the new artwork: {e}")
+
+    instruction = (
+        f"The artwork was repainted per this guidance: {req.guidance}. If the description names "
+        "specific visual details (motifs, colors, elements) that may no longer match the new "
+        "artwork, update them; otherwise leave the text as-is."
+    )
+    listing = revise_listing_light(listing, [instruction], quote)
+    listing["bookmark_quote"] = quote  # force — locked field
+    listing = _sanitize_claims(listing)
+
+    try:
+        consult_transcript = json.loads(product.get("consultation") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        consult_transcript = []
+    old_review = json.loads(product.get("reviewer_scores") or "{}")
+    review = reviewer_score(theme, new_prompt, listing,
+                            consultation_transcript=consult_transcript,
+                            image_path=new_image_path, previous_review=old_review or None)
+
+    update_product(
+        product_id, title=listing.get("title", theme), image_url=new_image_path,
+        image_prompt=new_prompt, listing_copy=json.dumps(listing),
+        reviewer_scores=json.dumps(review), front_image=front_path, back_image=back_path,
+    )
+    log_run(product_id, "artist", "regenerate_image", req.guidance[:200], new_image_path[:200])
+
+    return {
+        "product_id": product_id,
+        "old_score": old_review.get("overall", 0), "new_score": review.get("overall", 0),
+        "listing": listing, "review": review,
+        "image_web": _web_image_path(new_image_path),
+        "front_image_web": _web_image_path(front_path), "back_image_web": _web_image_path(back_path),
+    }
+
+
+class RegenerateAllRequest(BaseModel):
+    guidance: str = ""
+
+def _redo_product(product_id: str, req: RegenerateAllRequest, progress,
+                  on_turn=None, request_human_input=None) -> dict:
+    """
+    Full redo: re-run the ENTIRE pipeline (Librarian, Artist, consultation,
+    Scribe, Reviewer) from the theme, optionally steered by fresh guidance,
+    and overwrite the existing product's row in place — for when the whole
+    piece, not just one field, needs to change.
+
+    A "redo" is a single fresh pass, not a hunt for a target score — that's
+    what Improve/New quote/New artwork are for. max_attempts=1 means the
+    write→score→revise loop in _generate_bookmark never enters its revise
+    branch (attempt < max_attempts is immediately false), so whatever the
+    Reviewer scores this ONE new attempt is what gets saved, no matter what
+    it is. target_score is irrelevant with max_attempts=1 but a real float is
+    still required by _generate_bookmark's signature.
+    """
+    product = _load_product_or_404(product_id)
+    base_theme = product.get("theme") or json.loads(product.get("listing_copy") or "{}").get("title", "")
+    theme = f"{base_theme}\n\nNEW DIRECTION from Sheraj: {req.guidance}" if req.guidance.strip() else base_theme
+
+    progress("Redoing the whole piece from scratch...")
+    task_id = create_task(theme, "design", assigned_to="pipeline")
+
+    gen = _generate_bookmark(theme, task_id, target_score=10.0, max_attempts=1,
+                             aspect_ratio="2:3", progress=progress, on_turn=on_turn,
+                             request_human_input=request_human_input)
+    listing, review = gen["listing"], gen["review"]
+    image_path, image_prompt = gen["image_path"], gen["image_prompt"]
+
+    progress("Saving the redone product...")
+    update_product(
+        product_id, title=listing.get("title", base_theme), image_url=image_path,
+        listing_copy=json.dumps(listing), image_prompt=image_prompt, theme=base_theme,
+        reviewer_scores=json.dumps(review), consultation=json.dumps(gen["consultation"]),
+        target_reached=1 if gen["target_reached"] else 0, attempts=gen["attempts"],
+    )
+
+    finish = _render_and_publish(product_id, task_id, image_path, listing, progress)
+    update_task_status(task_id, "completed")
+
+    return {
+        "product_id": product_id, "task_id": task_id,
+        "listing": listing, "review": review,
+        "attempts": gen["attempts"], "target_reached": gen["target_reached"],
+        "consultation": gen["consultation"],
+        "image_web": _web_image_path(image_path),
+        "front_image_web": _web_image_path(finish["front_path"]),
+        "back_image_web": _web_image_path(finish["back_path"]),
+        "canva": finish["canva"],
+    }
+
+@router.post("/products/{product_id}/regenerate-all")
+def regenerate_all(product_id: str, req: RegenerateAllRequest):
+    """
+    Background job: redo the ENTIRE product (image, quote, listing, score)
+    from its theme plus fresh guidance, overwriting this product in place.
+    Returns {job_id} immediately; poll GET /pipeline/status/{job_id}.
+    """
+    _require_bookmark(_load_product_or_404(product_id))  # fail fast before starting the job
+    job_id = _start_job(
+        "redo-product",
+        lambda progress, on_turn, ask: _redo_product(product_id, req, progress, on_turn, ask),
+    )
+    return {"job_id": job_id, "status": "running"}
+# --- Canva Connect API endpoints ---
+
+@router.get("/canva/oauth/start")
+def canva_oauth_start():
+    """
+    Step 1 of Canva OAuth. Open this URL in a browser — it redirects to Canva
+    for one-time approval, then back to /canva/oauth/callback automatically.
+    """
+    from agents.canva import build_auth_url
+    from fastapi.responses import RedirectResponse, HTMLResponse
+    if not os.getenv("CANVA_CLIENT_ID"):
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>⚠️ Canva Client ID missing</h2>
+            <p>Add your Canva credentials to <strong>.env</strong> first:</p>
+            <ol>
+              <li>Go to <a href="https://www.canva.com/developers" target="_blank">www.canva.com/developers</a></li>
+              <li>Create an integration named <em>bahAI Workforce</em></li>
+              <li>Set redirect URL to: <code>http://localhost:8765/canva/oauth/callback</code></li>
+              <li>Copy the Client ID and Client Secret into your <code>.env</code> file</li>
+              <li>Restart the API, then revisit this page</li>
+            </ol>
+            </body></html>
+        """, status_code=400)
+    auth_url = build_auth_url()
+    return RedirectResponse(url=auth_url)
+
+
+@router.get("/canva/oauth/callback")
+def canva_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    """Canva redirects here after the user approves access. Exchanges code for tokens."""
+    from agents.canva import exchange_code
+    from fastapi.responses import HTMLResponse
+
+    if error:
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Canva authorisation failed</h2>
+            <p><strong>Error:</strong> {_esc(error)}</p>
+            <p><strong>Details:</strong> {_esc(error_description or 'No details provided')}</p>
+            <hr>
+            <p>If this says <em>invalid_scope</em>: go to your
+            <a href="https://www.canva.com/developers" target="_blank">Canva developer portal</a>
+            → bahAI Workforce → <strong>Scopes</strong> tab → enable all required scopes → save,
+            then <a href="/canva/oauth/start">try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+    if not code or not state:
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Missing authorisation code</h2>
+            <p>Canva did not return an authorisation code.
+            <a href="/canva/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+    try:
+        exchange_code(code, state)
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>✅ Canva connected!</h2>
+            <p>Your bahAI Workforce can now upload images and autofill your bookmark template.</p>
+            <p>You can close this tab. The pipeline will handle everything automatically from now on.</p>
+            </body></html>
+        """)
+    except Exception as e:
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Token exchange failed</h2>
+            <p>{_esc(e)}</p>
+            <p><a href="/canva/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+
+@router.get("/canva/status")
+def canva_status():
+    """Check whether Canva is authorised and show the template's fields."""
+    from agents.canva import is_authorised, get_template_fields, CANVA_TEMPLATE_ID
+    authorised = is_authorised()
+    result = {"authorised": authorised, "template_id": CANVA_TEMPLATE_ID}
+    if authorised and CANVA_TEMPLATE_ID:
+        try:
+            result["template_fields"] = get_template_fields()
+        except Exception as e:
+            result["template_fields_error"] = str(e)
+    return result
+
+
+@router.post("/canva/autofill")
+def canva_autofill(body: dict):
+    """Upload image to Canva and autofill the bookmark brand template. Returns design URL."""
+    from agents.canva import autofill_bookmark, CANVA_CLIENT_ID, CANVA_TEMPLATE_ID
+    image_path = body.get("image_path", "")
+    if not image_path:
+        raise HTTPException(status_code=422, detail="image_path is required")
+
+    # Fail gracefully when Canva isn't configured yet — pipeline continues
+    if not CANVA_CLIENT_ID or not CANVA_TEMPLATE_ID:
+        return {
+            "skipped": True,
+            "reason": "Canva not configured. Add CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and CANVA_TEMPLATE_ID to .env, then visit /canva/oauth/start.",
+            "design_url": None,
+        }
+
+    try:
+        result = autofill_bookmark(image_path)
+    except Exception as e:
+        return {"skipped": True, "reason": str(e), "design_url": None}
+
+    task_id = body.get("task_id")
+    if task_id:
+        log_run(task_id, "steward", "canva_autofill",
+                image_path[:200], result.get("design_url", "")[:200])
+    return result
+
+
+# --- Etsy Open API v3 endpoints ---
+
+@router.get("/etsy/oauth/start")
+def etsy_oauth_start():
+    """Step 1 of Etsy OAuth. Open in a browser — redirects to Etsy for one-time approval."""
+    from agents.etsy import build_auth_url
+    from fastapi.responses import RedirectResponse, HTMLResponse
+    if not os.getenv("ETSY_CLIENT_ID"):
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>⚠️ Etsy keystring missing</h2>
+            <p>Add your Etsy credentials to <strong>.env</strong> first:</p>
+            <ol>
+              <li>Go to <a href="https://www.etsy.com/developers/your-apps" target="_blank">etsy.com/developers/your-apps</a> and create an app</li>
+              <li>Set the callback URL to: <code>http://localhost:8765/etsy/oauth/callback</code></li>
+              <li>Copy the <em>Keystring</em> into <code>ETSY_CLIENT_ID</code> and the shared secret into <code>ETSY_CLIENT_SECRET</code></li>
+              <li>Add your numeric <code>ETSY_SHOP_ID</code> (from your shop URL or dashboard)</li>
+              <li>Restart the API, then revisit this page</li>
+            </ol>
+            </body></html>
+        """, status_code=400)
+    return RedirectResponse(url=build_auth_url())
+
+
+@router.get("/etsy/oauth/callback")
+def etsy_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    """Etsy redirects here after approval. Exchanges the code for tokens."""
+    from agents.etsy import exchange_code
+    from fastapi.responses import HTMLResponse
+
+    if error:
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Etsy authorisation failed</h2>
+            <p><strong>Error:</strong> {_esc(error)}</p>
+            <p><strong>Details:</strong> {_esc(error_description or 'No details provided')}</p>
+            <p><a href="/etsy/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+    if not code or not state:
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Missing authorisation code</h2>
+            <p>Etsy did not return an authorisation code. <a href="/etsy/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+    try:
+        exchange_code(code, state)
+        return HTMLResponse("""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>✅ Etsy connected!</h2>
+            <p>Your bahAI Workforce can now create draft listings in your shop.</p>
+            <p>You can close this tab.</p>
+            </body></html>
+        """)
+    except Exception as e:
+        return HTMLResponse(f"""
+            <html><body style="font-family:sans-serif;padding:2em">
+            <h2>❌ Token exchange failed</h2>
+            <p>{_esc(e)}</p>
+            <p><a href="/etsy/oauth/start">Try again</a>.</p>
+            </body></html>
+        """, status_code=400)
+
+
+@router.get("/etsy/status")
+def etsy_status():
+    """Check whether Etsy is configured and authorised."""
+    from agents.etsy import is_authorised, ETSY_CLIENT_ID, ETSY_SHOP_ID
+    return {
+        "configured": bool(ETSY_CLIENT_ID and ETSY_SHOP_ID),
+        "authorised": is_authorised(),
+        "shop_id": ETSY_SHOP_ID or None,
+    }
+
+
+@router.post("/etsy/publish")
+def etsy_publish(body: dict):
+    """
+    Create a DRAFT Etsy listing from a saved product (title, description, tags)
+    and upload the front bookmark image. Price is policy-set from
+    etsy.BOOKMARK_PRICE (env ETSY_BOOKMARK_PRICE) — never parsed from LLM
+    prose (rule 13). Nothing goes live — drafts are reviewed and activated by
+    Sheraj inside Etsy.
+    """
+    from agents.etsy import publish_draft_listing
+    from agents.state import get_agent_status
+    product_id = body.get("product_id", "")
+    if not product_id:
+        raise HTTPException(status_code=422, detail="product_id is required")
+
+    from agents.state import _connect
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Product not found")
+    product = dict(row)
+    _require_bookmark(product)
+
+    # Trust gate (principle 8 — trust must have a real consequence, not just a
+    # display number): publishing toward the outside world requires the
+    # Reviewer to have earned at least Human-on-the-loop (level 2). Below
+    # that, Sheraj must explicitly confirm — the dashboard turns this response
+    # into a confirm step and retries with confirm=true.
+    if not body.get("confirm"):
+        reviewer = get_agent_status("reviewer") or {}
+        level = int(reviewer.get("trust_level") or 0)
+        if level < 2:
+            level_name = reviewer.get("trust_level_name", "Shadow/Advisory")
+            return {
+                "requires_confirmation": True,
+                "trust_level": level,
+                "trust_level_name": level_name,
+                "reason": (f"The Reviewer's trust level is {level} ({level_name}) — below "
+                           "Human-on-the-loop (2). Its scores haven't yet earned unattended "
+                           "publishing, so please confirm this draft yourself."),
+            }
+
+    if product.get("etsy_listing_id"):
+        return {
+            "skipped": True,
+            "reason": f"Product already has Etsy listing {product['etsy_listing_id']}",
+            "etsy_listing_id": product["etsy_listing_id"],
+        }
+
+    try:
+        result = publish_draft_listing(product)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Etsy publish failed: {e}")
+
+    if result.get("skipped"):
+        return result
+
+    listing_id = str(result["listing_id"])
+    update_product(product_id, etsy_listing_id=listing_id, status="draft_on_etsy")
+    log_run(product.get("task_id") or product_id, "steward", "etsy_publish",
+            product.get("title", "")[:200], f"listing_id={listing_id}")
+    return {
+        "product_id": product_id,
+        "etsy_listing_id": listing_id,
+        "state": result.get("state", "draft"),
+        "url": result.get("url"),
+        "image_uploaded": result.get("image_uploaded", False),
+        "image_error": result.get("image_error"),
+    }
+class ImproveRequest(BaseModel):
+    target_score: float = 9.0
+    max_attempts: int = 2
+    human_notes: str = ""   # optional guidance from Sheraj, e.g. "make it more poetic"
+
+@router.post("/products/{product_id}/improve")
+def improve_product(product_id: str, req: ImproveRequest):
+    """
+    Re-run the revise → score cycle on an already-saved product without regenerating the image.
+    Useful for products saved as BEST EFFORT or to push a score closer to 9.
+    Updates the product in the database if the score improves.
+    """
+    from agents.state import _connect
+    from agents.reviewer import score as reviewer_score
+
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    product = dict(row)
+    _require_bookmark(product)
+    image_url    = product.get("image_url", "")
+    image_prompt = product.get("image_prompt", "")
+    theme        = product.get("theme", "")
+    listing_copy = product.get("listing_copy", "{}")
+    raw_scores   = product.get("reviewer_scores", "{}")
+
+    listing        = json.loads(listing_copy) if listing_copy else {}
+    current_review = json.loads(raw_scores) if raw_scores else {}
+    current_score  = current_review.get("overall", 0.0)
+
+    # Re-score under the SAME conditions that produced the saved score: the
+    # Reviewer must see the artwork and the consultation transcript. Without
+    # them the re-score is structurally lower (no Principle-4 evidence, no
+    # image), so 'improved' could never come true no matter how good the
+    # revision — the original Improve-button bug.
+    try:
+        consult_transcript = json.loads(product.get("consultation") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        consult_transcript = []
+    if not consult_transcript:
+        # Product saved before transcripts were persisted. The team DID consult
+        # during the original run — tell the Reviewer the record is missing so
+        # Principle 4 is judged neutrally instead of as an absence.
+        consult_transcript = [{
+            "agent": "System", "role": "note",
+            "message": "The team consulted in two rounds during the original pipeline run, "
+                       "but this product predates transcript storage. Score Principle 4 "
+                       "neutrally on the process that is documented — do not penalise the "
+                       "missing record itself.",
+        }]
+
+    # The bookmark quote is Librarian-verified — lock it through every revision
+    verified_quote = (listing.get("bookmark_quote") or "").strip()
+
+    if not theme and listing.get("title"):
+        theme = listing["title"]
+
+    extra_instructions = (
+        [f"Guidance from Sheraj (top priority): {req.human_notes}"] if req.human_notes else []
+    )
+
+    best_listing = listing
+    best_review  = current_review
+    # Forward chain: always revise the latest listing with the latest review
+    cur_listing, cur_review = listing, current_review
+    attempt      = 0
+
+    while best_review.get("overall", 0) < req.target_score and attempt < req.max_attempts:
+        attempt += 1
+        revised, revise_note, changes = _apply_review_feedback(
+            cur_listing, cur_review, verified_quote,
+            extra_instructions=extra_instructions,
+        )
+        extra_instructions = []  # human guidance is applied once, not re-applied every round
+        if revised == cur_listing:
+            break  # nothing actionable — don't burn a Reviewer call on an identical listing
+        new_review = reviewer_score(theme, image_prompt, revised,
+                                    consultation_transcript=consult_transcript,
+                                    image_path=image_url,
+                                    previous_review=cur_review or None,
+                                    changes_applied=changes)
+        log_run(product_id, "scribe",    f"improve_{attempt}", theme[:200],
+                f"{revise_note}: " + json.dumps(revised)[:350])
+        log_run(product_id, "reviewer",  f"improve_score_{attempt}", theme[:200],
+                json.dumps({"overall": new_review.get("overall")})[:200],
+                passed_review=new_review.get("passed", False))
+
+        cur_listing, cur_review = revised, new_review
+        if new_review.get("overall", 0) >= best_review.get("overall", 0):
+            # Ties go to the newer listing — it has incorporated more feedback
+            best_listing = revised
+            best_review  = new_review
+
+    # Persist when the score rose OR a same-score revision incorporated more
+    # feedback (tie-adopt) — otherwise the returned listing and the stored one
+    # would silently diverge.
+    improved = best_review.get("overall", 0) > current_score or best_listing != listing
+    if improved:
+        update_product(
+            product_id,
+            title=best_listing.get("title", theme),
+            listing_copy=json.dumps(best_listing),
+            reviewer_scores=json.dumps(best_review),
+            target_reached=1 if best_review.get("overall", 0) >= req.target_score else 0,
+        )
+
+    return {
+        "product_id":    product_id,
+        "improved":      improved,
+        "old_score":     current_score,
+        "new_score":     best_review.get("overall", current_score),
+        "target_reached": best_review.get("overall", 0) >= req.target_score,
+        "attempts":      attempt,
+        "listing":       best_listing,
+        "review":        best_review,
+    }

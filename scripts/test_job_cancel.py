@@ -37,6 +37,7 @@ colony.DB_PATH = state.DB_PATH
 state.init_db()
 
 import agents.api as api  # noqa: E402
+import agents.jobs as jobs  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(api.app, headers=_AUTH)
@@ -235,8 +236,11 @@ check("cancelling an unknown job is a 404",
 
 # Eviction LAST: it deliberately drops old jobs, so nothing after it may look
 # one up. Cancelled jobs must be evictable or the store grows for ever.
-_real_max = api._MAX_JOBS
-api._MAX_JOBS = 3
+# Patched on `jobs`, not `api`: _start_job (moved to agents/jobs.py) reads its
+# own module's _MAX_JOBS global, so reassigning the re-exported `api._MAX_JOBS`
+# alias would rebind only api's copy of the name and never be seen by it.
+_real_max = jobs._MAX_JOBS
+jobs._MAX_JOBS = 3
 for _ in range(6):
     dead = api._start_job("card-pipeline", _long_runner)
     time.sleep(0.15)
@@ -244,8 +248,8 @@ for _ in range(6):
     wait_for(dead, "cancelled", timeout=5)
 check("cancelled jobs are evicted like any other finished job — the store stays "
       "bounded no matter how many runs are started and stopped",
-      len(api.JOBS) <= api._MAX_JOBS + 1, f"{len(api.JOBS)} jobs held")
-api._MAX_JOBS = _real_max
+      len(api.JOBS) <= jobs._MAX_JOBS + 1, f"{len(api.JOBS)} jobs held")
+jobs._MAX_JOBS = _real_max
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
