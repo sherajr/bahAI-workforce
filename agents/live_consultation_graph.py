@@ -33,6 +33,7 @@ like every other pure function here.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -456,22 +457,64 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
         for node_id, node in nodes.items():
             if node["kind"] == "theme":
                 add_edge(_edge(ROOT_ID, node_id, HIERARCHY_RELATION, synthetic=True, inferred=False))
-        # Anything real with no theme parenting it (the model did not place it,
-        # or it predates this feature) hangs directly off the root rather than
-        # being dropped — an orphan is still shown, just not under a topic.
+        # Anything real with no theme parenting it (the model has not placed
+        # it yet, or it predates this feature) is grouped into a PROVISIONAL
+        # bucket by kind, rather than hanging off the root one at a time.
+        # **Corrected 2026-09-14 (a review reproduced the old behaviour
+        # directly): one real theme plus 50 unparented questions put all 51
+        # nodes on root's own row** — category fallback (below) only ever
+        # engaged when NO theme existed anywhere, so the moment a meeting had
+        # even one real theme, every OTHER orphan attached to root
+        # individually, with nothing bounding how many. A provisional bucket
+        # is exactly the fallback bucket mechanism already used when there is
+        # no theme at all, scoped down to just the items that need it — still
+        # marked `synthetic`/un-inferred and reported in `unplaced_count`, so
+        # the screen can say plainly that these items are not yet organised
+        # into a topic, without claiming the whole meeting is unstructured
+        # (section 1: "unparented items must receive useful provisional
+        # grouping even when some themes already exist").
+        unplaced_by_kind: dict[str, list[str]] = {}
         for node_id, node in nodes.items():
             if node_id == ROOT_ID or node["kind"] in ("theme", "bucket"):
                 continue
             if node_id not in contained:
-                add_edge(_edge(ROOT_ID, node_id, HIERARCHY_RELATION, synthetic=True, inferred=False))
+                unplaced_by_kind.setdefault(node["kind"], []).append(node_id)
+        for kind, member_ids in unplaced_by_kind.items():
+            bucket = _bucket_node(kind)
+            nodes[bucket["id"]] = bucket
+            add_edge(_edge(ROOT_ID, bucket["id"], HIERARCHY_RELATION, synthetic=True, inferred=False))
+            for member_id in member_ids:
+                add_edge(_edge(bucket["id"], member_id, HIERARCHY_RELATION,
+                              synthetic=True, inferred=False))
+        unplaced_count = sum(len(v) for v in unplaced_by_kind.values())
 
-    positions, new_positions = _layout(nodes, edges, views)
+    positions, raw_new_positions, branch_child_count = _layout(nodes, edges, views)
+
+    # A brand-new theme or bucket with more than a handful of children starts
+    # COLLAPSED, so the first view of a real meeting is a manageable overview
+    # rather than every card at once (section 3: "roughly 12-20 initially
+    # visible"). Only for a node with NO view row at all — a stale position
+    # being reflowed (below) must never silently re-collapse a branch a
+    # person deliberately expanded; that is a layout concern, not a content
+    # one, and the two must stay independent (rule 124).
+    new_positions: dict[str, tuple] = {}
+    for node_id, (x, y) in raw_new_positions.items():
+        default_collapsed = None
+        if node_id not in views and nodes[node_id]["kind"] in ("theme", "bucket") and \
+                branch_child_count.get(node_id, 0) > COLLAPSE_DEFAULT_THRESHOLD:
+            default_collapsed = True
+        new_positions[node_id] = (x, y, default_collapsed)
+
     for node_id, node in nodes.items():
         pos = positions.get(node_id, (0.0, 0.0))
-        view = views.get(node_id) or {}
+        view = views.get(node_id)
         node["x"], node["y"] = pos
-        node["pinned"] = bool(view.get("pinned"))
-        node["collapsed"] = bool(view.get("collapsed"))
+        node["pinned"] = bool(view.get("pinned")) if view else False
+        if view is not None:
+            node["collapsed"] = bool(view.get("collapsed"))
+        else:
+            entry = new_positions.get(node_id)
+            node["collapsed"] = bool(entry[2]) if entry and entry[2] is not None else False
 
     return {
         "schema_version": GRAPH_SCHEMA_VERSION,
@@ -487,8 +530,19 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
         # screen unrefreshed until something else happens to move (section 1).
         "record_revision": int(session.get("record_revision") or 0),
         "fallback": fallback,
+        # How many real items sit in a provisional (not-yet-themed) bucket
+        # even though this is NOT a whole-graph fallback — 0 whenever every
+        # real item already has a theme, and always 0 in fallback mode itself
+        # (where `fallback: true` already says so for the whole map).
+        "unplaced_count": unplaced_count if not fallback else 0,
         "nodes": list(nodes.values()),
         "edges": edges,
+        # Internal only — popped by the API layer before this dict reaches a
+        # client. Each value is `(x, y, default_collapsed)`: the third element
+        # is `None` unless this is a node's first-ever appearance AND it is a
+        # branch that should start collapsed, so the caller can persist the
+        # one-time default WITHOUT overwriting a stored `collapsed` a person
+        # already set on any node that merely needed its position reflowed.
         "new_positions": new_positions,
     }
 
@@ -497,98 +551,205 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
 
 _NODE_DX = 220.0
 _NODE_DY = 150.0
+# How many columns a branch's children wrap into before starting a new row.
+MAX_GRID_COLS = 5
+# A theme/bucket with more children than this starts COLLAPSED the first time
+# it appears (`build_graph`), so the initial view is a manageable overview.
+COLLAPSE_DEFAULT_THRESHOLD = 6
+# Bumped whenever the LAYOUT ALGORITHM changes shape, independent of
+# `GRAPH_SCHEMA_VERSION` (the payload's shape). A stored, unpinned position
+# computed under an earlier version is never trusted (`_usable_view`) — it is
+# recomputed exactly once, under the current algorithm, and re-stamped, which
+# is what lets an already-unreadable session improve the next time it is
+# opened rather than needing a migration script (section 4: "reflow obsolete
+# automatic positions safely... preserve explicit pins").
+LAYOUT_VERSION = 2
+
+
+def _grid_cols(n: int) -> int:
+    """How many columns a branch's N children wrap into.
+
+    Reproduced by a 2026-09-14 review: the layout this replaces gave every
+    node at a given DEPTH one shared, unbounded row — one theme plus 50
+    unparented questions put all 51 nodes on root's own row, 11,200px wide,
+    because nothing bounded how many could share it. Wrapping into a grid
+    whose width is capped at `MAX_GRID_COLS` node-widths bounds the diagram's
+    width regardless of how many children a branch has; the branch grows
+    DOWN instead (section 2: "use vertical space").
+    """
+    if n <= 1:
+        return 1
+    return max(1, min(MAX_GRID_COLS, math.ceil(math.sqrt(n))))
+
+
+def _usable_view(view: Optional[dict]) -> Optional[tuple[float, float]]:
+    """A stored x/y is trusted only when it is PINNED (a human placed it, and
+    a pin is honoured regardless of which layout scheme computed anything
+    else) or was computed under the CURRENT `LAYOUT_VERSION`. Anything else —
+    most importantly, every position this repo had ever computed before this
+    pass — is treated as though no row existed at all, so it is recomputed
+    once, under the new algorithm, and rewritten stamped with the current
+    version by the caller. This is the whole of what makes an ALREADY-OPEN,
+    already-unreadable session benefit immediately, with no migration step:
+    the graph is derived fresh on every read (rule 121), so the very next
+    read recomputes every unpinned position under the fixed algorithm.
+    """
+    if not view or view.get("x") is None or view.get("y") is None:
+        return None
+    if view.get("pinned") or int(view.get("layout_version") or 0) == LAYOUT_VERSION:
+        return (float(view["x"]), float(view["y"]))
+    return None
+
+
+def _free_slot(taken: list[float], step: float = _NODE_DX) -> float:
+    """The nearest-to-centre x that does not sit within one node-width of
+    anything already placed on this row.
+
+    Collision-aware: searches outward from centre for the nearest slot that
+    clears every already-taken position (by distance, not by exact match — a
+    human-dragged position is rarely a clean multiple of the grid), so the
+    same inputs always search the same candidates in the same order.
+    """
+    def clear(x: float) -> bool:
+        return all(abs(x - t) >= step for t in taken)
+    if clear(0.0):
+        return 0.0
+    n = 1
+    while n < 10000:          # a safety bound, never reached in practice
+        for candidate in (n * step, -n * step):
+            if clear(candidate):
+                return candidate
+        n += 1
+    return 0.0
 
 
 def _layout(nodes: dict[str, dict], edges: list[dict],
-           views: dict[str, dict]) -> tuple[dict[str, tuple], dict[str, tuple]]:
+           views: dict[str, dict]) -> tuple[dict[str, tuple], dict[str, tuple], dict[str, int]]:
     """
-    A position for every node. One already stored (dragged, or computed on an
-    earlier read) is kept EXACTLY — this is what keeps the map from reshuffling
-    itself on every poll (section 5: "do not recenter or reshuffle the whole
-    diagram on every update"). Only a node with no stored row gets a fresh
-    position, returned separately so the caller can persist it once.
+    A position for every node, plus each branch's child count (for the
+    collapse-by-default decision in `build_graph`).
+
+    The hierarchy is exactly two layers by construction (rule 122: `contains`
+    may only originate from a theme or the root, and may never target one) —
+    root, then branches (themes and provisional/fallback buckets), then
+    leaves. That fixed shape is what makes a much more compact layout
+    tractable without a general tree-layout library: branches are placed
+    left to right as before (they are typically few, and this was never the
+    reported defect), and each branch's OWN children are then wrapped into a
+    compact local grid — never sharing one global row with every other
+    branch's children (`_grid_cols`), which is the actual structural bug a
+    2026-09-14 review reproduced.
+
+    A position already stored (dragged, pinned, or computed on an earlier
+    read under the current `LAYOUT_VERSION`) is kept EXACTLY — this is what
+    keeps the map from reshuffling itself on every poll (section 5: "do not
+    recenter or reshuffle the whole diagram on every update"). Only a node
+    with no USABLE stored position (`_usable_view`) gets a fresh one,
+    returned separately so the caller can persist it once.
     """
     children: dict[str, list[str]] = {}
     for e in edges:
         if e["relation"] == HIERARCHY_RELATION:
             children.setdefault(e["from_id"], []).append(e["to_id"])
 
-    depth: dict[str, int] = {ROOT_ID: 0}
-    order: list[str] = [ROOT_ID]
-    frontier = [ROOT_ID]
-    seen = {ROOT_ID}
-    while frontier:
-        nxt = []
-        for parent in frontier:
-            for child in children.get(parent, []):
-                if child in seen:
-                    continue
-                seen.add(child)
-                depth[child] = depth[parent] + 1
-                order.append(child)
-                nxt.append(child)
-        frontier = nxt
-    # Anything unreachable through the hierarchy (should not happen — every real
-    # node gets a synthetic root edge above — but a defensive fallback keeps a
-    # stray node from vanishing off the page rather than crashing the render).
-    for node_id in nodes:
-        if node_id not in depth:
-            depth[node_id] = 1
-            order.append(node_id)
-
-    by_depth: dict[int, list[str]] = {}
-    for node_id in order:
-        by_depth.setdefault(depth[node_id], []).append(node_id)
-
-    def _free_slot(taken: list[float]) -> float:
-        """The nearest-to-centre x that does not sit within one node-width of
-        anything already placed at this level.
-
-        This is COLLISION-AWARE, unlike the index-based scheme it replaced: the
-        old version divided the row's width evenly by position among ALL nodes
-        at the level (existing and new together) and gave a brand-new node
-        whatever slot its index landed on — with no regard for where an
-        existing, already-positioned node (dragged, or placed on an earlier
-        read) actually sat. A first leaf kept at x=0 and a second one added
-        later landed at x=110 by that arithmetic: at this component's 200px
-        node width, a 90px overlap. Searching outward from centre for the
-        nearest slot that clears every already-taken position (by distance,
-        not by exact match — a human-dragged position is rarely a clean
-        multiple of the grid) fixes that while staying deterministic: the same
-        inputs always search the same candidates in the same order.
-        """
-        def clear(x: float) -> bool:
-            return all(abs(x - t) >= _NODE_DX for t in taken)
-        if clear(0.0):
-            return 0.0
-        n = 1
-        while n < 10000:          # a safety bound, never reached in practice
-            for candidate in (n * _NODE_DX, -n * _NODE_DX):
-                if clear(candidate):
-                    return candidate
-            n += 1
-        return 0.0
+    branch_ids = [b for b in children.get(ROOT_ID, []) if b in nodes]
+    reached = {ROOT_ID, *branch_ids}
+    for b in branch_ids:
+        reached.update(c for c in children.get(b, []) if c in nodes)
+    # Anything not reached from root through exactly two hierarchy hops should
+    # not happen — the tree is two layers by construction — but is collected
+    # here rather than trusted to exist, so a violated invariant degrades to
+    # an ungainly position instead of a crash.
+    stray_ids = [n for n in nodes if n not in reached]
 
     positions: dict[str, tuple] = {}
     new_positions: dict[str, tuple] = {}
-    for level, ids in sorted(by_depth.items()):
-        occupied_x: list[float] = []
+    branch_child_count: dict[str, int] = {b: len(children.get(b, [])) for b in branch_ids}
+
+    # ── Depth 1: branches ────────────────────────────────────────────────
+    branch_occupied: list[float] = []
+    branch_pending: list[str] = []
+    for b in branch_ids:
+        pos = _usable_view(views.get(b))
+        if pos:
+            positions[b] = pos
+            branch_occupied.append(pos[0])
+        else:
+            branch_pending.append(b)
+    for b in branch_pending:
+        x = _free_slot(branch_occupied)
+        branch_occupied.append(x)
+        positions[b] = (x, _NODE_DY)
+        new_positions[b] = (x, _NODE_DY)
+
+    # Root: centred over its branches, computed once like everything else —
+    # never recomputed once a usable position is stored, so this only moves
+    # root the one time an old, unversioned position is reflowed.
+    root_pos = _usable_view(views.get(ROOT_ID))
+    if root_pos:
+        positions[ROOT_ID] = root_pos
+    else:
+        if branch_ids:
+            xs = [positions[b][0] for b in branch_ids]
+            root_x = (min(xs) + max(xs)) / 2
+        else:
+            root_x = 0.0
+        positions[ROOT_ID] = (root_x, 0.0)
+        new_positions[ROOT_ID] = (root_x, 0.0)
+
+    # ── Depth 2: each branch's own children, a COMPACT local grid ───────────
+    # (section 2: "stack or wrap supporting cards into compact local
+    # rows/columns" — never one shared row across the whole graph.)
+    for b in branch_ids:
+        kids = [k for k in children.get(b, []) if k in nodes]
+        occupied: list[tuple[float, float]] = []
         pending: list[str] = []
-        for node_id in ids:
-            view = views.get(node_id)
-            if view and view.get("x") is not None and view.get("y") is not None:
-                x = float(view["x"])
-                positions[node_id] = (x, float(view["y"]))
-                occupied_x.append(x)
+        for kid in kids:
+            pos = _usable_view(views.get(kid))
+            if pos:
+                positions[kid] = pos
+                occupied.append(pos)
             else:
-                pending.append(node_id)
-        y = level * _NODE_DY
-        for node_id in pending:
-            x = _free_slot(occupied_x)
-            occupied_x.append(x)
-            positions[node_id] = (x, y)
-            new_positions[node_id] = (x, y)
-    return positions, new_positions
+                pending.append(kid)
+        if not pending:
+            continue
+        cols = _grid_cols(len(pending) + len(occupied))
+        anchor_x = positions[b][0]
+        top_y = positions[b][1] + _NODE_DY
+
+        def _clear(x: float, y: float) -> bool:
+            return all(abs(x - ox) >= _NODE_DX * 0.85 or abs(y - oy) >= _NODE_DY * 0.85
+                      for ox, oy in occupied)
+
+        idx = 0
+        bound = (len(pending) + len(occupied)) * 3 + cols * 4 + 20
+        for kid in pending:
+            while True:
+                row, col = divmod(idx, cols)
+                x = anchor_x + (col - (cols - 1) / 2) * _NODE_DX
+                y = top_y + row * _NODE_DY
+                idx += 1
+                if _clear(x, y) or idx > bound:   # bound: safety net, not reached in practice
+                    positions[kid] = (x, y)
+                    new_positions[kid] = (x, y)
+                    occupied.append((x, y))
+                    break
+
+    # ── Anything unreached (defensive only — see docstring) ─────────────────
+    if stray_ids:
+        flat_occupied = [positions[n][0] for n in positions]
+        for node_id in stray_ids:
+            pos = _usable_view(views.get(node_id))
+            if pos:
+                positions[node_id] = pos
+                flat_occupied.append(pos[0])
+                continue
+            x = _free_slot(flat_occupied)
+            flat_occupied.append(x)
+            positions[node_id] = (x, _NODE_DY * 2)
+            new_positions[node_id] = (x, _NODE_DY * 2)
+
+    return positions, new_positions, branch_child_count
 
 
 # ── Patch validation (section 3: "validate before applying, atomically") ────

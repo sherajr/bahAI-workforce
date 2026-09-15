@@ -4,7 +4,7 @@ This is a real meeting of people, heard in the browser. It is NOT
 `agents/consultation.py` (that is the product-pipeline team consult). They
 share only the word. Nothing in live_consultation_* imports consultation.py.
 
-Rules: docs/rules/live-consultation.md (73–110, 121–130).
+Rules: docs/rules/live-consultation.md (73–110, 121–132).
 Constitution: docs/consultation-constitution.md.
 Verify: python scripts/test_live_consultation.py
 
