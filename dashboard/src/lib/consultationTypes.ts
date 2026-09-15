@@ -95,6 +95,17 @@ export interface ConsultationCapabilities {
    *  rather than duplicated here (rule 87's reasoning: two copies of a legend
    *  disagree eventually). */
   graph_schema_version: number;
+  layout_version?: number;
+  /** Present on a backend that can nest topics and repair an existing map.
+   *  Missing on an older process — the UI must degrade clearly rather than
+   *  treating every 404 as the same failure. */
+  graph_capabilities?: {
+    nested_topics: boolean;
+    organize_whole_map: boolean;
+    organize_preview_map: boolean;
+    organize_repair: boolean;
+    layout_version: number;
+  };
   node_kinds: GraphNodeKindInfo[];
   edge_relations: GraphRelationInfo[];
 }
@@ -522,6 +533,10 @@ export interface GraphNode {
   y: number;
   pinned: boolean;
   collapsed: boolean;
+  parent_id?: string | null;
+  depth?: number;
+  width?: number;
+  height?: number;
 }
 
 export interface GraphEdge {
@@ -564,14 +579,37 @@ export interface ConceptGraph {
    *  items are not under one yet. 0 whenever nothing is unplaced, and always
    *  0 in fallback mode itself (which already says so for the whole map). */
   unplaced_count: number;
+  layout_version?: number;
+  pin_conflicts?: { node_id: string; other_id: string; reason: string }[];
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+export interface OrganizeTreeNode {
+  id: string;
+  kind?: string;
+  label: string;
+  children?: OrganizeTreeNode[];
 }
 
 export interface OrganizePreview {
   summary: string[];
   proposed_theme_count: number;
   proposed_edge_count: number;
+  accepted_edge_count?: number;
+  coverage?: {
+    items_considered?: number;
+    edges_proposed?: number;
+    edges_accepted?: number;
+    edges_dropped?: number;
+    items_placed?: number;
+    items_unplaced?: number;
+    truncated?: boolean;
+    new_themes?: number;
+  };
+  omissions?: string[];
+  conflicts?: string[];
+  proposed_tree?: OrganizeTreeNode[];
 }
 
 export interface RealtimeCredential {

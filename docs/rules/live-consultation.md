@@ -790,15 +790,18 @@ live_consultation_graph.py` owns the contract, the validation and the exports;
      gap 2026-09-14**: `contains` may only ever originate from a node of kind
      `theme` (or the synthetic root, which nothing external can target) — but
      the first version checked only that half. It never checked what `contains`
-     may TARGET, so "theme A contains theme B" and "theme A contains the root
-     itself" both passed every existing check (root and a theme both exist as
-     real node ids, so the existence check does not catch them) — a real
-     cycle, root → A → root. `contains_target_ok` is the other half: a
-     `contains` edge's target may never be a theme or the root, applied to
-     BOTH a human's `add_graph_edge`/`edit_graph_edge` and a model's proposal
-     in `validate_edges`. With both halves enforced, the tree really is two
-     layers, root → theme → item, and a cycle cannot be built — that claim is
-     now true rather than merely stated. Every other relation
+     may TARGET, so "theme A contains the root itself" passed every existing
+     check (root exists as a real node id, so the existence check does not
+     catch it) — a real cycle, root → A → root. **Revised 2026-09-14:** a
+     theme MAY contain another theme (a nested subtopic). Grouping is the
+     display hierarchy — "shown under this topic" — never "caused by",
+     "supported by" or "agreed to"; those remain cross-links. Each visible
+     concept has one primary display parent. Acyclicity is a real ancestor
+     walk (`contains_would_cycle`), applied to BOTH a human's
+     `add_graph_edge`/`edit_graph_edge` and a model's proposal in
+     `validate_edges`, along with: the target must exist, must not be the
+     root, a human-authored grouping is not silently overridden, and
+     rejection tombstones still hold. Every other relation
      (`supports`/`challenges`/`depends_on`/`addresses`/`leads_to`/`related_to`)
      is a cross-link between any two non-root nodes and never affects layout.
      `graph.validate_edges` then checks existence, self-loops, the FULL
@@ -1005,27 +1008,28 @@ Added 2026-09-14 (owner ask, with a screenshot of "Picking a class for Sean":
 the map's cards were tiny, the canvas one enormous horizontal row, the sidebar
 dozens of repeated "Contains" rows). Verify with `scripts/test_live_consultation.py`.
 
-131. **A branch's children wrap into a compact local grid — never one shared
-     row across the WHOLE graph — and an item with no theme is grouped
-     PROVISIONALLY rather than fanned out onto root one at a time.** Two
-     structural defects, reproduced directly against one theme plus 50
-     unparented questions: 51 nodes on one row, 11,200px wide, `fallback:
-     false`.
-     - **`_layout` gave every node at a given DEPTH one shared, unbounded
-       row.** A theme's children and every OTHER theme's children searched
-       the same 1-D line for a free slot, so a branch with many children
-       spread sideways without limit regardless of which topic they actually
-       belonged to. `_grid_cols` now wraps a branch's own children into a
-       grid capped at `MAX_GRID_COLS` node-widths — the branch grows DOWN
-       instead (section 2: "use vertical space") — computed per branch, in
-       branch-LOCAL coordinates anchored on that branch's own position, never
-       sharing a row with a sibling branch's children. The hierarchy is
-       exactly two layers by construction (rule 122: `contains` may only
-       originate from a theme or the root, and may never target one), which
-       is what makes this tractable without a general tree-layout library:
-       branches (few, and never the reported defect) are placed left to
-       right as before; only each branch's OWN leaves needed to stop sharing
-       one global row.
+131. **Layout follows the actual nested hierarchy and each subtree's bounds —
+     never one shared row, and never a per-branch grid that ignores its
+     neighbours — and an item with no theme is grouped PROVISIONALLY rather
+     than fanned out onto root one at a time.** Two structural defects,
+     reproduced directly against one theme plus 50 unparented questions: 51
+     nodes on one row, 11,200px wide, `fallback: false`. A third, reproduced
+     against three themes with nine children each after the local-grid pass:
+     15 pairs of children from different branches sat at identical
+     coordinates, because collision checks were only inside a branch.
+     - **`_layout` now packs the display tree.** Each visible subtree
+       reserves its own bounding box from estimated card size (variable
+       label height included); sibling subtrees are placed in separate
+       areas, wrapping within a group when there are many, never as one
+       global grid of every note. Collision checking covers the whole
+       visible layout and pinned obstacles. Nested subtopics (rule 122)
+       occupy space under their parent, not in the top-level row.
+       `LAYOUT_VERSION` is 3; an unpinned position not stamped with the
+       current version, or whose stored `parent_id` no longer matches, is
+       recomputed. Pins stay. Two overlapping pins are reported
+       (`pin_conflicts`), never silently moved. Collapsed branches occupy
+       only their own card in the overview — hidden descendants are parked
+       without widening sibling spacing.
      - **Category fallback (rule 127) only ever engaged when NO theme existed
        ANYWHERE.** The moment a meeting had even one real theme, `fallback`
        went false and every OTHER orphan — an item the model has not placed
@@ -1092,33 +1096,39 @@ dozens of repeated "Contains" rows). Verify with `scripts/test_live_consultation
      triggered by opening an archive (rule 126's neighbour: a paid call must
      stay behind an explicit press, full stop).
      - `reasoner.organize` is a NEW, narrower prompt — not the ordinary
-       per-turn analysis pass — shown the map's EXISTING themes and exactly
-       the items `_unplaced_from_graph` finds sitting in a provisional bucket
-       (rule 131), and restricted, in code, to returning only `{"add":
-       {"themes": [...]}, "edges": [...]}`: nothing it returns can reword a
-       fact, a decision or an action, or add a new leaf item, because
-       `OrganizeResult` strips anything else off the reply before it ever
-       reaches the API layer.
-     - **Preview holds a proposal; nothing is applied until a second,
-       explicit press.** `POST .../graph/organize/preview` makes the one paid
-       call, validates nothing new (the restricted patch is inert until
-       merged), and stores it — `sessions.pending_organize_json`, one row,
-       overwritten by the next preview — with a human-readable summary
-       (`_organize_summary`: "Place 'X' under 'Y'", "New topic: 'Z'") the
-       dashboard shows before anything commits. `POST .../apply` re-merges
-       the SAME stored patch against whatever the map says at that exact
-       moment — the identical rebase discipline `_run_analysis` already uses
-       for the ordinary pass (rule 104), reused rather than duplicated,
-       rather than trusting the preview's snapshot of the map to still be
-       current. `POST .../discard` throws it away. Applying always touches
-       `record_revision` (rule 128): a new theme or connection is new map
-       structure, part of what an approved export covers, whether or not the
-       specific edges changed.
-     - **Refuses out loud rather than doing nothing.** No API key configured,
-       or nothing left unplaced (every item already has a topic) — both a
-       409 with a plain reason, not a silently empty proposal. A reply that
-       cannot be read, or a call that cannot be reached, is reported the same
-       way `analyze` already reports it (rule 79's "bad output loses the
-       pass, never the meeting," applied to this pass too) — nothing is ever
-       half-applied.
+       per-turn analysis pass — shown the WHOLE current map: existing
+       topics and subtopics, already-placed items, cross-links, human
+       corrections, rejected connections, canonical decisions/actions, and
+       a bounded recent window of retained turns. Restricted, in code, to
+       returning only `{"add": {"themes": [...]}, "edges": [...],
+       "retire_themes": [...]}`: nothing it returns can reword a fact, a
+       decision or an action, or add a new leaf item. It may reparent a
+       misplaced item, nest a subtopic, consolidate redundant AI topics
+       (without losing their children or sources), propose supported
+       cross-links, and leave items honestly unplaced. Human-authored
+       groupings are not overridden; conflicts are listed for review.
+     - **Preview shows the validated proposed map, not raw model counts.**
+       `POST .../graph/organize/preview` makes the one paid call, dry-runs
+       merge + `validate_edges` (budget `MAX_ORGANIZE_EDGES`, reported if
+       truncated), and stores the accepted edges with a plain-language
+       summary, coverage (placed / dropped / still unplaced), omissions,
+       and a proposed outline. A preview that claims 50 placements must
+       not apply only 40. `POST .../apply` commits those same validated
+       edges against the live map (rule 104's rebase), with an
+       ID/revision guard: a material graph change since preview requires
+       a refreshed proposal. Unpinned automatic positions are then
+       reflowed; pins stay. `POST .../discard` throws the proposal away
+       and leaves the current map unchanged. Applying always touches
+       `record_revision` (rule 128). Duplicate preview calls from a
+       remount or a double-click reuse a still-valid held proposal rather
+       than paying twice.
+     - **Refuses out loud rather than doing nothing.** No API key
+       configured, or an empty map — a 409 with a plain reason. A fully
+       parented but badly organised map is NOT refused: that is the
+       repair this action exists to do. A reply that cannot be read, or a
+       call that cannot be reached, is reported the same way `analyze`
+       already reports it (rule 79). Capabilities advertise
+       `graph_capabilities.organize_whole_map` so an older backend 404s
+       as "this API process is out of date", not as a missing
+       consultation. Nothing is ever half-applied.
 

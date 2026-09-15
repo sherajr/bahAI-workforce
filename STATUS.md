@@ -31,12 +31,11 @@ See `AGENTS.md` for the full technical orientation — this file is just
 - The Video pipeline, the Colony (+ the Material World / nuclei), the project
   wallet, the API's owner gate, and the prompt-injection hold.
 - Live Consultation: the human-owned record (rules 94-99), request-ordering
-  survival (rules 100-110), and the concept graph (rules 121-132, commits
-  `fcd8307` + `509aeb0` + the concept-map READABILITY pass below -- the
-  layout no longer sprawls into one giant row, orphans get a provisional
-  topic bucket instead of fanning out onto root, and there's now a separate
-  "Organize ideas" action for repairing an old, unthemed session). Closeout
-  has not yet been used in a real meeting.
+  survival (rules 100-110), and the concept graph (rules 121-132). Nested
+  topics are allowed (theme may contain theme); layout v3 packs subtree
+  bounds instead of a per-branch grid; Organize ideas can repair an already
+  placed map and previews the validated proposal. Closeout has not yet been
+  used in a real meeting.
 - Agent orientation split (`ed21927`): root `AGENTS.md` is a thin routing
   table; the numbered rules live in `docs/rules/*.md`, split by subsystem.
 
@@ -65,6 +64,40 @@ Empty when nothing is in flight.
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-14 -- Grok 4.6 -- concept map nested layout + working Organize ideas
+
+The map was still an unreadable strip, and Organize ideas 404'd. Confirmed
+against current code before changing it: three themes with nine children each
+produced 15 pairs of cards at identical coordinates (collision checks were
+only inside a branch); `contains_target_ok` forbade nested topics; Organize
+ideas refused a fully-parented map and silently capped apply at 40 edges.
+The 404 was a stale managed API process -- the route was in the code
+(`259` routes, including organize) but the running server's OpenAPI had no
+organize paths (`222` paths). `/health` was 200 either way.
+
+What changed: nested display hierarchy with cycle checks and one
+primary parent (`agents/live_consultation_graph.py`, LAYOUT_VERSION 3);
+tree layout by subtree bounds; Organize ideas sees the whole map, dry-runs
+validation, reports coverage, and apply uses the same accepted edges
+(`MAX_ORGANIZE_EDGES` 200). Capabilities advertise
+`graph_capabilities.organize_whole_map` so an older backend 404s as "this
+API is out of date". Dashboard: readable first view centres on the question
+at zoom 0.8, Fit overview / Focus branch / search-opens-collapsed-path,
+Organize preview shows the validated proposal. Rules 122/131/132 revised
+in place (numbers unchanged).
+
+Verified: `python scripts/test_live_consultation.py` 925/925; `import
+agents.api`; `npx tsc --noEmit`; `npm run build` (Consultation chunk
+328.15KB, entry 247.89KB). Restarted the managed "bahAI Secretary API"
+task and confirmed organize routes + capabilities on the live process.
+Browser at 1366x768, 1920x1080, and 390px: archived "Expanding Nucleus"
+opens with the question readable (not a tiny strip); Organize ideas POST
+returns 200 with a validated preview (60 placements, leftovers reported);
+Discard left the map unchanged. First live model reply on that large
+session 502'd unreadable JSON; after compacting the organizer context it
+succeeded. Narrow viewport is cramped by the nav + Activity Log (dashboard
+chrome, not this tab's files).
 
 ### 2026-09-14 (latest) -- Claude Code (Sonnet 5) -- the concept map, made readable
 

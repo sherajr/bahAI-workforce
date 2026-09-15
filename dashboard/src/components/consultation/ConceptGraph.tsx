@@ -6,13 +6,14 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   ChevronDown, ChevronRight, Download, FileCode, Image as ImageIcon, LayoutGrid, List,
-  Loader2, Maximize2, Minimize2, Network, PanelRightClose, PanelRightOpen, Pencil, Pin,
-  Quote, Search, Sparkles, Trash2, X,
+  Loader2, LocateFixed, Maximize2, Minimize2, Network, PanelRightClose, PanelRightOpen, Pencil, Pin,
+  Quote, Scan, Search, Sparkles, Trash2, Undo2, X,
 } from "lucide-react";
-import { api } from "../../lib/api";
+import { api, recordActivity } from "../../lib/api";
 import type {
   ConceptGraph as ConceptGraphT, ConsultationAction, ConsultationCapabilities,
   ConsultationDecision, GraphEdge, GraphNode, GraphRelation, OrganizePreview,
+  OrganizeTreeNode,
 } from "../../lib/consultationTypes";
 import { Button, Card } from "../ui";
 
@@ -52,8 +53,7 @@ const OPEN_STATUSES = new Set([
 ]);
 
 /** For every theme/bucket branch: how many leaves it holds (through ANY
- *  depth of nested branches, though the hierarchy is two layers by
- *  construction so this is normally just its direct children), and how many
+ *  depth of nested branches), and how many
  *  of those still look unresolved — so a COLLAPSED card can say what is
  *  hidden inside it instead of only naming the topic. */
 function branchStats(graph: ConceptGraphT): Map<string, BranchStats> {
@@ -285,7 +285,7 @@ function Outline({ graph, onSelect, selectedId }: {
 
 function NodeDetail({
   node, graph, capabilities, sessionId, readOnly, decisions, actions, onClose, onChanged,
-  onShowSource, onSelect,
+  onShowSource, onSelect, onFocusBranch,
 }: {
   node: GraphNode;
   graph: ConceptGraphT;
@@ -298,6 +298,7 @@ function NodeDetail({
   onChanged: () => void;
   onShowSource: (ids: string[]) => void;
   onSelect: (id: string) => void;
+  onFocusBranch?: (id: string) => void;
 }) {
   const byId = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph.nodes]);
   const [draft, setDraft] = useState(node.detail);
@@ -395,6 +396,11 @@ function NodeDetail({
 
         {node.status_label && (
           <p className="text-xs text-slate-400">Status: <span className="text-slate-200">{node.status_label}</span></p>
+        )}
+        {(node.kind === "theme" || node.kind === "bucket") && onFocusBranch && (
+          <Button variant="secondary" className="text-xs" onClick={() => onFocusBranch(node.id)}>
+            <LocateFixed className="h-3.5 w-3.5" /> Focus branch
+          </Button>
         )}
 
         {node.kind === "decision" && decisionRow && (
@@ -635,8 +641,66 @@ function NodeDetail({
 // WHICH topic something sits under, so it previews before it commits, rather
 // than applying silently the way a drag or a click on Arrange does.
 
-function OrganizePanel({ sessionId, onClose, onChanged }: {
-  sessionId: string; onClose: () => void; onChanged: () => void;
+const previewInflight = new Map<string, Promise<OrganizePreview>>();
+
+function organizeErrorMessage(err: unknown, caps: ConsultationCapabilities): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const status = raw.match(/^(\d{3}):/)?.[1];
+  const detail = raw.replace(/^\d{3}:\s*/, "");
+  const wholeMap = caps.graph_capabilities?.organize_whole_map === true;
+  if (status === "404" && !wholeMap) {
+    return "The Secretary API running now does not include this map organisation. It is an older process. Restart it: stop whatever is listening on port 8765, then start the “bahAI Secretary API” scheduled task (or python -m uvicorn agents.api:app --host 127.0.0.1 --port 8765). Then try Organize ideas again.";
+  }
+  if (status === "404") {
+    return "This consultation could not be found, so nothing was organised.";
+  }
+  if (status === "409" && /already has a topic/i.test(detail) && !wholeMap) {
+    return "This backend can only place items that have no topic yet. Restart the Secretary API to reorganise a map that already has topics, or use Arrange map to only move cards.";
+  }
+  return detail || raw;
+}
+
+function loadOrganizePreview(sessionId: string): Promise<OrganizePreview> {
+  const existing = previewInflight.get(sessionId);
+  if (existing) return existing;
+  const pending = api.getPendingOrganizeGraph(sessionId).then((res) => {
+    if (res.pending && (res.pending.summary?.length || res.pending.proposed_tree)) {
+      return res.pending;
+    }
+    return api.previewOrganizeGraph(sessionId);
+  }).catch(() => api.previewOrganizeGraph(sessionId));
+  previewInflight.set(sessionId, pending);
+  pending.finally(() => {
+    window.setTimeout(() => {
+      if (previewInflight.get(sessionId) === pending) previewInflight.delete(sessionId);
+    }, 800);
+  });
+  return pending;
+}
+
+function ProposedTree({ nodes }: { nodes: OrganizeTreeNode[] }) {
+  return (
+    <ul className="space-y-0.5 text-sm text-slate-200">
+      {nodes.map((n) => (
+        <li key={n.id}>
+          <span className="text-slate-100">{n.label}</span>
+          {n.kind && n.kind !== "root" && (
+            <span className="ml-1.5 text-[10px] uppercase tracking-wide text-slate-500">{n.kind}</span>
+          )}
+          {n.children && n.children.length > 0 && (
+            <div className="ml-3 border-l border-slate-800 pl-2">
+              <ProposedTree nodes={n.children} />
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function OrganizePanel({ sessionId, capabilities, onClose, onChanged }: {
+  sessionId: string; capabilities: ConsultationCapabilities;
+  onClose: () => void; onChanged: () => void;
 }) {
   const [phase, setPhase] = useState<"loading" | "preview" | "applying" | "error">("loading");
   const [preview, setPreview] = useState<OrganizePreview | null>(null);
@@ -645,14 +709,16 @@ function OrganizePanel({ sessionId, onClose, onChanged }: {
   useEffect(() => {
     let cancelled = false;
     setPhase("loading");
-    api.previewOrganizeGraph(sessionId).then((p) => {
+    loadOrganizePreview(sessionId).then((p) => {
       if (cancelled) return;
       setPreview(p);
       setPhase("preview");
     }).catch((e: unknown) => {
       if (cancelled) return;
-      setError(e instanceof Error ? e.message : "Could not prepare a proposal.");
+      const message = organizeErrorMessage(e, capabilities);
+      setError(message);
       setPhase("error");
+      recordActivity(message, `/live-consultation/sessions/${sessionId}/graph/organize/preview`);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -665,8 +731,10 @@ function OrganizePanel({ sessionId, onClose, onChanged }: {
       onChanged();
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not apply the proposal.");
+      const message = organizeErrorMessage(e, capabilities);
+      setError(message);
       setPhase("error");
+      recordActivity(message, `/live-consultation/sessions/${sessionId}/graph/organize/apply`);
     }
   };
 
@@ -676,7 +744,7 @@ function OrganizePanel({ sessionId, onClose, onChanged }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
-      <Card className="flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden">
+      <Card className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden">
         <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
           <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-100">
             <Sparkles className="h-4 w-4 text-amber-300" /> Organize ideas
@@ -698,20 +766,48 @@ function OrganizePanel({ sessionId, onClose, onChanged }: {
           {(phase === "preview" || phase === "applying") && preview && (
             <>
               <p className="mb-2 text-xs text-slate-400">
-                Nothing is changed yet. This is what Organize ideas would do:
+                Nothing is changed yet. This is the validated proposal — not a raw model count:
               </p>
-              <ul className="space-y-1 text-sm text-slate-200">
+              {preview.coverage && (
+                <p className="mb-2 text-[11px] text-slate-500">
+                  {preview.accepted_edge_count ?? preview.coverage.edges_accepted ?? 0} connection(s) would apply
+                  {preview.coverage.edges_dropped ? ` · ${preview.coverage.edges_dropped} dropped` : ""}
+                  {preview.coverage.items_unplaced ? ` · ${preview.coverage.items_unplaced} still unplaced` : ""}
+                  {preview.coverage.truncated ? " · proposal was truncated — run again for the rest" : ""}
+                </p>
+              )}
+              <ul className="mb-3 space-y-1 text-sm text-slate-200">
                 {preview.summary.map((line, i) => <li key={i}>• {line}</li>)}
                 {preview.summary.length === 0 && (
                   <li className="text-slate-500">No confident placement was found.</li>
                 )}
               </ul>
+              {preview.omissions && preview.omissions.length > 0 && (
+                <div className="mb-3 rounded border border-amber-900/50 bg-amber-950/30 p-2 text-[11px] text-amber-200/90">
+                  {preview.omissions.map((n, i) => <p key={i}>{n}</p>)}
+                </div>
+              )}
+              {preview.conflicts && preview.conflicts.length > 0 && (
+                <div className="mb-3 rounded border border-rose-900/50 bg-rose-950/20 p-2 text-[11px] text-rose-200/90">
+                  {preview.conflicts.map((n, i) => <p key={i}>{n}</p>)}
+                </div>
+              )}
+              {preview.proposed_tree && preview.proposed_tree.length > 0 && (
+                <div>
+                  <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                    Proposed map
+                  </p>
+                  <ProposedTree nodes={preview.proposed_tree} />
+                </div>
+              )}
             </>
           )}
         </div>
         {(phase === "preview" || phase === "applying") && preview && (
           <div className="flex gap-2 border-t border-slate-800 px-4 py-3">
-            <Button className="text-xs" disabled={phase === "applying" || preview.summary.length === 0}
+            <Button className="text-xs" disabled={phase === "applying"
+                    || ((preview.accepted_edge_count ?? preview.summary.length) === 0
+                        && preview.proposed_theme_count === 0)}
                     onClick={() => void apply()}>
               {phase === "applying" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
               Apply
@@ -725,6 +821,41 @@ function OrganizePanel({ sessionId, onClose, onChanged }: {
       </Card>
     </div>
   );
+}
+
+const MIN_READABLE_ZOOM = 0.8;
+
+function overviewNodeIds(graph: ConceptGraphT): Set<string> {
+  // The first view is the question and a handful of topic branches — never
+  // every supporting card. Fitting the whole tree is what made dozens of
+  // notes unreadable.
+  const ids = new Set<string>(["root"]);
+  const root = graph.nodes.find((n) => n.id === "root");
+  const rx = root?.x ?? 0;
+  const tops = graph.nodes
+    .filter((n) => (n.kind === "theme" || n.kind === "bucket")
+      && (n.parent_id === "root" || n.depth === 1))
+    .sort((a, b) => Math.abs(a.x - rx) - Math.abs(b.x - rx));
+  const themes = tops.filter((n) => n.kind === "theme").slice(0, 8);
+  const buckets = tops.filter((n) => n.kind === "bucket").slice(0, 4);
+  for (const n of [...themes, ...buckets].slice(0, 12)) ids.add(n.id);
+  return ids;
+}
+
+function ancestorIds(graph: ConceptGraphT, id: string): string[] {
+  const parent = new Map<string, string>();
+  for (const e of graph.edges) {
+    if (e.relation === "contains") parent.set(e.to_id, e.from_id);
+  }
+  const path: string[] = [];
+  let cur = parent.get(id);
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    path.push(cur);
+    cur = parent.get(cur);
+  }
+  return path;
 }
 
 // ── The canvas ───────────────────────────────────────────────────────────
@@ -757,9 +888,10 @@ function Canvas({
   // gives the canvas the full width rather than always reserving 20rem
   // (section 3: "make the detail/legend panel collapsible rather than
   // permanently reserving a wide column when it is unnecessary").
-  const [showSidePanel, setShowSidePanel] = useState(!narrow);
+  const [showSidePanel, setShowSidePanel] = useState(false);
   const draggingRef = useRef(false);
   const lastSyncedRef = useRef<string>("");
+  const fittedSessionRef = useRef<string>("");
 
   useEffect(() => {
     const onResize = () => setNarrow(window.innerWidth < 640);
@@ -809,13 +941,84 @@ function Canvas({
 
   const selectedNode = selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null;
 
+  const fitOverview = useCallback(() => {
+    const live = rf.getNodes();
+    const root = live.find((n) => n.id === "root");
+    const duration = prefersReducedMotion() ? 0 : 300;
+    if (root) {
+      rf.setCenter(root.position.x + 100, root.position.y + 48,
+        { zoom: MIN_READABLE_ZOOM, duration });
+      return;
+    }
+    const ids = overviewNodeIds(graph);
+    const subset = live.filter((n) => ids.has(n.id));
+    void rf.fitView({
+      nodes: subset.length ? subset : live,
+      padding: 0.2,
+      minZoom: MIN_READABLE_ZOOM,
+      maxZoom: 1.05,
+      duration,
+    });
+  }, [graph, rf]);
+
+  useEffect(() => {
+    if (fittedSessionRef.current === sessionId) return;
+    if (nodes.length <= 1) return;
+    fittedSessionRef.current = sessionId;
+    const id = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => fitOverview());
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [sessionId, nodes.length, fitOverview]);
+
   const focusNode = useCallback((id: string) => {
     setSelectedId(id);
     setShowSidePanel(true);
     const n = graph.nodes.find((x) => x.id === id);
     if (n) rf.setCenter(n.x + 100, n.y + 32,
-      { zoom: 1, duration: prefersReducedMotion() ? 0 : 400 });
+      { zoom: Math.max(MIN_READABLE_ZOOM, 1), duration: prefersReducedMotion() ? 0 : 400 });
   }, [graph.nodes, rf]);
+
+  const revealAndFocus = useCallback(async (id: string) => {
+    const path = ancestorIds(graph, id);
+    const collapsedPath = path.filter((pid) => graph.nodes.find((n) => n.id === pid)?.collapsed);
+    for (const pid of collapsedPath) {
+      await api.setGraphNodeView(sessionId, pid, { collapsed: false });
+    }
+    if (collapsedPath.length) onChanged();
+    focusNode(id);
+  }, [graph, sessionId, onChanged, focusNode]);
+
+  const focusBranch = useCallback((id: string) => {
+    const n = graph.nodes.find((x) => x.id === id);
+    if (!n) return;
+    setSelectedId(id);
+    const descendant = new Set<string>([id]);
+    const kids = new Map<string, string[]>();
+    for (const e of graph.edges) {
+      if (e.relation !== "contains") continue;
+      const list = kids.get(e.from_id) ?? [];
+      list.push(e.to_id);
+      kids.set(e.from_id, list);
+    }
+    const stack = [id];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const c of kids.get(cur) ?? []) {
+        if (descendant.has(c)) continue;
+        descendant.add(c);
+        stack.push(c);
+      }
+    }
+    const subset = nodes.filter((fn) => descendant.has(fn.id) && !hidden.has(fn.id));
+    void rf.fitView({
+      nodes: subset.length ? subset : nodes.filter((fn) => fn.id === id),
+      padding: 0.3,
+      minZoom: MIN_READABLE_ZOOM,
+      maxZoom: 1.15,
+      duration: prefersReducedMotion() ? 0 : 300,
+    });
+  }, [graph, nodes, hidden, rf]);
 
   const arrange = useMutationRunner(() => api.arrangeConsultationGraph(sessionId), onChanged);
 
@@ -833,13 +1036,20 @@ function Canvas({
   return (
     <div className={`flex flex-col gap-2 ${expanded ? "fixed inset-0 z-40 bg-slate-950 p-4" : "h-full"}`}>
       {organizeOpen && (
-        <OrganizePanel sessionId={sessionId} onClose={() => setOrganizeOpen(false)}
-                       onChanged={onChanged} />
+        <OrganizePanel sessionId={sessionId} capabilities={capabilities}
+                       onClose={() => setOrganizeOpen(false)}
+                       onChanged={() => { fittedSessionRef.current = ""; onChanged(); }} />
       )}
       {graph.fallback && (
         <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400">
           No themes or connections have been drawn yet — grouped automatically by category
           for now.
+        </div>
+      )}
+      {graph.pin_conflicts && graph.pin_conflicts.length > 0 && (
+        <div className="rounded-lg border border-amber-900/60 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-200">
+          {graph.pin_conflicts.length} pinned card{graph.pin_conflicts.length === 1 ? "" : "s"} overlap.
+          Unpin one, or drag it, then Arrange map — pins are never moved for you.
         </div>
       )}
       {!graph.fallback && graph.unplaced_count > 0 && (
@@ -863,6 +1073,11 @@ function Canvas({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              const first = [...matches][0];
+              if (first) void revealAndFocus(first);
+            }}
             placeholder="Search the map…"
             aria-label="Search the concept map"
             className="w-full rounded-lg border border-slate-800 bg-slate-950 py-1.5 pl-8 pr-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-amber-400/50 focus:outline-none"
@@ -874,11 +1089,24 @@ function Canvas({
           {showOutline ? "Show map" : "Show outline"}
         </Button>
         {!showOutline && (
-          <Button variant="secondary" className="text-xs" disabled={arrange.busy}
-                  onClick={() => void arrange.run()}
-                  title="A deterministic, free reflow -- never an AI call">
-            <LayoutGrid className="h-3.5 w-3.5" /> Arrange map
-          </Button>
+          <>
+            <Button variant="secondary" className="text-xs" onClick={fitOverview}
+                    title="Fit the overview at a readable size — never shrink cards to fit every note">
+              <Scan className="h-3.5 w-3.5" /> Fit overview
+            </Button>
+            <Button variant="secondary" className="text-xs" onClick={fitOverview}
+                    title="Return to the overview of the question and its topics">
+              <Undo2 className="h-3.5 w-3.5" /> Back to overview
+            </Button>
+            <Button variant="secondary" className="text-xs" disabled={arrange.busy}
+                    onClick={() => {
+                      fittedSessionRef.current = "";
+                      void arrange.run();
+                    }}
+                    title="A deterministic, free reflow -- never an AI call">
+              <LayoutGrid className="h-3.5 w-3.5" /> Arrange map
+            </Button>
+          </>
         )}
         {!readOnly && (
           <Button variant="secondary" className="text-xs" onClick={() => setOrganizeOpen(true)}
@@ -918,7 +1146,7 @@ function Canvas({
               {graph.nodes.length <= 1 ? (
                 <EmptyState />
               ) : (
-                <Outline graph={graph} onSelect={focusNode} selectedId={selectedId} />
+                <Outline graph={graph} onSelect={(id) => void revealAndFocus(id)} selectedId={selectedId} />
               )}
             </div>
           ) : graph.nodes.length <= 1 ? (
@@ -930,6 +1158,12 @@ function Canvas({
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               nodeTypes={NODE_TYPES}
+              onInit={() => {
+                if (!rf.getNodes().some((n) => n.id === "root")) return;
+                if (fittedSessionRef.current === sessionId) return;
+                fittedSessionRef.current = sessionId;
+                fitOverview();
+              }}
               onNodeClick={(_, n) => { setSelectedId(n.id); setShowSidePanel(true); }}
               onPaneClick={() => setSelectedId(null)}
               onNodeDragStart={() => { draggingRef.current = true; }}
@@ -947,10 +1181,9 @@ function Canvas({
               }}
               nodesDraggable={!readOnly}
               nodesConnectable={false}
-              fitView
-              fitViewOptions={{ padding: 0.3, duration: prefersReducedMotion() ? 0 : 400 }}
               proOptions={{ hideAttribution: true }}
-              minZoom={0.15}
+              minZoom={0.4}
+              maxZoom={1.6}
             >
               <Background gap={20} color="#1e293b" />
               <Controls showInteractive={false} />
@@ -978,7 +1211,8 @@ function Canvas({
                 onClose={() => setSelectedId(null)}
                 onChanged={onChanged}
                 onShowSource={onShowSource}
-                onSelect={focusNode}
+                onSelect={(id) => void revealAndFocus(id)}
+                onFocusBranch={focusBranch}
               />
             ) : (
               <Legend capabilities={capabilities} graph={graph} />

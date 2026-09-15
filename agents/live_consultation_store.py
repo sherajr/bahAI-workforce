@@ -356,6 +356,7 @@ def init_db(db_path: Path | str | None = None) -> None:
                 -- unpinned one is recomputed once and re-stamped the next
                 -- time this session's graph is read.
                 layout_version INTEGER NOT NULL DEFAULT 0,
+                parent_id TEXT,
                 updated_at TEXT DEFAULT (datetime('now', 'localtime')),
                 PRIMARY KEY (session_id, node_id)
             );
@@ -519,6 +520,10 @@ def init_db(db_path: Path | str | None = None) -> None:
                                       "pending_organize_json TEXT"),
             ("pending_organize_created_at", "ALTER TABLE sessions ADD COLUMN "
                                             "pending_organize_created_at TEXT"),
+            # Display parent at the time this position was computed, so
+            # reparenting an unpinned card invalidates the old coordinate
+            # (rule 131's follow-up: nested topics + reflow).
+            ("parent_id", "ALTER TABLE graph_node_view ADD COLUMN parent_id TEXT"),
         ):
             try:
                 conn.execute(ddl)
@@ -2306,7 +2311,8 @@ def list_node_views(session_id: str, db_path: Path | str | None = None) -> dict[
 def set_node_view(session_id: str, node_id: str, db_path: Path | str | None = None,
                   x: float | None = None, y: float | None = None,
                   pinned: bool | None = None, collapsed: bool | None = None,
-                  layout_version: int | None = None) -> dict:
+                  layout_version: int | None = None,
+                  parent_id: str | None = None) -> dict:
     """
     Save where a node sits, or that its branch is collapsed. Pure layout: this
     never touches `state_revision` or `record_revision`, so dragging a node or
@@ -2326,22 +2332,24 @@ def set_node_view(session_id: str, node_id: str, db_path: Path | str | None = No
             "SELECT * FROM graph_node_view WHERE session_id = ? AND node_id = ?",
             (session_id, node_id)).fetchone()
         cur = dict(existing) if existing else {"x": None, "y": None, "pinned": 0, "collapsed": 0,
-                                               "layout_version": 0}
+                                               "layout_version": 0, "parent_id": None}
         if x is not None: cur["x"] = x
         if y is not None: cur["y"] = y
         if pinned is not None: cur["pinned"] = 1 if pinned else 0
         if collapsed is not None: cur["collapsed"] = 1 if collapsed else 0
         if layout_version is not None: cur["layout_version"] = int(layout_version)
+        if parent_id is not None: cur["parent_id"] = parent_id
         conn.execute(
             """INSERT INTO graph_node_view (session_id, node_id, x, y, pinned, collapsed,
-                                            layout_version, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?)
+                                            layout_version, parent_id, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(session_id, node_id) DO UPDATE SET
                    x = excluded.x, y = excluded.y, pinned = excluded.pinned,
                    collapsed = excluded.collapsed, layout_version = excluded.layout_version,
+                   parent_id = excluded.parent_id,
                    updated_at = excluded.updated_at""",
             (session_id, node_id, cur["x"], cur["y"], cur["pinned"], cur["collapsed"],
-             cur["layout_version"], _now()))
+             cur["layout_version"], cur.get("parent_id"), _now()))
         conn.execute("UPDATE sessions SET graph_view_revision = graph_view_revision + 1 WHERE id = ?",
                      (session_id,))
         conn.commit()
@@ -2349,6 +2357,45 @@ def set_node_view(session_id: str, node_id: str, db_path: Path | str | None = No
             "SELECT * FROM graph_node_view WHERE session_id = ? AND node_id = ?",
             (session_id, node_id)).fetchone()
     return dict(row)
+
+
+def stale_unpinned_positions(session_id: str, db_path: Path | str | None = None) -> int:
+    """Mark every unpinned stored position as obsolete without touching pins
+    or collapsed flags. The next `build_graph` recomputes them under the
+    current layout (collapse/expand and Organize ideas both need this)."""
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE graph_node_view SET layout_version = 0 WHERE session_id = ? AND pinned = 0",
+            (session_id,))
+        conn.execute("UPDATE sessions SET graph_view_revision = graph_view_revision + 1 WHERE id = ?",
+                     (session_id,))
+        conn.commit()
+    return cur.rowcount
+
+
+def drop_inferred_contains(session_id: str, to_id: str, keep_from_id: str | None = None,
+                           db_path: Path | str | None = None) -> int:
+    """Remove inferred (not human-edited) `contains` edges targeting `to_id`.
+
+    This is a MOVE, not a rejection: no tombstone is written, so a later
+    human or organize pass can still place the item under the old topic.
+    `keep_from_id`, when given, is left in place.
+    """
+    with _connect(db_path) as conn:
+        if keep_from_id:
+            cur = conn.execute(
+                """DELETE FROM graph_edges
+                    WHERE session_id = ? AND to_id = ? AND relation = 'contains'
+                      AND human_edited = 0 AND from_id != ?""",
+                (session_id, to_id, keep_from_id))
+        else:
+            cur = conn.execute(
+                """DELETE FROM graph_edges
+                    WHERE session_id = ? AND to_id = ? AND relation = 'contains'
+                      AND human_edited = 0""",
+                (session_id, to_id))
+        conn.commit()
+    return cur.rowcount
 
 
 def clear_unpinned_node_views(session_id: str, db_path: Path | str | None = None) -> int:
@@ -2374,9 +2421,11 @@ def clear_unpinned_node_views(session_id: str, db_path: Path | str | None = None
 # anything except those three endpoints.
 
 def set_pending_organize(session_id: str, patch: dict, base_revision: int, summary: list[str],
-                         db_path: Path | str | None = None) -> None:
-    payload = json.dumps({"patch": patch, "base_revision": base_revision, "summary": summary},
-                         ensure_ascii=False)
+                         db_path: Path | str | None = None, extra: Optional[dict] = None) -> None:
+    payload = {"patch": patch, "base_revision": base_revision, "summary": summary}
+    if extra:
+        payload.update(extra)
+    payload = json.dumps(payload, ensure_ascii=False)
     with _connect(db_path) as conn:
         conn.execute(
             "UPDATE sessions SET pending_organize_json = ?, pending_organize_created_at = ? "

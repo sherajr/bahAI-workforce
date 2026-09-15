@@ -71,6 +71,17 @@ export function getActivityLog(): ActivityEntry[] {
   return activityLog;
 }
 
+export function recordActivity(detail: string, path = "", status: ActivityEntry["status"] = "ERR") {
+  pushActivity({
+    ts: new Date().toLocaleTimeString(),
+    method: "",
+    path,
+    status,
+    ms: 0,
+    detail,
+  });
+}
+
 // ── Fetch helpers ─────────────────────────────────────────────────────────────
 
 async function request<T>(
@@ -1416,8 +1427,11 @@ export const api = {
    *  it. Restricted server-side to themes and connections only. */
   previewOrganizeGraph: (id: string) =>
     post<OrganizePreview>(`/live-consultation/sessions/${id}/graph/organize/preview`, {}),
+  getPendingOrganizeGraph: (id: string) =>
+    get<{ pending: OrganizePreview | null }>(
+      `/live-consultation/sessions/${id}/graph/organize/pending`),
   applyOrganizeGraph: (id: string) =>
-    post<{ graph: ConceptGraph; notes: string[] }>(
+    post<{ graph: ConceptGraph; notes: string[]; coverage?: OrganizePreview["coverage"] }>(
       `/live-consultation/sessions/${id}/graph/organize/apply`, {}),
   discardOrganizeGraph: (id: string) =>
     post<{ discarded: boolean }>(`/live-consultation/sessions/${id}/graph/organize/discard`, {}),
