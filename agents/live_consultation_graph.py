@@ -25,10 +25,11 @@ person) proposed.
 Layout is likewise derived, but with one deliberate exception: a node's position
 is computed ONCE (the first time it appears with no stored view row) and then
 persisted so the map does not reshuffle itself on every poll -- "position new
-material locally," never recenter the whole diagram. The endpoint layer owns that
-persistence (`live_consultation_api.py`); this module only computes positions
-and never writes to the store, so it can be exercised in the test suite exactly
-like every other pure function here.
+material locally," never recenter the whole diagram. Nested topics occupy
+subtree bounds; collapsed branches do not reserve space for hidden children.
+The endpoint layer owns persistence (`live_consultation_api.py`); this module
+only computes positions and never writes to the store, so it can be exercised
+in the test suite exactly like every other pure function here.
 """
 
 from __future__ import annotations
@@ -39,7 +40,13 @@ from xml.sax.saxutils import escape as _xml_escape
 
 from agents.live_consultation import ITEM_LISTS
 
-GRAPH_SCHEMA_VERSION = 1
+GRAPH_SCHEMA_VERSION = 2
+GRAPH_CAPABILITIES = {
+    "nested_topics": True,
+    "organize_whole_map": True,
+    "organize_preview_map": True,
+    "organize_repair": True,
+}
 
 ROOT_ID = "root"
 
@@ -89,13 +96,17 @@ NODE_KIND_META: dict[str, dict] = {
 }
 
 # The hierarchy relation is singular and load-bearing: it is the ONLY relation
-# that may form the tree, and only a theme (or the synthetic root) may be its
-# source. That single constraint is what keeps the hierarchy acyclic without any
-# general cycle check — root -> theme -> item is two layers, and an item can
-# never itself be a "contains" source, so a cycle cannot be constructed.
+# that may form the DISPLAY TREE. Grouping means "shown under this topic", never
+# "caused by", "supported by" or "agreed to" — those are CROSS_RELATIONS.
+# A theme may contain another theme (a subtopic). Cycles, a second primary
+# parent, containing the root, and an item containing anything are still
+# refused; acyclicity is now a real walk, not "two layers by construction".
 HIERARCHY_RELATION = "contains"
 CROSS_RELATIONS = ("supports", "challenges", "depends_on", "addresses", "leads_to", "related_to")
 EDGE_RELATIONS = (HIERARCHY_RELATION, *CROSS_RELATIONS)
+# Who may be the "from" of a stored `contains` edge. The synthetic root and
+# fallback buckets also parent nodes, but only `build_graph` mints those.
+CONTAINS_SOURCES = ("theme",)
 
 RELATION_META: dict[str, dict] = {
     "contains":    {"label": "Contains",     "style": "solid",  "hierarchy": True},
@@ -121,7 +132,17 @@ MAX_EDGE_LABEL_CHARS = 80
 # reasoning as `reasoner.LIST_PROMPT_CAP`: an unbounded graph is an unbounded
 # prompt AND an unbounded page to render.
 MAX_EDGES_PER_PATCH = 40
+# Organize ideas looks at the WHOLE map, so it is allowed a larger bounded
+# budget than a per-turn analysis pass. Truncation is reported, never silent.
+MAX_ORGANIZE_EDGES = 200
 MAX_STORED_EDGES = 600
+# Canvas cards are 200px wide (`ConceptGraph.tsx`). Height varies with the
+# label; these are the collision box used by layout and by exports.
+NODE_W = 200.0
+NODE_MIN_H = 72.0
+H_GAP = 28.0
+V_GAP = 44.0
+MAX_ROW_CHILDREN = 4
 
 
 def _short_label(text: str, limit: int = MAX_LABEL_CHARS) -> str:
@@ -360,6 +381,127 @@ def _edge(from_id: str, to_id: str, relation: str, label: str = "", inferred: bo
     }
 
 
+def contains_source_ok(from_id: str, node_kind: dict[str, str]) -> bool:
+    """A stored `contains` edge may only originate from a theme.
+
+    Root and fallback buckets also parent nodes, but only `build_graph` mints
+    those synthetic edges — a model or a human drawing a connection cannot
+    target the question as a container, and cannot use a category bucket as
+    one either.
+    """
+    return node_kind.get(from_id) in CONTAINS_SOURCES
+
+
+def contains_target_ok(to_id: str, node_kind: dict[str, str]) -> bool:
+    """Whether `to_id` may legally be CONTAINED.
+
+    Revised (rule 122): a theme MAY contain another theme (a nested subtopic).
+    It still may never contain the question itself or a synthetic bucket.
+    Cycles are a separate check (`contains_would_cycle`); this only names
+    what kinds are legal endpoints.
+    """
+    if to_id == ROOT_ID:
+        return False
+    kind = node_kind.get(to_id)
+    if kind in ("root", "bucket", None):
+        return False
+    return True
+
+
+def contains_would_cycle(from_id: str, to_id: str, parent_of: dict[str, str]) -> bool:
+    """True if making `from_id` the display parent of `to_id` would cycle.
+
+    `parent_of` maps child -> current primary parent. Walking UP from
+    `from_id` and hitting `to_id` means `to_id` is already an ancestor of
+    `from_id` (or is `from_id` itself).
+    """
+    if not from_id or not to_id or from_id == to_id:
+        return True
+    cur = from_id
+    seen: set[str] = set()
+    while cur:
+        if cur == to_id:
+            return True
+        if cur in seen:
+            return True
+        seen.add(cur)
+        cur = parent_of.get(cur)
+    return False
+
+
+def _rank_contains(edge: dict) -> tuple:
+    """Prefer a human's grouping, then a stored (non-synthetic) one."""
+    return (
+        0 if edge.get("human_edited") else 1,
+        0 if not edge.get("synthetic") else 1,
+        str(edge.get("id") or ""),
+    )
+
+
+def primary_parent_map(nodes: dict[str, dict], edges: list[dict]) -> tuple[dict[str, str], list[dict]]:
+    """Each visible concept has ONE primary display parent.
+
+    Extra `contains` edges (a second topic claiming the same item) are not
+    used for layout; the caller keeps them on the graph as cross-links so
+    the grouping is not silently dropped. Cycles in the stored set are
+    broken by dropping the lower-ranked edge, never by inventing a parent.
+    """
+    candidates: dict[str, list[dict]] = {}
+    for e in edges:
+        if e.get("relation") != HIERARCHY_RELATION:
+            continue
+        if e.get("from_id") not in nodes or e.get("to_id") not in nodes:
+            continue
+        candidates.setdefault(e["to_id"], []).append(e)
+
+    parent_of: dict[str, str] = {}
+    extras: list[dict] = []
+    for to_id, opts in candidates.items():
+        opts_sorted = sorted(opts, key=_rank_contains)
+        chosen = None
+        for edge in opts_sorted:
+            if contains_would_cycle(edge["from_id"], to_id, parent_of):
+                extras.append(edge)
+                continue
+            if chosen is None:
+                chosen = edge
+            else:
+                extras.append(edge)
+        if chosen is not None:
+            parent_of[to_id] = chosen["from_id"]
+    return parent_of, extras
+
+
+def children_from_parents(parent_of: dict[str, str]) -> dict[str, list[str]]:
+    children: dict[str, list[str]] = {}
+    for child, parent in parent_of.items():
+        children.setdefault(parent, []).append(child)
+    for parent, kids in children.items():
+        kids.sort()
+    return children
+
+
+def _estimate_size(node: dict) -> tuple[float, float]:
+    """A collision box matching the on-screen card, including wrapped labels."""
+    label = (node.get("label") or node.get("detail") or "").strip()
+    chars = max(1, min(MAX_LABEL_CHARS, len(label)))
+    lines = max(1, min(3, (chars + 25) // 26))
+    height = 32.0 + lines * 18.0 + 10.0
+    if node.get("status_label"):
+        height += 14.0
+    if node.get("kind") in ("theme", "bucket") and node.get("collapsed"):
+        height += 6.0
+    return NODE_W, max(NODE_MIN_H, height)
+
+
+def _boxes_overlap(a: tuple[float, float, float, float],
+                   b: tuple[float, float, float, float], gap: float = 8.0) -> bool:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return not (ax + aw + gap <= bx or bx + bw + gap <= ax
+                or ay + ah + gap <= by or by + bh + gap <= ay)
+
+
 # ── Assembly ─────────────────────────────────────────────────────────────────
 
 def build_graph(session: dict, state: dict, decisions: list[dict], actions: list[dict],
@@ -431,8 +573,6 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
                       source_turn_ids=row.get("source_turn_ids") or [],
                       edge_id=row["id"]))
 
-    contained = {e["to_id"] for e in edges if e["relation"] == HIERARCHY_RELATION}
-
     if fallback:
         # No themes and no extracted relationships at all — an old session, or
         # one still in its first few turns. Group by CATEGORY so the map is
@@ -452,32 +592,24 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
                 add_edge(_edge(bucket["id"], member["id"], HIERARCHY_RELATION,
                               synthetic=True, inferred=False))
     else:
-        # Every theme is a top-level branch of the root, always — a theme does
-        # not need to be told it belongs to the meeting.
+        # Nested topics: only UNPARENTED themes hang off the root. A theme
+        # that already has a `contains` parent is a subtopic, not a second
+        # top-level branch — the previous code attached EVERY theme to root,
+        # which made nested structure impossible even if a contains edge
+        # between themes had been stored.
+        parent_so_far, _ = primary_parent_map(nodes, edges)
         for node_id, node in nodes.items():
-            if node["kind"] == "theme":
+            if node["kind"] == "theme" and node_id not in parent_so_far:
                 add_edge(_edge(ROOT_ID, node_id, HIERARCHY_RELATION, synthetic=True, inferred=False))
         # Anything real with no theme parenting it (the model has not placed
         # it yet, or it predates this feature) is grouped into a PROVISIONAL
         # bucket by kind, rather than hanging off the root one at a time.
-        # **Corrected 2026-09-14 (a review reproduced the old behaviour
-        # directly): one real theme plus 50 unparented questions put all 51
-        # nodes on root's own row** — category fallback (below) only ever
-        # engaged when NO theme existed anywhere, so the moment a meeting had
-        # even one real theme, every OTHER orphan attached to root
-        # individually, with nothing bounding how many. A provisional bucket
-        # is exactly the fallback bucket mechanism already used when there is
-        # no theme at all, scoped down to just the items that need it — still
-        # marked `synthetic`/un-inferred and reported in `unplaced_count`, so
-        # the screen can say plainly that these items are not yet organised
-        # into a topic, without claiming the whole meeting is unstructured
-        # (section 1: "unparented items must receive useful provisional
-        # grouping even when some themes already exist").
+        parent_so_far, _ = primary_parent_map(nodes, edges)
         unplaced_by_kind: dict[str, list[str]] = {}
         for node_id, node in nodes.items():
             if node_id == ROOT_ID or node["kind"] in ("theme", "bucket"):
                 continue
-            if node_id not in contained:
+            if node_id not in parent_so_far:
                 unplaced_by_kind.setdefault(node["kind"], []).append(node_id)
         for kind, member_ids in unplaced_by_kind.items():
             bucket = _bucket_node(kind)
@@ -488,21 +620,39 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
                               synthetic=True, inferred=False))
         unplaced_count = sum(len(v) for v in unplaced_by_kind.values())
 
-    positions, raw_new_positions, branch_child_count = _layout(nodes, edges, views)
+    parent_of, extra_contains = primary_parent_map(nodes, edges)
+    # Extra `contains` edges are a second grouping claim. They must not draw
+    # a second tree parent (that would duplicate the card or hide it). Show
+    # them as cross-links so the claim remains visible in the details view.
+    extra_ids = {id(e) for e in extra_contains}
+    for e in edges:
+        if e in extra_contains or id(e) in extra_ids:
+            e["kind"] = "cross"
+            if not e.get("label"):
+                e["label"] = "also under"
 
-    # A brand-new theme or bucket with more than a handful of children starts
-    # COLLAPSED, so the first view of a real meeting is a manageable overview
-    # rather than every card at once (section 3: "roughly 12-20 initially
-    # visible"). Only for a node with NO view row at all — a stale position
-    # being reflowed (below) must never silently re-collapse a branch a
-    # person deliberately expanded; that is a layout concern, not a content
-    # one, and the two must stay independent (rule 124).
+    children = children_from_parents(parent_of)
+    branch_child_count = {nid: len(children.get(nid, [])) for nid in nodes}
+
+    # Default-collapse large NEW branches BEFORE layout so the first view is
+    # an overview (hidden descendants do not reserve sibling space).
+    working_views = dict(views)
+    default_collapsed_for: dict[str, bool] = {}
+    for node_id, node in nodes.items():
+        if node_id in views:
+            continue
+        if node["kind"] in ("theme", "bucket") and \
+                branch_child_count.get(node_id, 0) > COLLAPSE_DEFAULT_THRESHOLD:
+            default_collapsed_for[node_id] = True
+            working_views[node_id] = {"collapsed": True, "pinned": False,
+                                      "x": None, "y": None, "layout_version": 0}
+
+    positions, raw_new_positions, pin_conflicts = _layout(
+        nodes, edges, working_views, parent_of, children)
+
     new_positions: dict[str, tuple] = {}
     for node_id, (x, y) in raw_new_positions.items():
-        default_collapsed = None
-        if node_id not in views and nodes[node_id]["kind"] in ("theme", "bucket") and \
-                branch_child_count.get(node_id, 0) > COLLAPSE_DEFAULT_THRESHOLD:
-            default_collapsed = True
+        default_collapsed = True if default_collapsed_for.get(node_id) else None
         new_positions[node_id] = (x, y, default_collapsed)
 
     for node_id, node in nodes.items():
@@ -513,8 +663,19 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
         if view is not None:
             node["collapsed"] = bool(view.get("collapsed"))
         else:
-            entry = new_positions.get(node_id)
-            node["collapsed"] = bool(entry[2]) if entry and entry[2] is not None else False
+            node["collapsed"] = bool(default_collapsed_for.get(node_id))
+        node["parent_id"] = parent_of.get(node_id)
+        depth = 0
+        cur = node_id
+        seen_depth: set[str] = set()
+        while parent_of.get(cur) and cur not in seen_depth:
+            seen_depth.add(cur)
+            cur = parent_of[cur]
+            depth += 1
+        node["depth"] = depth
+        width, height = _estimate_size(node)
+        node["width"] = width
+        node["height"] = height
 
     return {
         "schema_version": GRAPH_SCHEMA_VERSION,
@@ -529,12 +690,14 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
         # The client's resync key has to include it or a correction can sit on
         # screen unrefreshed until something else happens to move (section 1).
         "record_revision": int(session.get("record_revision") or 0),
+        "layout_version": LAYOUT_VERSION,
         "fallback": fallback,
         # How many real items sit in a provisional (not-yet-themed) bucket
         # even though this is NOT a whole-graph fallback — 0 whenever every
         # real item already has a theme, and always 0 in fallback mode itself
         # (where `fallback: true` already says so for the whole map).
         "unplaced_count": unplaced_count if not fallback else 0,
+        "pin_conflicts": pin_conflicts,
         "nodes": list(nodes.values()),
         "edges": edges,
         # Internal only — popped by the API layer before this dict reaches a
@@ -547,11 +710,11 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
     }
 
 
-# ── Layout (deterministic, stable) ──────────────────────────────────────────
+# ── Layout (deterministic, stable, nested) ──────────────────────────────────
 
-_NODE_DX = 220.0
-_NODE_DY = 150.0
-# How many columns a branch's children wrap into before starting a new row.
+_NODE_DX = NODE_W + H_GAP
+_NODE_DY = NODE_MIN_H + V_GAP
+# Max sibling SUBTREES per row — not a global grid of every note.
 MAX_GRID_COLS = 5
 # A theme/bucket with more children than this starts COLLAPSED the first time
 # it appears (`build_graph`), so the initial view is a manageable overview.
@@ -563,7 +726,7 @@ COLLAPSE_DEFAULT_THRESHOLD = 6
 # is what lets an already-unreadable session improve the next time it is
 # opened rather than needing a migration script (section 4: "reflow obsolete
 # automatic positions safely... preserve explicit pins").
-LAYOUT_VERSION = 2
+LAYOUT_VERSION = 3
 
 
 def _grid_cols(n: int) -> int:
@@ -582,23 +745,67 @@ def _grid_cols(n: int) -> int:
     return max(1, min(MAX_GRID_COLS, math.ceil(math.sqrt(n))))
 
 
-def _usable_view(view: Optional[dict]) -> Optional[tuple[float, float]]:
+def _usable_view(view: Optional[dict], current_parent: Optional[str] = None
+                 ) -> Optional[tuple[float, float]]:
     """A stored x/y is trusted only when it is PINNED (a human placed it, and
     a pin is honoured regardless of which layout scheme computed anything
-    else) or was computed under the CURRENT `LAYOUT_VERSION`. Anything else —
-    most importantly, every position this repo had ever computed before this
-    pass — is treated as though no row existed at all, so it is recomputed
-    once, under the new algorithm, and rewritten stamped with the current
-    version by the caller. This is the whole of what makes an ALREADY-OPEN,
-    already-unreadable session benefit immediately, with no migration step:
-    the graph is derived fresh on every read (rule 121), so the very next
-    read recomputes every unpinned position under the fixed algorithm.
+    else) or was computed under the CURRENT `LAYOUT_VERSION` AND still has
+    the same display parent. Reparenting an unpinned item therefore reflows
+    it; a pin does not move.
     """
     if not view or view.get("x") is None or view.get("y") is None:
         return None
-    if view.get("pinned") or int(view.get("layout_version") or 0) == LAYOUT_VERSION:
+    if view.get("pinned"):
         return (float(view["x"]), float(view["y"]))
-    return None
+    if int(view.get("layout_version") or 0) != LAYOUT_VERSION:
+        return None
+    stored_parent = view.get("parent_id")
+    if stored_parent is not None and current_parent is not None and stored_parent != current_parent:
+        return None
+    return (float(view["x"]), float(view["y"]))
+
+
+def _nudge_box(x: float, y: float, w: float, h: float,
+               occupied: list[tuple[float, float, float, float]],
+               step: float = 24.0) -> tuple[float, float]:
+    """Search outward from (x, y) for a slot that clears every occupied box."""
+    box = (x, y, w, h)
+    if all(not _boxes_overlap(box, other) for other in occupied):
+        return x, y
+    n = 1
+    while n < 80:
+        for dx, dy in ((n * step, 0.0), (-n * step, 0.0),
+                       (0.0, n * step), (0.0, -n * step),
+                       (n * step, n * step), (-n * step, n * step),
+                       (n * step, -n * step), (-n * step, -n * step)):
+            cand = (x + dx, y + dy, w, h)
+            if all(not _boxes_overlap(cand, other) for other in occupied):
+                return x + dx, y + dy
+        n += 1
+    return x, y + n * step
+
+
+def _wrap_rows(kids: list[str], extents: dict[str, tuple[float, float]]
+               ) -> list[list[str]]:
+    if not kids:
+        return []
+    max_row = max((NODE_W + H_GAP) * MAX_ROW_CHILDREN, NODE_W)
+    rows: list[list[str]] = []
+    row: list[str] = []
+    row_w = 0.0
+    for kid in kids:
+        kw, _ = extents[kid]
+        need = kw if not row else kw + H_GAP
+        if row and (len(row) >= MAX_ROW_CHILDREN or row_w + need > max_row):
+            rows.append(row)
+            row = []
+            row_w = 0.0
+            need = kw
+        row.append(kid)
+        row_w += need
+    if row:
+        rows.append(row)
+    return rows
 
 
 def _free_slot(taken: list[float], step: float = _NODE_DX) -> float:
@@ -624,132 +831,205 @@ def _free_slot(taken: list[float], step: float = _NODE_DX) -> float:
 
 
 def _layout(nodes: dict[str, dict], edges: list[dict],
-           views: dict[str, dict]) -> tuple[dict[str, tuple], dict[str, tuple], dict[str, int]]:
+           views: dict[str, dict],
+           parent_of: Optional[dict[str, str]] = None,
+           children: Optional[dict[str, list[str]]] = None
+           ) -> tuple[dict[str, tuple], dict[str, tuple], list[dict]]:
+    """A position for every node, using the actual nested hierarchy.
+
+    Each visible subtree reserves its own bounding box; sibling subtrees
+    are placed in separate areas. Collision checking covers the whole
+    visible layout and pinned obstacles, not just a branch's own children.
+
+    Collapsed branches occupy only their own card in the overview; hidden
+    descendants are parked in a single column under the parent so they have
+    coordinates when expanded, without widening the overview.
+
+    Pins stay where the user put them. Two overlapping pins are reported,
+    never silently moved.
     """
-    A position for every node, plus each branch's child count (for the
-    collapse-by-default decision in `build_graph`).
+    if parent_of is None or children is None:
+        parent_of, _ = primary_parent_map(nodes, edges)
+        children = children_from_parents(parent_of)
 
-    The hierarchy is exactly two layers by construction (rule 122: `contains`
-    may only originate from a theme or the root, and may never target one) —
-    root, then branches (themes and provisional/fallback buckets), then
-    leaves. That fixed shape is what makes a much more compact layout
-    tractable without a general tree-layout library: branches are placed
-    left to right as before (they are typically few, and this was never the
-    reported defect), and each branch's OWN children are then wrapped into a
-    compact local grid — never sharing one global row with every other
-    branch's children (`_grid_cols`), which is the actual structural bug a
-    2026-09-14 review reproduced.
+    sizes = {nid: _estimate_size(n) for nid, n in nodes.items()}
+    collapsed = {
+        nid: bool((views.get(nid) or {}).get("collapsed") or n.get("collapsed"))
+        for nid, n in nodes.items()
+    }
 
-    A position already stored (dragged, pinned, or computed on an earlier
-    read under the current `LAYOUT_VERSION`) is kept EXACTLY — this is what
-    keeps the map from reshuffling itself on every poll (section 5: "do not
-    recenter or reshuffle the whole diagram on every update"). Only a node
-    with no USABLE stored position (`_usable_view`) gets a fresh one,
-    returned separately so the caller can persist it once.
-    """
-    children: dict[str, list[str]] = {}
-    for e in edges:
-        if e["relation"] == HIERARCHY_RELATION:
-            children.setdefault(e["from_id"], []).append(e["to_id"])
+    positions: dict[str, tuple[float, float]] = {}
+    new_positions: dict[str, tuple[float, float]] = {}
+    pin_conflicts: list[dict] = []
 
-    branch_ids = [b for b in children.get(ROOT_ID, []) if b in nodes]
-    reached = {ROOT_ID, *branch_ids}
-    for b in branch_ids:
-        reached.update(c for c in children.get(b, []) if c in nodes)
-    # Anything not reached from root through exactly two hierarchy hops should
-    # not happen — the tree is two layers by construction — but is collected
-    # here rather than trusted to exist, so a violated invariant degrades to
-    # an ungainly position instead of a crash.
+    pin_boxes: list[tuple[float, float, float, float]] = []
+    pin_ids: list[str] = []
+    for nid, n in nodes.items():
+        view = views.get(nid)
+        if view and view.get("pinned") and view.get("x") is not None and view.get("y") is not None:
+            positions[nid] = (float(view["x"]), float(view["y"]))
+            w, h = sizes[nid]
+            pin_boxes.append((positions[nid][0], positions[nid][1], w, h))
+            pin_ids.append(nid)
+    for i, a in enumerate(pin_boxes):
+        for j in range(i + 1, len(pin_boxes)):
+            if _boxes_overlap(a, pin_boxes[j]):
+                pin_conflicts.append({
+                    "node_id": pin_ids[i], "other_id": pin_ids[j],
+                    "reason": "Two pinned cards occupy the same space.",
+                })
+
+    def visible_kids(nid: str) -> list[str]:
+        if collapsed.get(nid):
+            return []
+        return [c for c in children.get(nid, []) if c in nodes]
+
+    def hidden_kids(nid: str) -> list[str]:
+        if not collapsed.get(nid):
+            return []
+        return [c for c in children.get(nid, []) if c in nodes]
+
+    extents: dict[str, tuple[float, float]] = {}
+
+    def visible_extent(nid: str, seen: Optional[set] = None) -> tuple[float, float]:
+        if nid in extents:
+            return extents[nid]
+        seen = set() if seen is None else seen
+        if nid in seen:
+            w, h = sizes.get(nid, (NODE_W, NODE_MIN_H))
+            extents[nid] = (w, h)
+            return extents[nid]
+        seen = seen | {nid}
+        w, h = sizes.get(nid, (NODE_W, NODE_MIN_H))
+        kids = visible_kids(nid)
+        if not kids:
+            extents[nid] = (w, h)
+            return w, h
+        kid_ext = {k: visible_extent(k, seen) for k in kids}
+        rows = _wrap_rows(kids, kid_ext)
+        content_w = max(
+            sum(kid_ext[k][0] for k in row) + H_GAP * max(0, len(row) - 1)
+            for row in rows)
+        content_h = (sum(max(kid_ext[k][1] for k in row) for row in rows)
+                     + V_GAP * max(0, len(rows) - 1))
+        tw, th = max(w, content_w), h + V_GAP + content_h
+        extents[nid] = (tw, th)
+        return tw, th
+
+    for nid in nodes:
+        visible_extent(nid)
+
+    ideal: dict[str, tuple[float, float]] = {}
+
+    def place_visible(nid: str, left: float, top: float, seen: Optional[set] = None) -> None:
+        seen = set() if seen is None else seen
+        if nid in seen or nid not in nodes:
+            return
+        seen = seen | {nid}
+        tw, _th = extents.get(nid, sizes[nid])
+        nw, nh = sizes[nid]
+        ideal[nid] = (left + max(0.0, (tw - nw) / 2), top)
+        kids = visible_kids(nid)
+        if not kids:
+            return
+        kid_ext = {k: extents.get(k, sizes[k]) for k in kids}
+        rows = _wrap_rows(kids, kid_ext)
+        y = top + nh + V_GAP
+        for row in rows:
+            row_w = sum(kid_ext[k][0] for k in row) + H_GAP * max(0, len(row) - 1)
+            x = left + max(0.0, (tw - row_w) / 2)
+            row_h = max(kid_ext[k][1] for k in row)
+            for k in row:
+                kw, _kh = kid_ext[k]
+                place_visible(k, x, y, seen)
+                x += kw + H_GAP
+            y += row_h + V_GAP
+
+    def park_hidden(nid: str, parent_x: float, parent_y: float, parent_h: float) -> None:
+        stack_y = parent_y + parent_h + V_GAP
+        for kid in hidden_kids(nid):
+            _kw, kh = sizes[kid]
+            if kid not in ideal:
+                ideal[kid] = (parent_x, stack_y)
+            park_hidden(kid, parent_x, stack_y, kh)
+            stack_y += kh + 8.0
+
+    if ROOT_ID in nodes:
+        place_visible(ROOT_ID, 0.0, 0.0)
+        stack = [ROOT_ID]
+        seen_park: set[str] = set()
+        while stack:
+            nid = stack.pop()
+            if nid in seen_park:
+                continue
+            seen_park.add(nid)
+            if collapsed.get(nid) and nid in ideal:
+                _nw, nh = sizes[nid]
+                park_hidden(nid, ideal[nid][0], ideal[nid][1], nh)
+            stack.extend(children.get(nid, []))
+
+    reached = set(ideal) | set(positions)
     stray_ids = [n for n in nodes if n not in reached]
 
-    positions: dict[str, tuple] = {}
-    new_positions: dict[str, tuple] = {}
-    branch_child_count: dict[str, int] = {b: len(children.get(b, [])) for b in branch_ids}
+    occupied: list[tuple[float, float, float, float]] = list(pin_boxes)
 
-    # ── Depth 1: branches ────────────────────────────────────────────────
-    branch_occupied: list[float] = []
-    branch_pending: list[str] = []
-    for b in branch_ids:
-        pos = _usable_view(views.get(b))
-        if pos:
-            positions[b] = pos
-            branch_occupied.append(pos[0])
-        else:
-            branch_pending.append(b)
-    for b in branch_pending:
-        x = _free_slot(branch_occupied)
-        branch_occupied.append(x)
-        positions[b] = (x, _NODE_DY)
-        new_positions[b] = (x, _NODE_DY)
+    def assign(nid: str, x: float, y: float, persist_new: bool) -> None:
+        w, h = sizes[nid]
+        x, y = _nudge_box(x, y, w, h, occupied)
+        positions[nid] = (x, y)
+        if persist_new:
+            new_positions[nid] = (x, y)
+        occupied.append((x, y, w, h))
 
-    # Root: centred over its branches, computed once like everything else —
-    # never recomputed once a usable position is stored, so this only moves
-    # root the one time an old, unversioned position is reflowed.
-    root_pos = _usable_view(views.get(ROOT_ID))
-    if root_pos:
-        positions[ROOT_ID] = root_pos
-    else:
-        if branch_ids:
-            xs = [positions[b][0] for b in branch_ids]
-            root_x = (min(xs) + max(xs)) / 2
-        else:
-            root_x = 0.0
-        positions[ROOT_ID] = (root_x, 0.0)
-        new_positions[ROOT_ID] = (root_x, 0.0)
-
-    # ── Depth 2: each branch's own children, a COMPACT local grid ───────────
-    # (section 2: "stack or wrap supporting cards into compact local
-    # rows/columns" — never one shared row across the whole graph.)
-    for b in branch_ids:
-        kids = [k for k in children.get(b, []) if k in nodes]
-        occupied: list[tuple[float, float]] = []
-        pending: list[str] = []
-        for kid in kids:
-            pos = _usable_view(views.get(kid))
-            if pos:
-                positions[kid] = pos
-                occupied.append(pos)
-            else:
-                pending.append(kid)
-        if not pending:
-            continue
-        cols = _grid_cols(len(pending) + len(occupied))
-        anchor_x = positions[b][0]
-        top_y = positions[b][1] + _NODE_DY
-
-        def _clear(x: float, y: float) -> bool:
-            return all(abs(x - ox) >= _NODE_DX * 0.85 or abs(y - oy) >= _NODE_DY * 0.85
-                      for ox, oy in occupied)
-
-        idx = 0
-        bound = (len(pending) + len(occupied)) * 3 + cols * 4 + 20
-        for kid in pending:
-            while True:
-                row, col = divmod(idx, cols)
-                x = anchor_x + (col - (cols - 1) / 2) * _NODE_DX
-                y = top_y + row * _NODE_DY
-                idx += 1
-                if _clear(x, y) or idx > bound:   # bound: safety net, not reached in practice
-                    positions[kid] = (x, y)
-                    new_positions[kid] = (x, y)
-                    occupied.append((x, y))
-                    break
-
-    # ── Anything unreached (defensive only — see docstring) ─────────────────
-    if stray_ids:
-        flat_occupied = [positions[n][0] for n in positions]
-        for node_id in stray_ids:
-            pos = _usable_view(views.get(node_id))
-            if pos:
-                positions[node_id] = pos
-                flat_occupied.append(pos[0])
+    ordered: list[str] = []
+    if ROOT_ID in nodes:
+        stack = [ROOT_ID]
+        seen_ord: set[str] = set()
+        while stack:
+            nid = stack.pop()
+            if nid in seen_ord:
                 continue
-            x = _free_slot(flat_occupied)
-            flat_occupied.append(x)
-            positions[node_id] = (x, _NODE_DY * 2)
-            new_positions[node_id] = (x, _NODE_DY * 2)
+            seen_ord.add(nid)
+            ordered.append(nid)
+            stack.extend(reversed(children.get(nid, [])))
+        ordered.extend(n for n in nodes if n not in seen_ord)
+    else:
+        ordered = list(nodes)
 
-    return positions, new_positions, branch_child_count
+    for nid in ordered:
+        if nid in positions:
+            w, h = sizes[nid]
+            occupied.append((positions[nid][0], positions[nid][1], w, h))
+            continue
+        kept = _usable_view(views.get(nid), parent_of.get(nid))
+        if kept:
+            w, h = sizes[nid]
+            box = (kept[0], kept[1], w, h)
+            if any(_boxes_overlap(box, p) for p in pin_boxes):
+                ix, iy = ideal.get(nid, kept)
+                assign(nid, ix, iy, persist_new=True)
+            else:
+                positions[nid] = kept
+                occupied.append(box)
+            continue
+        ix, iy = ideal.get(nid, (0.0, _NODE_DY * 2))
+        assign(nid, ix, iy, persist_new=True)
+
+    if stray_ids:
+        y_base = max((positions[n][1] + sizes[n][1] for n in positions), default=_NODE_DY)
+        x_cursor = 0.0
+        for nid in stray_ids:
+            if nid in positions:
+                continue
+            kept = _usable_view(views.get(nid), parent_of.get(nid))
+            if kept:
+                assign(nid, kept[0], kept[1], persist_new=False)
+                continue
+            w, h = sizes[nid]
+            assign(nid, x_cursor, y_base + V_GAP, persist_new=True)
+            x_cursor += w + H_GAP
+
+    return positions, new_positions, pin_conflicts
 
 
 # ── Patch validation (section 3: "validate before applying, atomically") ────
@@ -791,26 +1071,12 @@ def resolve_edge_ref(ref: str, tmp_map: dict[str, str]) -> str:
     return tmp_map.get(ref, ref)
 
 
-def contains_target_ok(to_id: str, node_kind: dict[str, str]) -> bool:
-    """Whether `to_id` may legally be CONTAINED by a theme.
-
-    Only a theme (or the synthetic root) may be the "from" of a `contains`
-    edge (checked by the caller); this is the other half — the "to" may never
-    itself be a theme or the root. Without this half, "theme A contains theme
-    B" and "theme A contains root" both passed every existing check (root and
-    a theme both exist as real node ids, so the existence check does not catch
-    them), which is a REAL cycle: root -> A -> root. The hierarchy is a strict
-    two layers, root -> theme -> leaf, and this is what keeps it that way —
-    not a general cycle walk, because a leaf can never be a `contains` "from"
-    at all, so nothing deeper than two layers can ever be proposed in the
-    first place.
-    """
-    return to_id != ROOT_ID and node_kind.get(to_id) not in ("theme", "bucket")
-
-
 def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
                     node_kind: dict[str, str], rejected: set[tuple],
-                    valid_turn_ids: Optional[set[str]] = None) -> tuple[list[dict], list[str]]:
+                    valid_turn_ids: Optional[set[str]] = None,
+                    existing_parents: Optional[dict[str, str]] = None,
+                    human_parented: Optional[set[str]] = None,
+                    limit: Optional[int] = None) -> tuple[list[dict], list[str]]:
     """
     Turn a model's raw `edges` proposals into validated, ready-to-store dicts.
 
@@ -819,20 +1085,27 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
     `reasoner.merge` (rule 79). Endpoints are resolved through `tmp_map` first,
     so an edge that names a node the SAME patch just created still resolves.
 
-    `valid_turn_ids`, when given, is checked the same way `_validate_provenance`
-    checks a map item's `source_turn_ids`: a citation naming a turn that is not
-    real in THIS session is worse than none, because it reads as corroboration
-    that never happened. `None` skips the check (the pure, DB-less callers — the
-    test suite chief among them — do not always have a turn table to check
-    against).
+    Nested topics are allowed (theme contains theme). Cycles, containing the
+    root, an item containing anything, a second primary parent of a
+    human-authored grouping, and rejection tombstones are not. A new
+    `contains` for a node that already has an inferred parent is accepted
+    with `replaces_from` set so the caller can drop the old grouping.
+
+    `limit` defaults to `MAX_EDGES_PER_PATCH` (a per-turn analysis). Organize
+    ideas passes `MAX_ORGANIZE_EDGES`. Anything past the limit is reported
+    as truncation, never applied silently.
     """
     accepted: list[dict] = []
     notes: list[str] = []
     if not isinstance(raw_edges, list):
         return accepted, notes
+    cap = MAX_EDGES_PER_PATCH if limit is None else int(limit)
+    truncated = max(0, len(raw_edges) - cap)
     dropped_unknown = dropped_bad_contains = dropped_rejected = dropped_self = 0
-    dropped_provenance = 0
-    for raw in raw_edges[:MAX_EDGES_PER_PATCH]:
+    dropped_provenance = dropped_cycle = dropped_human = dropped_extra = 0
+    parent_of = dict(existing_parents or {})
+    human_parented = set(human_parented or [])
+    for raw in raw_edges[:cap]:
         if not isinstance(raw, dict):
             continue
         relation = str(raw.get("relation") or "").strip().lower()
@@ -848,14 +1121,24 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
         if from_id not in node_ids or to_id not in node_ids:
             dropped_unknown += 1
             continue
-        # Acyclic by construction (see module docstring): `contains` may only
-        # originate from a theme, and may never TARGET a theme or the root —
-        # both halves are needed, or "theme A contains theme B" (and B contains
-        # A right back) passes every other check here.
-        if relation == HIERARCHY_RELATION and (
-                node_kind.get(from_id) != "theme" or not contains_target_ok(to_id, node_kind)):
-            dropped_bad_contains += 1
-            continue
+        replaces_from = None
+        if relation == HIERARCHY_RELATION:
+            if not contains_source_ok(from_id, node_kind) or not contains_target_ok(to_id, node_kind):
+                dropped_bad_contains += 1
+                continue
+            if contains_would_cycle(from_id, to_id, parent_of):
+                dropped_cycle += 1
+                continue
+            current_parent = parent_of.get(to_id)
+            if current_parent == from_id:
+                # Already the primary parent — keep as a no-op update.
+                pass
+            elif to_id in human_parented:
+                dropped_human += 1
+                continue
+            elif current_parent:
+                replaces_from = current_parent
+            parent_of[to_id] = from_id
         if (from_id, to_id, relation) in rejected:
             dropped_rejected += 1
             continue
@@ -866,24 +1149,78 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
             if len(kept) != len(source_turn_ids):
                 dropped_provenance += len(source_turn_ids) - len(kept)
             source_turn_ids = kept
-        accepted.append({
+        entry = {
             "from_id": from_id, "to_id": to_id, "relation": relation,
             "label": str(raw.get("label") or "")[:MAX_EDGE_LABEL_CHARS],
             "inferred": not stated,
             "source_turn_ids": source_turn_ids,
-        })
+        }
+        if replaces_from:
+            entry["replaces_from"] = replaces_from
+        accepted.append(entry)
     if dropped_unknown:
         notes.append(f"{dropped_unknown} proposed connection(s) named a node that does not exist")
     if dropped_bad_contains:
-        notes.append(f"{dropped_bad_contains} proposed connection(s) tried to contain "
-                     "something other than a plain item under a theme, and were dropped")
+        notes.append(f"{dropped_bad_contains} proposed connection(s) were not a valid grouping "
+                     "(only a topic can contain something, and it cannot contain the question)")
+    if dropped_cycle:
+        notes.append(f"{dropped_cycle} proposed grouping(s) would have cycled and were dropped")
+    if dropped_human:
+        notes.append(f"{dropped_human} proposed grouping(s) would have overridden a grouping "
+                     "someone made by hand, and were left for review")
+    if dropped_extra:
+        notes.append(f"{dropped_extra} extra grouping(s) were dropped so each idea has one parent")
     if dropped_rejected:
         notes.append(f"{dropped_rejected} proposed connection(s) had already been rejected by hand")
     if dropped_self:
         notes.append(f"{dropped_self} proposed connection(s) pointed a node at itself")
     if dropped_provenance:
         notes.append(f"{dropped_provenance} source reference(s) on a connection dropped as unrecognised")
+    if truncated:
+        notes.append(f"{truncated} proposed connection(s) were not read — the proposal was larger "
+                     "than this pass can apply. Run Organize ideas again for the rest.")
     return accepted, notes
+
+
+def outline_tree(graph: dict) -> list[dict]:
+    """A compact nested outline of the display hierarchy, for the organizer
+    preview and for tests. Uses primary `contains` parents only."""
+    by_id = {n["id"]: n for n in graph.get("nodes") or []}
+    parent_of, _ = primary_parent_map(by_id, graph.get("edges") or [])
+    children = children_from_parents(parent_of)
+
+    def walk(nid: str, seen: set) -> Optional[dict]:
+        if nid in seen or nid not in by_id:
+            return None
+        seen = seen | {nid}
+        node = by_id[nid]
+        kids = [walk(c, seen) for c in children.get(nid, [])]
+        return {
+            "id": nid,
+            "kind": node.get("kind"),
+            "label": node.get("label") or node.get("detail") or nid,
+            "children": [k for k in kids if k],
+        }
+
+    root = walk(ROOT_ID, set())
+    return [root] if root else []
+
+
+def existing_parent_index(edges_rows: list[dict]) -> tuple[dict[str, str], set[str]]:
+    """Primary inferred/human parents from stored edge rows (not synthetic)."""
+    nodes_touch = {r["from_id"]: {"id": r["from_id"]} for r in edges_rows}
+    nodes_touch.update({r["to_id"]: {"id": r["to_id"]} for r in edges_rows})
+    # Rank without needing full nodes — human_edited wins.
+    fake_nodes = {i: {"id": i, "kind": "theme"} for i in nodes_touch}
+    as_edges = [{
+        "id": r.get("id"), "from_id": r["from_id"], "to_id": r["to_id"],
+        "relation": r.get("relation"), "human_edited": bool(r.get("human_edited")),
+        "synthetic": False,
+    } for r in edges_rows if r.get("relation") == HIERARCHY_RELATION]
+    parent_of, _ = primary_parent_map(fake_nodes, as_edges)
+    human = {r["to_id"] for r in edges_rows
+             if r.get("relation") == HIERARCHY_RELATION and r.get("human_edited")}
+    return parent_of, human
 
 
 # ── Export rendering (section 6: derived from the stored graph, never a second

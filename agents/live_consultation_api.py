@@ -399,6 +399,8 @@ def capabilities():
         # (rule 87): a colour, a label and a legend that live in two places
         # disagree eventually.
         "graph_schema_version": graph.GRAPH_SCHEMA_VERSION,
+        "layout_version": graph.LAYOUT_VERSION,
+        "graph_capabilities": {**graph.GRAPH_CAPABILITIES, "layout_version": graph.LAYOUT_VERSION},
         "node_kinds": [{"id": k, **v} for k, v in graph.NODE_KIND_META.items()],
         "edge_relations": [{"id": k, **v} for k, v in graph.RELATION_META.items()],
         "default_mode": core.DEFAULT_MODE,
@@ -969,7 +971,7 @@ def label_turn(session_id: str, turn_id: int, req: LabelIn):
 # ── Analysis ────────────────────────────────────────────────────────────────
 
 def _apply_graph_patch(session_id: str, resolved_edges: list[dict],
-                       saved_state: dict) -> tuple[list[str], bool]:
+                       saved_state: dict, limit: Optional[int] = None) -> tuple[list[str], bool]:
     """
     Validate the reasoner's proposed connections against the map as it ACTUALLY
     stands after this pass, and store the ones that pass. Deliberately run
@@ -989,10 +991,17 @@ def _apply_graph_patch(session_id: str, resolved_edges: list[dict],
     node_ids, node_kind = graph.node_universe(saved_state)
     rejected = store.rejected_edge_keys(session_id)
     valid_turns = _valid_turn_id_set(session_id)
+    existing_parents, human_parented = graph.existing_parent_index(
+        store.list_graph_edges(session_id))
     accepted, notes = graph.validate_edges(resolved_edges, {}, node_ids, node_kind, rejected,
-                                           valid_turn_ids=valid_turns)
+                                           valid_turn_ids=valid_turns,
+                                           existing_parents=existing_parents,
+                                           human_parented=human_parented,
+                                           limit=limit)
     changed = False
     for e in accepted:
+        if e.get("replaces_from"):
+            store.drop_inferred_contains(session_id, e["to_id"], keep_from_id=e["from_id"])
         row = store.upsert_graph_edge(
             session_id, e["from_id"], e["to_id"], e["relation"], label=e.get("label", ""),
             inferred=e.get("inferred", True), source_turn_ids=e.get("source_turn_ids"))
@@ -2403,6 +2412,7 @@ def _graph_snapshot(session_id: str, session: Optional[dict] = None,
     built = graph.build_graph(session, state, decisions, actions, edges_rows, views)
     new_positions = built.pop("new_positions", {})
     if persist_positions:
+        by_id = {n["id"]: n for n in built.get("nodes") or []}
         for node_id, (x, y, default_collapsed) in new_positions.items():
             kwargs = {"x": x, "y": y, "pinned": False, "layout_version": graph.LAYOUT_VERSION}
             # Only for a node with no stored view row at all (see the graph
@@ -2411,6 +2421,9 @@ def _graph_snapshot(session_id: str, session: Optional[dict] = None,
             # person deliberately expanded.
             if default_collapsed is not None:
                 kwargs["collapsed"] = default_collapsed
+            parent_id = (by_id.get(node_id) or {}).get("parent_id")
+            if parent_id:
+                kwargs["parent_id"] = parent_id
             store.set_node_view(session_id, node_id, **kwargs)
     return built
 
@@ -2474,7 +2487,13 @@ def set_graph_node_view(session_id: str, node_id: str, req: NodeViewIn):
     # unpinned).
     if "x" in fields or "y" in fields:
         fields["layout_version"] = graph.LAYOUT_VERSION
+    collapsing = "collapsed" in fields
     view = store.set_node_view(session_id, node_id, **fields)
+    # Collapse changes how much space a branch occupies; reflow unpinned
+    # cards so the overview does not leave a hole (or overlap) for hidden
+    # children. Pins stay put.
+    if collapsing:
+        store.stale_unpinned_positions(session_id)
     return {"view": view, "session": store.get_session(session_id)}
 
 
@@ -2494,22 +2513,12 @@ def arrange_graph(session_id: str):
 #
 # Deliberately separate from Arrange map above: Arrange is geometric and free;
 # this is semantic and paid, so it is never run silently and never triggered
-# by opening an archive (section 4: "never make archive opening trigger a
-# paid call"). It is the repair path for a session that predates good theming,
-# or one where the ordinary per-turn pass has left real items unplaced —
-# `preview` proposes and HOLDS a patch (one paid call), `apply` commits
-# exactly that patch (re-merged against whatever the map says at that moment,
-# the same rebase discipline `_run_analysis` already uses — rule 104), and
-# `discard` throws it away. Nothing here can reword a fact, a decision or an
-# action: `reasoner.organize` returns only `{"add": {"themes": [...]}, "edges":
-# [...]}`, and `apply` merges exactly that and nothing else.
+# by opening an archive. Preview proposes, validates, and HOLDS a patch
+# (one paid call); apply commits that same validated patch against whatever
+# the map says at that moment (rule 104's rebase); discard throws it away.
 
 def _unplaced_from_graph(built: dict) -> list[dict]:
-    """Every real item currently sitting in a PROVISIONAL bucket — exactly
-    the set `build_graph` could not place under a real theme, whether that is
-    because a few items lack one (the common case) or because nothing in this
-    session has a theme yet at all (a full-fallback session, where "Organize
-    ideas" is exactly the repair path for an old, unthemed meeting)."""
+    """Every real item currently sitting in a PROVISIONAL bucket."""
     bucket_ids = {n["id"] for n in built["nodes"] if n["kind"] == "bucket"}
     if not bucket_ids:
         return []
@@ -2525,18 +2534,29 @@ def _truncate(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-def _organize_summary(patch: dict, state: dict, unplaced: list[dict]) -> list[str]:
-    """A human-readable preview of what a proposed organize patch would do —
-    never applied from here, only described."""
-    label_by_id = {u["id"]: u["text"] for u in unplaced}
+def _label_index(state: dict, extra: Optional[list[dict]] = None) -> dict[str, str]:
+    label_by_id: dict[str, str] = {}
     for name in core.ITEM_LISTS:
         for item in (state.get(name) or []):
             if isinstance(item, dict) and item.get("id"):
                 text = item.get("action") if name == "action_items" else item.get("text")
                 if text:
-                    label_by_id.setdefault(item["id"], text)
+                    label_by_id[item["id"]] = text
+    for u in extra or []:
+        if u.get("id") and u.get("text"):
+            label_by_id.setdefault(u["id"], u["text"])
+    return label_by_id
+
+
+def _organize_summary(patch: dict, state: dict, accepted: list[dict],
+                      unplaced: Optional[list[dict]] = None) -> list[str]:
+    """Plain-language description of the VALIDATED proposal, not raw model counts."""
+    label_by_id = _label_index(state, unplaced)
     new_theme_label = {t.get("tmp_id"): t.get("text", "") for t in patch.get("add", {}).get("themes", [])
                       if isinstance(t, dict) and t.get("tmp_id")}
+    for t in patch.get("add", {}).get("themes", []):
+        if isinstance(t, dict) and t.get("id") and t.get("text"):
+            new_theme_label[t["id"]] = t["text"]
 
     def label(node_id: str) -> str:
         return _truncate(new_theme_label.get(node_id) or label_by_id.get(node_id) or node_id)
@@ -2545,19 +2565,102 @@ def _organize_summary(patch: dict, state: dict, unplaced: list[dict]) -> list[st
     for t in patch.get("add", {}).get("themes", []):
         if isinstance(t, dict) and (t.get("text") or "").strip():
             lines.append(f"New topic: “{_truncate(t['text'])}”")
-    for e in patch.get("edges", []):
-        if not isinstance(e, dict):
-            continue
-        frm, to = str(e.get("from") or ""), str(e.get("to") or "")
+    for e in accepted:
+        frm, to = e.get("from_id") or "", e.get("to_id") or ""
         if not frm or not to:
             continue
         relation = e.get("relation", "related_to")
         if relation == graph.HIERARCHY_RELATION:
-            lines.append(f"Place “{label(to)}” under “{label(frm)}”")
+            verb = "Move" if e.get("replaces_from") else "Place"
+            lines.append(f"{verb} “{label(to)}” under “{label(frm)}”")
         else:
             rel_label = graph.RELATION_META.get(relation, {}).get("label", relation).lower()
-            lines.append(f"“{label(frm)}” {rel_label} “{label(to)}”")
-    return lines[:60]
+            extra = f" — {e['label']}" if e.get("label") else ""
+            lines.append(f"“{label(frm)}” {rel_label} “{label(to)}”{extra}")
+    for tid in patch.get("retire_themes") or []:
+        lines.append(f"Remove redundant topic “{label(str(tid))}” after moving its children")
+    return lines[:80]
+
+
+def _real_item_count(state: dict) -> int:
+    n = 0
+    for name in core.ITEM_LISTS:
+        if name == "themes":
+            continue
+        n += sum(1 for i in (state.get(name) or []) if isinstance(i, dict) and i.get("id"))
+    return n
+
+
+def _dry_run_organize(session: dict, state: dict, patch: dict, edges_rows: list[dict],
+                      decisions: list[dict], actions: list[dict],
+                      rejected: set) -> dict:
+    """Validate a proposal against a copy of the map. Never writes."""
+    merged, merge_notes, resolved_edges = reasoner.merge(state, patch)
+    validated, problem = reasoner.validate_state(merged)
+    if problem:
+        return {"ok": False, "note": problem, "merge_notes": merge_notes}
+    node_ids, node_kind = graph.node_universe(validated, decisions, actions)
+    # New themes from this merge must be in the universe (they are — merge
+    # added them to state). Temporary ids in resolved_edges are already real.
+    existing_parents, human_parented = graph.existing_parent_index(edges_rows)
+    accepted, val_notes = graph.validate_edges(
+        resolved_edges, {}, node_ids, node_kind, rejected,
+        existing_parents=existing_parents, human_parented=human_parented,
+        limit=graph.MAX_ORGANIZE_EDGES)
+    proposed_rows = [r for r in edges_rows
+                     if not (r.get("relation") == graph.HIERARCHY_RELATION
+                             and any(e.get("to_id") == r.get("to_id") and e.get("replaces_from")
+                                     for e in accepted)
+                             and not r.get("human_edited"))]
+    for e in accepted:
+        proposed_rows.append({
+            "id": f"preview:{e['from_id']}:{e['relation']}:{e['to_id']}",
+            "from_id": e["from_id"], "to_id": e["to_id"], "relation": e["relation"],
+            "label": e.get("label", ""), "inferred": e.get("inferred", True),
+            "human_edited": False, "source_turn_ids": e.get("source_turn_ids") or [],
+        })
+    proposed = graph.build_graph(session, validated, decisions, actions, proposed_rows, {})
+    proposed.pop("new_positions", None)
+    placed = {e["to_id"] for e in accepted if e.get("relation") == graph.HIERARCHY_RELATION}
+    unplaced_now = _unplaced_from_graph(proposed)
+    coverage = {
+        "items_considered": _real_item_count(state),
+        "edges_proposed": len(resolved_edges),
+        "edges_accepted": len(accepted),
+        "edges_dropped": max(0, len(resolved_edges) - len(accepted)),
+        "items_placed": len(placed),
+        "items_unplaced": len(unplaced_now),
+        "truncated": any("were not read" in n for n in val_notes),
+        "new_themes": len(patch.get("add", {}).get("themes") or []),
+    }
+    return {
+        "ok": True,
+        "merged": validated,
+        "accepted": accepted,
+        "merge_notes": merge_notes,
+        "val_notes": val_notes,
+        "proposed_graph": proposed,
+        "proposed_tree": graph.outline_tree(proposed),
+        "coverage": coverage,
+        "unplaced": unplaced_now,
+    }
+
+
+def _pending_public(pending: dict) -> dict:
+    """What the dashboard needs from a held proposal — never the raw patch."""
+    if not pending:
+        return {}
+    return {
+        "summary": pending.get("summary") or [],
+        "proposed_theme_count": pending.get("proposed_theme_count") or 0,
+        "proposed_edge_count": pending.get("proposed_edge_count") or 0,
+        "accepted_edge_count": pending.get("accepted_edge_count") or 0,
+        "coverage": pending.get("coverage") or {},
+        "omissions": pending.get("omissions") or [],
+        "conflicts": pending.get("conflicts") or [],
+        "proposed_tree": pending.get("proposed_tree") or [],
+        "created_at": pending.get("created_at"),
+    }
 
 
 @router.post("/sessions/{session_id}/graph/organize/preview")
@@ -2566,54 +2669,146 @@ def preview_organize(session_id: str):
     if not realtime.available():
         raise HTTPException(status_code=409, detail=(
             "No OpenAI API key is configured, so ideas cannot be organised."))
-    built = _graph_snapshot(session_id, session, persist_positions=False)
-    unplaced = _unplaced_from_graph(built)
-    if not unplaced:
+    lock = _lock_for(session_id)
+    if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail=(
-            "Nothing to organise -- every item already has a topic."))
-    state = store.get_state(session_id)
-    result = reasoner.organize(session, state, unplaced)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.note)
-    summary = _organize_summary(result.patch, state, unplaced)
-    store.set_pending_organize(session_id, patch=result.patch,
-                               base_revision=int(state.get("state_revision") or 0),
-                               summary=summary)
-    return {
-        "summary": summary,
-        "proposed_theme_count": len(result.patch.get("add", {}).get("themes", [])),
-        "proposed_edge_count": len(result.patch.get("edges", [])),
-    }
+            "Organisation is already running for this consultation."))
+    try:
+        existing = store.get_pending_organize(session_id)
+        state = store.get_state(session_id)
+        if existing and int(existing.get("base_revision") or 0) == int(state.get("state_revision") or 0) \
+                and int(existing.get("graph_revision") or 0) == int(session.get("graph_revision") or 0):
+            return _pending_public(existing)
+        if _real_item_count(state) == 0 and not (state.get("themes") or []):
+            raise HTTPException(status_code=409, detail=(
+                "Nothing to organise — the map is empty."))
+        built = _graph_snapshot(session_id, session, persist_positions=False)
+        unplaced = _unplaced_from_graph(built)
+        edges_rows = store.list_graph_edges(session_id)
+        decisions = store.list_decisions(session_id)
+        actions = store.list_action_items(session_id)
+        rejected = store.rejected_edge_keys(session_id)
+        turns = store.list_turns(session_id, final_only=True, limit=12)
+        context = {"edges": edges_rows, "rejected": rejected, "turns": turns}
+        result = reasoner.organize(session, state, unplaced, context=context)
+        if not result.ok:
+            raise HTTPException(status_code=502, detail=result.note)
+        dry = _dry_run_organize(session, state, result.patch, edges_rows, decisions,
+                                actions, rejected)
+        if not dry.get("ok"):
+            raise HTTPException(status_code=409, detail=(
+                "The proposal could not be applied to the current map. "
+                + (dry.get("note") or "Run Organize ideas again.")))
+        summary = _organize_summary(result.patch, dry["merged"], dry["accepted"], unplaced)
+        conflicts = [n for n in dry["val_notes"] if "by hand" in n]
+        extra = {
+            "proposed_theme_count": len(result.patch.get("add", {}).get("themes") or []),
+            "proposed_edge_count": len(result.patch.get("edges") or []),
+            "accepted_edge_count": len(dry["accepted"]),
+            "coverage": dry["coverage"],
+            "omissions": dry["val_notes"],
+            "conflicts": conflicts,
+            "proposed_tree": dry["proposed_tree"],
+            "validated_edges": dry["accepted"],
+            "graph_revision": int(session.get("graph_revision") or 0),
+            "record_revision": int(session.get("record_revision") or 0),
+        }
+        store.set_pending_organize(session_id, patch=result.patch,
+                                   base_revision=int(state.get("state_revision") or 0),
+                                   summary=summary, extra=extra)
+        held = store.get_pending_organize(session_id) or {}
+        return _pending_public(held)
+    finally:
+        lock.release()
 
 
 @router.post("/sessions/{session_id}/graph/organize/apply")
 def apply_organize(session_id: str):
-    _session_or_404(session_id)
+    session = _session_or_404(session_id)
     pending = store.get_pending_organize(session_id)
     if not pending:
         raise HTTPException(status_code=404, detail=(
             "There is no proposed organisation waiting -- run Organize ideas again."))
-    fresh = store.get_state(session_id)
-    merged, merge_notes, resolved_edges = reasoner.merge(fresh, pending["patch"])
-    validated, problem = reasoner.validate_state(merged)
-    if problem:
-        store.clear_pending_organize(session_id)
+    lock = _lock_for(session_id)
+    if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail=(
-            "The record changed since this was proposed and it no longer applies "
-            "cleanly -- run Organize ideas again. " + problem))
-    if int(fresh.get("state_revision") or 0) != int(pending.get("base_revision") or 0):
-        merge_notes = list(merge_notes) + [
-            "the record changed since this was proposed; applied onto the current version"]
-    saved = store.save_state(session_id, validated)
-    graph_notes, _edges_changed = _apply_graph_patch(session_id, resolved_edges, saved)
-    store.clear_pending_organize(session_id)
-    # Any successful apply here changed the map's TOPOLOGY (a new theme, or a
-    # connection), which is part of what an approved export covers (rule 128) —
-    # unconditional, rather than gated on `_edges_changed`, because adding a
-    # theme with no edges (should not happen in practice, but is not itself
-    # invalid) is still new map structure.
-    _touch_record(session_id)
-    return {"graph": _graph_snapshot(session_id), "notes": list(merge_notes) + graph_notes}
+            "Organisation is already running for this consultation."))
+    try:
+        fresh = store.get_state(session_id)
+        patch = dict(pending.get("patch") or {})
+        patch.pop("_preview", None)
+        current_graph_rev = int(session.get("graph_revision") or 0)
+        stored_graph_rev = pending.get("graph_revision")
+        if stored_graph_rev is not None and int(stored_graph_rev) != current_graph_rev:
+            raise HTTPException(status_code=409, detail=(
+                "The map changed since this was proposed. Discard it and run "
+                "Organize ideas again so you are applying what you just previewed."))
+        merged, merge_notes, resolved_edges = reasoner.merge(fresh, patch)
+        validated, problem = reasoner.validate_state(merged)
+        if problem:
+            store.clear_pending_organize(session_id)
+            raise HTTPException(status_code=409, detail=(
+                "The record changed since this was proposed and it no longer applies "
+                "cleanly -- run Organize ideas again. " + problem))
+        if int(fresh.get("state_revision") or 0) != int(pending.get("base_revision") or 0):
+            merge_notes = list(merge_notes) + [
+                "the record changed since this was proposed; applied onto the current version"]
+        saved = store.save_state(session_id, validated)
+        # Prefer the already-validated edges from preview so a 50-edge
+        # proposal cannot silently apply only 40. Re-check them against the
+        # live map so a concurrent human edit still wins.
+        preview_edges = pending.get("validated_edges") or []
+        to_apply = preview_edges or resolved_edges
+        graph_notes, _edges_changed = _apply_graph_patch(
+            session_id, to_apply, saved, limit=graph.MAX_ORGANIZE_EDGES)
+        retire_notes = _retire_themes(session_id, saved, patch.get("retire_themes") or [])
+        store.stale_unpinned_positions(session_id)
+        store.clear_pending_organize(session_id)
+        _touch_record(session_id)
+        return {"graph": _graph_snapshot(session_id),
+                "notes": list(merge_notes) + graph_notes + retire_notes,
+                "coverage": pending.get("coverage") or {}}
+    finally:
+        lock.release()
+
+
+def _retire_themes(session_id: str, state: dict, retire_ids: list) -> list[str]:
+    """Drop empty, AI-generated topics after their children were moved.
+
+    Human-edited themes are left alone. A theme that still has children
+    after the patch is left alone rather than orphaning them.
+    """
+    if not retire_ids:
+        return []
+    notes: list[str] = []
+    edges = store.list_graph_edges(session_id)
+    still_parent = {e["from_id"] for e in edges if e.get("relation") == graph.HIERARCHY_RELATION}
+    themes = [t for t in (state.get("themes") or []) if isinstance(t, dict)]
+    by_id = {t["id"]: t for t in themes if t.get("id")}
+    kept = []
+    removed = 0
+    for t in themes:
+        tid = t.get("id")
+        if tid not in retire_ids:
+            kept.append(t)
+            continue
+        if t.get("human_edited") or t.get("human_reviewed"):
+            notes.append(f"kept “{(t.get('text') or tid)}” because someone edited it by hand")
+            kept.append(t)
+            continue
+        if tid in still_parent:
+            notes.append(f"kept “{(t.get('text') or tid)}” because it still has children")
+            kept.append(t)
+            continue
+        store.record_removed_map_item(session_id, "themes", tid)
+        store.drop_inferred_contains(session_id, tid)
+        removed += 1
+    if removed:
+        state["themes"] = kept
+        store.save_state(session_id, state)
+        notes.append(f"removed {removed} redundant topic(s)")
+        store.bump_graph_revision(session_id)
+    return notes
 
 
 @router.post("/sessions/{session_id}/graph/organize/discard")
@@ -2626,7 +2821,10 @@ def discard_organize(session_id: str):
 @router.get("/sessions/{session_id}/graph/organize/pending")
 def get_pending_organize(session_id: str):
     _session_or_404(session_id)
-    return {"pending": store.get_pending_organize(session_id)}
+    pending = store.get_pending_organize(session_id)
+    if not pending:
+        return {"pending": None}
+    return {"pending": _pending_public(pending)}
 
 
 def _edge_or_404(session_id: str, edge_id: str) -> dict:
@@ -2636,15 +2834,19 @@ def _edge_or_404(session_id: str, edge_id: str) -> dict:
     raise HTTPException(status_code=404, detail="No such connection in this session.")
 
 
-def _assert_contains_ok(from_id: str, to_id: str, relation: str, node_kind: dict[str, str]) -> None:
+def _assert_contains_ok(from_id: str, to_id: str, relation: str, node_kind: dict[str, str],
+                        existing_parents: Optional[dict] = None) -> None:
     if relation != graph.HIERARCHY_RELATION:
         return
-    if node_kind.get(from_id) != "theme":
+    if not graph.contains_source_ok(from_id, node_kind):
         raise HTTPException(status_code=400,
-                            detail="Only a theme can contain something on the map.")
+                            detail="Only a topic can contain something on the map.")
     if not graph.contains_target_ok(to_id, node_kind):
         raise HTTPException(status_code=400,
-                            detail="A theme cannot contain the question or another theme.")
+                            detail="A topic cannot contain the question itself.")
+    if graph.contains_would_cycle(from_id, to_id, existing_parents or {}):
+        raise HTTPException(status_code=400,
+                            detail="That grouping would loop back on itself.")
 
 
 @router.post("/sessions/{session_id}/graph/edges")
@@ -2665,7 +2867,10 @@ def add_graph_edge(session_id: str, req: EdgeIn):
         raise HTTPException(status_code=400, detail="That connection names a node that does not exist.")
     if req.from_id == req.to_id:
         raise HTTPException(status_code=400, detail="A connection cannot point a node at itself.")
-    _assert_contains_ok(req.from_id, req.to_id, relation, node_kind)
+    existing_parents, _human = graph.existing_parent_index(store.list_graph_edges(session_id))
+    _assert_contains_ok(req.from_id, req.to_id, relation, node_kind, existing_parents)
+    if relation == graph.HIERARCHY_RELATION:
+        store.drop_inferred_contains(session_id, req.to_id, keep_from_id=req.from_id)
     existing_edges = store.list_graph_edges(session_id)
     is_new = not any(e["from_id"] == req.from_id and e["to_id"] == req.to_id
                      and e["relation"] == relation for e in existing_edges)
@@ -2694,7 +2899,9 @@ def edit_graph_edge(session_id: str, edge_id: str, req: EdgePatchIn):
         state = store.get_state(session_id)
         _, node_kind = graph.node_universe(
             state, store.list_decisions(session_id), store.list_action_items(session_id))
-        _assert_contains_ok(existing["from_id"], existing["to_id"], relation, node_kind)
+        existing_parents, _human = graph.existing_parent_index(store.list_graph_edges(session_id))
+        _assert_contains_ok(existing["from_id"], existing["to_id"], relation, node_kind,
+                            existing_parents)
         fields["relation"] = relation
     if not fields:
         raise HTTPException(status_code=400, detail="Nothing to change.")

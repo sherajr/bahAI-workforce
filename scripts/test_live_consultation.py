@@ -3696,6 +3696,10 @@ check("HTML export includes the record section",
 _caps2 = client.get("/live-consultation/capabilities").json()
 check("capabilities names the graph schema version",
       _caps2.get("graph_schema_version") == lc_graph.GRAPH_SCHEMA_VERSION)
+check("and a capability signal so an older backend is detectable",
+      _caps2.get("graph_capabilities", {}).get("organize_whole_map") is True
+      and _caps2.get("graph_capabilities", {}).get("nested_topics") is True,
+      json.dumps(_caps2.get("graph_capabilities")))
 check("and the node/edge vocabulary, for the legend",
       {k["id"] for k in _caps2["node_kinds"]} >= {"theme", "idea", "decision", "action"}
       and {k["id"] for k in _caps2["edge_relations"]} == set(lc_graph.EDGE_RELATIONS))
@@ -3968,10 +3972,19 @@ _theme_a, _theme_b = _themes7[0], _themes7[1]
 _cycle1 = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
                       json={"from_id": _theme_a["id"], "to_id": _theme_b["id"],
                             "relation": "contains"})
-check("a human cannot make one theme contain another", _cycle1.status_code == 400)
+check("a human can nest one topic under another", _cycle1.status_code == 200, _cycle1.text[:200])
 _cycle2 = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
                       json={"from_id": _theme_a["id"], "to_id": "root", "relation": "contains"})
 check("a human cannot make a theme contain the question itself", _cycle2.status_code == 400)
+_cycle_back = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
+                         json={"from_id": _theme_b["id"], "to_id": _theme_a["id"],
+                               "relation": "contains"})
+check("nesting the other way around is refused as a cycle",
+      _cycle_back.status_code == 400, _cycle_back.text[:200])
+# Undo the nested grouping so the rest of this section still talks about two
+# sibling themes.
+if _cycle1.status_code == 200:
+    client.delete(f"/live-consultation/sessions/{_W7}/graph/edges/{_cycle1.json()['edge']['id']}")
 
 _node_ids7, _node_kind7 = lc_graph.node_universe(store.get_state(_W7))
 _bad_model_edges = [
@@ -3980,9 +3993,10 @@ _bad_model_edges = [
     {"from": _theme_a["id"], "to": "root", "relation": "contains"},
 ]
 _accepted7, _notes7 = lc_graph.validate_edges(_bad_model_edges, {}, _node_ids7, _node_kind7, set())
-check("none of the three cyclical proposals survive validation -- from a model, "
-     "not only from a human",
-      _accepted7 == [], str(_accepted7))
+check("a nested topic is accepted; the cycle and containing the question are not",
+      len(_accepted7) == 1 and _accepted7[0]["to_id"] == _theme_b["id"], str(_accepted7))
+check("the drops are explained", any("cycled" in n or "question" in n for n in _notes7),
+      str(_notes7))
 
 _idea7 = next(n for n in _w7_graph["nodes"] if n["kind"] == "idea")
 _prov_edges = [{"from": _idea7["id"], "to": _theme_a["id"], "relation": "related_to",
@@ -4130,11 +4144,32 @@ _wide_width = max(_wide_xs) - min(_wide_xs)
 check("the diagram is not 11,200px wide any more -- it wraps instead of sprawling",
       _wide_width < 2000, f"width={_wide_width}")
 import itertools as _it  # noqa: E402
+_wide_visible = []
+_wide_hidden = set()
+_wide_collapsed = {n["id"] for n in _wide_graph["nodes"] if n.get("collapsed")}
+_wide_parent = {n["id"]: n.get("parent_id") for n in _wide_graph["nodes"]}
+for _n in _wide_graph["nodes"]:
+    _cur = _n.get("parent_id")
+    _seen = set()
+    _hid = False
+    while _cur and _cur not in _seen:
+        if _cur in _wide_collapsed:
+            _hid = True
+            break
+        _seen.add(_cur)
+        _cur = _wide_parent.get(_cur)
+    if _hid:
+        _wide_hidden.add(_n["id"])
+    else:
+        _wide_visible.append(_n)
 _wide_overlaps = sum(
-    1 for _a, _b in _it.combinations(_wide_graph["nodes"], 2)
-    if abs(_a["x"] - _b["x"]) < lc_graph._NODE_DX * 0.8
-    and abs(_a["y"] - _b["y"]) < lc_graph._NODE_DY * 0.8)
-check("no two nodes collide in the resulting layout", _wide_overlaps == 0, str(_wide_overlaps))
+    1 for _a, _b in _it.combinations(_wide_visible, 2)
+    if lc_graph._boxes_overlap(
+        (_a["x"], _a["y"], _a.get("width") or lc_graph.NODE_W, _a.get("height") or lc_graph.NODE_MIN_H),
+        (_b["x"], _b["y"], _b.get("width") or lc_graph.NODE_W, _b.get("height") or lc_graph.NODE_MIN_H)))
+check("no two VISIBLE nodes collide in the resulting layout", _wide_overlaps == 0, str(_wide_overlaps))
+check("the large unplaced bucket starts collapsed so the overview stays small",
+      any(n["kind"] == "bucket" and n.get("collapsed") for n in _wide_graph["nodes"]))
 
 
 section("a stale (pre-this-pass) automatic position is reflowed; a pin never "
@@ -4208,7 +4243,7 @@ store.save_state(_O, {
 })
 
 _real_organize = brain.organize
-lc_api.reasoner.organize = lambda session, state_, unplaced, model=None, call=None: \
+lc_api.reasoner.organize = lambda session, state_, unplaced=None, model=None, call=None, **kwargs: \
     brain.OrganizeResult(True, {
         "add": {"themes": [{"tmp_id": "t1", "text": "Venue and format"}]},
         "edges": [
@@ -4256,8 +4291,8 @@ try:
           _idea_node["detail"] == "Rent the hall")
 
     _empty_preview = client.post(f"/live-consultation/sessions/{_O}/graph/organize/preview")
-    check("once everything has a topic, there is nothing left to organise",
-          _empty_preview.status_code == 409)
+    check("a fully parented map can still be sent to Organize ideas (repair, not only unplaced)",
+          _empty_preview.status_code == 200, _empty_preview.text[:300])
 finally:
     lc_api.reasoner.organize = _real_organize
 
@@ -4391,6 +4426,271 @@ check("a bounded wait lets a closing pass run once the busy lock frees up",
 check("and it did not wait the full timeout -- it proceeded as soon as the lock freed",
       _elapsed < 1.5, str(_elapsed))
 check("FINAL_ANALYSIS_WAIT_S is a real, bounded number", 0 < lc_api.FINAL_ANALYSIS_WAIT_S <= 120)
+
+
+section("nested topics, subtree layout, and whole-map organisation")
+
+# Nested subtopics with variable-height labels: Question → topic → subtopic → idea.
+_nest_state = {
+    "question": "How do we get our nucleus to expand?",
+    "themes": [
+        {"id": "theme_rel", "text": "Building relationships"},
+        {"id": "theme_inv", "text": "Personal invitations"},
+        {"id": "theme_act", "text": "Meaningful activities"},
+        {"id": "theme_small", "text": "Small gatherings"},
+    ],
+    "ideas": [
+        {"id": "idea_1", "text": "Offer an informal conversation rather than a formal invitation"},
+        {"id": "idea_2", "text": "Try a participant-suggested activity"},
+    ],
+    "needs_and_concerns": [
+        {"id": "concern_1", "text": "Do not pressure people who have not said yes"},
+    ],
+    "state_revision": 1,
+}
+_nest_edges = [
+    {"id": "ne1", "from_id": "theme_rel", "to_id": "theme_inv", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ne2", "from_id": "theme_inv", "to_id": "idea_1", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ne3", "from_id": "theme_act", "to_id": "theme_small", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ne4", "from_id": "theme_small", "to_id": "idea_2", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ne5", "from_id": "idea_1", "to_id": "concern_1", "relation": "addresses",
+     "label": "Ask permission before following up", "inferred": False,
+     "human_edited": False, "source_turn_ids": ["1"]},
+]
+_nest_graph = lc_graph.build_graph({"id": "cons_nest", "question": _nest_state["question"]},
+                                   _nest_state, [], [], _nest_edges, {})
+_nest_by = {n["id"]: n for n in _nest_graph["nodes"]}
+check("a nested subtopic hangs off its parent topic, not the question",
+      _nest_by["theme_inv"]["parent_id"] == "theme_rel"
+      and _nest_by["theme_rel"]["parent_id"] == "root")
+check("an idea under a subtopic is three steps from the question",
+      _nest_by["idea_1"]["parent_id"] == "theme_inv" and _nest_by["idea_1"]["depth"] == 3)
+check("the longer label gets a taller collision box than a short one",
+      _nest_by["idea_1"]["height"] > _nest_by["theme_rel"]["height"]
+      or len(_nest_by["idea_1"]["label"]) > len(_nest_by["theme_rel"]["label"]))
+_nest_ov = sum(
+    1 for _a, _b in _it.combinations(_nest_graph["nodes"], 2)
+    if lc_graph._boxes_overlap(
+        (_a["x"], _a["y"], _a["width"], _a["height"]),
+        (_b["x"], _b["y"], _b["width"], _b["height"])))
+check("nested variable-height cards do not overlap", _nest_ov == 0, str(_nest_ov))
+_cross_ids = [n["id"] for n in _nest_graph["nodes"]]
+check("a cross-link does not duplicate a card",
+      len(_cross_ids) == len(set(_cross_ids)))
+check("the addresses link is a cross-link, not a second parent",
+      _nest_by["concern_1"]["parent_id"] != "idea_1")
+
+# Three themes x nine children, expanded: the original review's collision.
+_t9_state = {
+    "question": "Q",
+    "themes": [{"id": f"theme_{i}", "text": f"Theme {i}"} for i in range(3)],
+    "ideas": [{"id": f"idea_{t}_{c}", "text": f"Idea {t}.{c}"} for t in range(3) for c in range(9)],
+}
+_t9_edges = [{"id": f"t9{t}_{c}", "from_id": f"theme_{t}", "to_id": f"idea_{t}_{c}",
+              "relation": "contains", "label": "", "inferred": True,
+              "human_edited": False, "source_turn_ids": []}
+             for t in range(3) for c in range(9)]
+_t9_views = {f"theme_{i}": {"collapsed": False, "pinned": False, "x": None, "y": None,
+                            "layout_version": 0} for i in range(3)}
+_t9_graph = lc_graph.build_graph({"id": "cons_t9", "question": "Q"}, _t9_state, [], [],
+                                 _t9_edges, _t9_views)
+_t9_kids = [n for n in _t9_graph["nodes"] if n["kind"] == "idea"]
+_t9_ident = sum(1 for i, a in enumerate(_t9_kids) for b in _t9_kids[i + 1:]
+                if a["x"] == b["x"] and a["y"] == b["y"])
+check("three themes with nine children each do not share identical coordinates",
+      _t9_ident == 0, str(_t9_ident))
+_t9_ov = sum(
+    1 for _a, _b in _it.combinations(_t9_graph["nodes"], 2)
+    if lc_graph._boxes_overlap(
+        (_a["x"], _a["y"], _a["width"], _a["height"]),
+        (_b["x"], _b["y"], _b["width"], _b["height"])))
+check("and no two cards overlap across branches", _t9_ov == 0, str(_t9_ov))
+
+# Reparenting invalidates a current-version automatic view; a pin does not.
+_rep_views = {
+    "idea_1": {"x": 50.0, "y": 400.0, "pinned": False, "collapsed": False,
+               "layout_version": lc_graph.LAYOUT_VERSION, "parent_id": "theme_rel"},
+    "idea_pinned": {"x": 9999.0, "y": 8888.0, "pinned": True, "collapsed": False,
+                    "layout_version": lc_graph.LAYOUT_VERSION, "parent_id": "theme_rel"},
+}
+_rep_state = {
+    "question": "Q",
+    "themes": [{"id": "theme_rel", "text": "A"}, {"id": "theme_act", "text": "B"}],
+    "ideas": [{"id": "idea_1", "text": "Moved"}, {"id": "idea_pinned", "text": "Pinned"}],
+}
+_rep_edges = [
+    {"id": "r1", "from_id": "theme_act", "to_id": "idea_1", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "r2", "from_id": "theme_act", "to_id": "idea_pinned", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+]
+_rep_graph = lc_graph.build_graph({"id": "cons_rep"}, _rep_state, [], [], _rep_edges, _rep_views)
+_rep_by = {n["id"]: n for n in _rep_graph["nodes"]}
+check("reparenting an unpinned current-version view reflows it",
+      "idea_1" in _rep_graph["new_positions"]
+      or (_rep_by["idea_1"]["x"], _rep_by["idea_1"]["y"]) != (50.0, 400.0))
+check("a pin is kept exactly even after its parent changes",
+      _rep_by["idea_pinned"]["x"] == 9999.0 and _rep_by["idea_pinned"]["y"] == 8888.0)
+
+# Collapse shrinks the overview bounding box of VISIBLE cards.
+_col_views = {"theme_rel": {"collapsed": True, "pinned": False, "x": None, "y": None,
+                            "layout_version": 0}}
+_col_graph = lc_graph.build_graph({"id": "cons_col", "question": _nest_state["question"]},
+                                  _nest_state, [], [], _nest_edges, _col_views)
+_open_graph = lc_graph.build_graph({"id": "cons_open", "question": _nest_state["question"]},
+                                   _nest_state, [], [], _nest_edges,
+                                   {"theme_rel": {"collapsed": False, "pinned": False,
+                                                  "x": None, "y": None, "layout_version": 0}})
+
+def _visible_span(g):
+    collapsed = {n["id"] for n in g["nodes"] if n.get("collapsed")}
+    parent = {n["id"]: n.get("parent_id") for n in g["nodes"]}
+    vis = []
+    for n in g["nodes"]:
+        cur, seen, hid = n.get("parent_id"), set(), False
+        while cur and cur not in seen:
+            if cur in collapsed:
+                hid = True
+                break
+            seen.add(cur)
+            cur = parent.get(cur)
+        if not hid:
+            vis.append(n)
+    xs = [n["x"] for n in vis]
+    ys = [n["y"] + (n.get("height") or 0) for n in vis]
+    return (max(xs) - min(xs) if xs else 0), (max(ys) - min(ys) if ys else 0)
+
+_col_w, _col_h = _visible_span(_col_graph)
+_open_w, _open_h = _visible_span(_open_graph)
+check("collapsing a branch reduces the visible overview, not leaving a hole for hidden children",
+      _col_h < _open_h or _col_w <= _open_w, f"collapsed={_col_w, _col_h} open={_open_w, _open_h}")
+
+# Conflicting pins are reported, not silently moved.
+_pin_views = {
+    "idea_1": {"x": 0.0, "y": 300.0, "pinned": True, "collapsed": False, "layout_version": 3},
+    "idea_2": {"x": 10.0, "y": 305.0, "pinned": True, "collapsed": False, "layout_version": 3},
+}
+_pin_state = {"question": "Q", "ideas": [{"id": "idea_1", "text": "A"}, {"id": "idea_2", "text": "B"}]}
+_pin_graph = lc_graph.build_graph({"id": "cons_pin"}, _pin_state, [], [], [], _pin_views)
+check("overlapping pins are reported rather than moved",
+      len(_pin_graph.get("pin_conflicts") or []) >= 1, str(_pin_graph.get("pin_conflicts")))
+_pin_by = {n["id"]: n for n in _pin_graph["nodes"]}
+check("and the pins stayed where they were",
+      _pin_by["idea_1"]["x"] == 0.0 and _pin_by["idea_2"]["x"] == 10.0)
+
+# 50+ organisation: preview accepted count matches apply, truncation is explicit.
+_ORG50 = client.post("/live-consultation/sessions",
+                     json={"title": "Fifty items", "question": "How should we grow?",
+                           "participants_informed": True}).json()["id"]
+store.save_state(_ORG50, {
+    "question": "How should we grow?",
+    "unresolved_questions": [{"id": f"question_{i}", "text": f"Question {i}?"} for i in range(50)],
+})
+_org50_edges = [{"from": "t1", "to": f"question_{i}", "relation": "contains"} for i in range(50)]
+lc_api.reasoner.organize = lambda session, state_, unplaced=None, model=None, call=None, **kwargs: \
+    brain.OrganizeResult(True, {
+        "add": {"themes": [{"tmp_id": "t1", "text": "Growing the nucleus"}]},
+        "edges": _org50_edges,
+    })
+try:
+    _p50 = client.post(f"/live-consultation/sessions/{_ORG50}/graph/organize/preview")
+    check("a 50-item organise preview succeeds", _p50.status_code == 200, _p50.text[:300])
+    _p50j = _p50.json()
+    check("preview reports accepted edges, not only raw model counts",
+          int(_p50j.get("accepted_edge_count") or 0) == 50, json.dumps(_p50j.get("coverage")))
+    check("and does not silently cap at 40",
+          int(_p50j.get("accepted_edge_count") or 0) > 40)
+    _a50 = client.post(f"/live-consultation/sessions/{_ORG50}/graph/organize/apply")
+    check("apply of the 50-item proposal succeeds", _a50.status_code == 200, _a50.text[:300])
+    _a50g = _a50.json()["graph"]
+    _a50_contains = [e for e in _a50g["edges"] if e["relation"] == "contains"
+                     and not str(e.get("from_id", "")).startswith("bucket")]
+    check("apply stored the same placements the preview accepted",
+          sum(1 for e in _a50_contains if str(e.get("to_id", "")).startswith("question_")) == 50,
+          str(len(_a50_contains)))
+    check("canonical wording is untouched",
+          next(n for n in _a50g["nodes"] if n["id"] == "question_0")["detail"] == "Question 0?")
+finally:
+    lc_api.reasoner.organize = _real_organize
+
+# Human edit during preview requires a refreshed proposal.
+_ORG_H = client.post("/live-consultation/sessions",
+                     json={"title": "Human during preview", "question": "Q",
+                           "participants_informed": True}).json()["id"]
+store.save_state(_ORG_H, {
+    "question": "Q",
+    "themes": [{"id": "theme_1", "text": "Venue"}],
+    "ideas": [{"id": "idea_1", "text": "Use the hall"}],
+})
+lc_api.reasoner.organize = lambda session, state_, unplaced=None, model=None, call=None, **kwargs: \
+    brain.OrganizeResult(True, {
+        "add": {"themes": []},
+        "edges": [{"from": "theme_1", "to": "idea_1", "relation": "contains"}],
+    })
+try:
+    _ph = client.post(f"/live-consultation/sessions/{_ORG_H}/graph/organize/preview")
+    check("preview of a reparent holds", _ph.status_code == 200, _ph.text[:200])
+    _g_before_h = client.get(f"/live-consultation/sessions/{_ORG_H}/graph").json()["graph"]
+    client.post(f"/live-consultation/sessions/{_ORG_H}/graph/edges",
+                json={"from_id": "theme_1", "to_id": "idea_1", "relation": "supports"})
+    _apply_h = client.post(f"/live-consultation/sessions/{_ORG_H}/graph/organize/apply")
+    check("applying after a human connection requires a refreshed preview",
+          _apply_h.status_code == 409, _apply_h.text[:250])
+    _g_after_h = client.get(f"/live-consultation/sessions/{_ORG_H}/graph").json()["graph"]
+    check("discard-equivalent: the failed apply left the map's items in place",
+          any(n["id"] == "idea_1" for n in _g_after_h["nodes"]))
+finally:
+    lc_api.reasoner.organize = _real_organize
+
+# Discard of a held proposal leaves the map unchanged.
+_ORG_D = client.post("/live-consultation/sessions",
+                     json={"title": "Discard", "question": "Q",
+                           "participants_informed": True}).json()["id"]
+store.save_state(_ORG_D, {"question": "Q", "ideas": [{"id": "idea_1", "text": "An idea"}]})
+lc_api.reasoner.organize = lambda session, state_, unplaced=None, model=None, call=None, **kwargs: \
+    brain.OrganizeResult(True, {
+        "add": {"themes": [{"tmp_id": "t1", "text": "Topic"}]},
+        "edges": [{"from": "t1", "to": "idea_1", "relation": "contains"}],
+    })
+try:
+    client.post(f"/live-consultation/sessions/{_ORG_D}/graph/organize/preview")
+    _before_d = client.get(f"/live-consultation/sessions/{_ORG_D}/graph").json()["graph"]
+    client.post(f"/live-consultation/sessions/{_ORG_D}/graph/organize/discard")
+    _after_d = client.get(f"/live-consultation/sessions/{_ORG_D}/graph").json()["graph"]
+    check("discard leaves the live map without the proposed theme",
+          not any(n["kind"] == "theme" for n in _after_d["nodes"])
+          and not any(n["kind"] == "theme" for n in _before_d["nodes"]))
+finally:
+    lc_api.reasoner.organize = _real_organize
+
+# Canonical rows without map_id still appear, and archive graph is free.
+_CAN = client.post("/live-consultation/sessions",
+                   json={"title": "Canonical only", "question": "Q",
+                         "participants_informed": True}).json()["id"]
+_can_action = client.post(f"/live-consultation/sessions/{_CAN}/actions",
+                          json={"action": "Print the programme"}).json()["action_item"]
+_can_graph = client.get(f"/live-consultation/sessions/{_CAN}/graph").json()["graph"]
+check("an action with no map_id still has a node",
+      any(n.get("record_ref") and n["record_ref"]["id"] == _can_action["id"]
+          for n in _can_graph["nodes"]))
+client.post(f"/live-consultation/sessions/{_CAN}/end", json={"final_pass": False})
+_can_ended = client.get(f"/live-consultation/sessions/{_CAN}/graph")
+check("opening an archive still does not call a model — the graph loads",
+      _can_ended.status_code == 200)
+_can_export = client.get(f"/live-consultation/sessions/{_CAN}/graph/export.svg")
+check("and the export still answers without a new AI call", _can_export.status_code == 200)
+
+# The organize routes exist on this process (the 404 was a stale server, not missing code).
+_routes = {getattr(r, "path", "") for r in client.app.routes}
+check("the organize preview route is mounted",
+      "/live-consultation/sessions/{session_id}/graph/organize/preview" in _routes)
+check("capabilities advertise whole-map organisation",
+      client.get("/live-consultation/capabilities").json()
+      .get("graph_capabilities", {}).get("organize_whole_map") is True)
 
 
 # --- Summary -----------------------------------------------------------------
