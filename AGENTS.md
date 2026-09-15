@@ -58,6 +58,8 @@ them equally — don't assume your own tool's defaults.
 - **Verify, don't trust a self-report** — your own or a dispatched agent's.
   Re-run the check: import the module, grep for the string that should be gone,
   read the whole `git diff`.
+- **If another tool's row in STATUS.md "In flight" overlaps your paths, stop
+  and tell Sheraj.** Do not "just be careful" in the same files.
 
 ## Commands and verification
 
@@ -135,3 +137,24 @@ it before assuming something is a code regression.
 For dispatching a precisely-scoped task to the Grok / Codex / Antigravity CLIs
 and re-verifying the result, see
 [docs/rules/dispatch.md](docs/rules/dispatch.md).
+
+## Parallel work — pick rows that do not share a file
+
+Sheraj runs Claude Code, Codex, and Grok on this repo. Two tools may run at
+once only if their rows below do not share a path. `agents/api.py` and
+`STATUS.md` are single-writer: one tool at a time, or a merge conflict is
+guaranteed. Default isolation is a git worktree plus this allowlist. After
+any dispatched agent, `git status` and the whole `git diff` — Codex has
+BOM-corrupted api.py while "succeeding"; Grok `--worktree` has failed to
+isolate. Details: docs/rules/dispatch.md.
+
+| Surface | Owns these paths | Do not touch |
+|---|---|---|
+| Product pipelines | `agents/{librarian,artist,scribe,reviewer,compositor,card_compositor,consultation,quote_verify,layout,print_sheet,translator,program_sheet}.py` | `agents/api.py` unless the task names a route; `live_consultation*`; `private/` |
+| Live Consultation | `agents/live_consultation*.py`, `dashboard/src/components/consultation/`, `dashboard/src/hooks/useRealtimeConsultation.ts`, `dashboard/src/lib/consultationGovernor.ts` | `agents/consultation.py` (different subsystem); `private/` contents except via the store module |
+| Colony / nuclei | `agents/{colony,colony_chat,colony_tools,nuclei_store,nuclei_layout,nuclei_bridge}.py`, `dashboard/src/components/colony/` | secretary private store; product pipelines |
+| Secretary | `agents/{secretary,secretary_store,secretary_tools,secretary_colony,whatsapp,gcal,gdocs,gdrive,gmail,gsheets,gslides,google_auth,scheduler,badi_dates}.py` | `workforce.db` product rows; live consultation store |
+| Video | `agents/video_*.py`, `agents/videographer.py`, `dashboard/src/components/video/`, `dashboard/src/components/VideoPanel.tsx` | product compositors |
+| Wallet | `agents/wallet.py` | colony layout |
+| Gatherings / Home | `agents/{gathering,gathering_api,home_api,program_sheet}.py`, `dashboard/src/components/{GatheringsPanel,HomePanel}.tsx` | live_consultation_store internals unless the task is the shared commitment join |
+| Dashboard chrome | `dashboard/src/{App,main}.tsx`, `components/{Nav,Layout,ui}.tsx` | backend modules other than the one endpoint you are wiring |

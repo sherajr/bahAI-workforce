@@ -162,8 +162,9 @@ keys all optional.
 | `AGENTS.md` | **Canonical dev orientation for any AI coding tool** — working norms, commands, and a routing table into `docs/rules/*.md` |
 | `docs/rules/*.md` | The numbered hard rules (1–130) and the gotchas, split by subsystem — pipelines, secretary, video, colony, wallet, jobs, api, live-consultation, dashboard, gatherings, gotchas, dispatch |
 | `docs/overview.md` | The three product pipelines + Gatherings/Home + Live Consultation, narrated in one page |
+| `agents/AGENTS.md`, `dashboard/**/AGENTS.md` | Nested orientation for the backend and for the Consultation/Colony/Video tabs — Codex/Cursor/Claude walk from the file being edited toward the repo root and load every AGENTS.md on the way, nearest wins |
 | `CLAUDE.md` | Thin `@AGENTS.md` import for Claude Code — don't edit directly |
-| `STATUS.md` | Living snapshot + running log of recent sessions across all tools |
+| `STATUS.md` | Living snapshot + running log of recent sessions across all tools, plus an "In flight" table so two tools don't collide on the same paths |
 | `bahai-workforce-constitution.md` | The 9 principles every product is scored against |
 | `docs/consultation-constitution.md` | What the live consultation assistant works under — the half asked of the model, and the half enforced in code |
 | `agents/api.py` | FastAPI backend — all endpoints + both pipeline orchestrations |
