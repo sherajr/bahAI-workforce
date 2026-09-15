@@ -11,10 +11,12 @@ anywhere — an Etsy publishing path exists in the code but has never been
 connected (0 of 84 products ever published; see [Honest status](#honest-status-whats-real-whats-not)).
 
 > **AI coding agent? Start here.** Read [AGENTS.md](AGENTS.md) (canonical dev
-> orientation for every tool — commands, pipelines, 86 numbered hard rules, gotchas) and
-> [STATUS.md](STATUS.md) (what's in progress, what recent sessions did) before
-> changing anything. Multiple AI coding tools work on this repo — check
-> `git status` and STATUS.md for in-flight work first.
+> orientation for every tool — commands, working norms, and a routing table
+> into [docs/rules/](docs/rules/), where the 130+ numbered hard rules and the
+> gotchas actually live, split by subsystem so you only load what your task
+> touches) and [STATUS.md](STATUS.md) (what's in progress, what recent
+> sessions did) before changing anything. Multiple AI coding tools work on
+> this repo — check `git status` and STATUS.md for in-flight work first.
 
 ## Why this exists
 
@@ -157,7 +159,9 @@ keys all optional.
 
 | Path | What it is |
 |---|---|
-| `AGENTS.md` | **Canonical dev orientation for any AI coding tool** — commands, pipelines, the numbered hard rules (1–116), gotchas |
+| `AGENTS.md` | **Canonical dev orientation for any AI coding tool** — working norms, commands, and a routing table into `docs/rules/*.md` |
+| `docs/rules/*.md` | The numbered hard rules (1–130) and the gotchas, split by subsystem — pipelines, secretary, video, colony, wallet, jobs, api, live-consultation, dashboard, gatherings, gotchas, dispatch |
+| `docs/overview.md` | The three product pipelines + Gatherings/Home + Live Consultation, narrated in one page |
 | `CLAUDE.md` | Thin `@AGENTS.md` import for Claude Code — don't edit directly |
 | `STATUS.md` | Living snapshot + running log of recent sessions across all tools |
 | `bahai-workforce-constitution.md` | The 9 principles every product is scored against |

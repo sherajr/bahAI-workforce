@@ -8,7 +8,8 @@ once, not duplicated per tool.
 @AGENTS.md
 
 If the import above didn't resolve for some reason, open `AGENTS.md`
-directly — it has everything: commands, the two pipelines, the visual layout
-editor, the 28 numbered hard rules, the Secretary subsystem, and gotchas.
-Also check `STATUS.md` (repo root) for the current in-progress snapshot and
-the running log of what recent sessions (by any tool) have done.
+directly — it has the working norms, commands, and a routing table pointing
+at `docs/rules/*.md`, where the numbered hard rules actually live (split by
+subsystem so no single file has to carry all of them). Also check `STATUS.md`
+(repo root) for the current in-progress snapshot and the running log of what
+recent sessions (by any tool) have done.
