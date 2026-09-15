@@ -3460,8 +3460,14 @@ check("the theme really does contain the idea",
       any(e["from_id"] == "theme_1" and e["to_id"] == "idea_1" for e in _contains))
 check("every theme is reachable from the root",
       any(e["from_id"] == "root" and e["to_id"] == "theme_1" for e in _contains))
-check("an item with no theme still hangs off the root rather than vanishing",
-      any(e["from_id"] == "root" and e["to_id"] == "concern_1" for e in _contains))
+check("an item with no theme is grouped into a provisional bucket, not vanished",
+      any(e["from_id"] == "bucket:concern" and e["to_id"] == "concern_1" for e in _contains))
+check("...and that bucket itself hangs off the root",
+      any(e["from_id"] == "root" and e["to_id"] == "bucket:concern" for e in _contains))
+check("unplaced items are counted, even though this is not whole-graph fallback",
+      # concern_1, decision_1 and action_1 all lack a theme in this fixture --
+      # only idea_1 was actually placed (under theme_1).
+      _dg_graph["unplaced_count"] == 3, str(_dg_graph["unplaced_count"]))
 
 _fb_state = {"question": "An old session", "ideas": [{"id": "idea_1", "text": "Something"}],
             "needs_and_concerns": [{"id": "concern_1", "text": "Something else"}],
@@ -4083,10 +4089,177 @@ _lay_state = {"question": "Q", "ideas": [
 _lay_views = {"idea_1": {"x": 0.0, "y": 300.0, "pinned": True, "collapsed": False}}
 _lay_graph = lc_graph.build_graph({"id": "cons_lay"}, _lay_state, [], [], [], _lay_views)
 _lay_by_id = {n["id"]: n for n in _lay_graph["nodes"]}
-_dx = abs(_lay_by_id["idea_2"]["x"] - _lay_by_id["idea_1"]["x"])
-check("a new node at the same depth as an existing pinned one does not overlap it",
-      _dx >= lc_graph._NODE_DX,
-      f"idea_1={_lay_by_id['idea_1']['x']} idea_2={_lay_by_id['idea_2']['x']}")
+_lay_dx = abs(_lay_by_id["idea_2"]["x"] - _lay_by_id["idea_1"]["x"])
+_lay_dy = abs(_lay_by_id["idea_2"]["y"] - _lay_by_id["idea_1"]["y"])
+# The wrapped local grid (rule 131) may legitimately place a new sibling in
+# the NEXT ROW rather than sharing a row with the pinned one -- the
+# assertion this replaces assumed same-row, x-only spacing, which the new
+# layout can correctly violate. What must still hold is genuine non-overlap
+# in EITHER axis, the same "clear" test the layout algorithm itself uses.
+check("a new node at the same branch as an existing pinned one does not overlap it",
+      _lay_dx >= lc_graph._NODE_DX * 0.85 or _lay_dy >= lc_graph._NODE_DY * 0.85,
+      f"idea_1={_lay_by_id['idea_1']['x'],_lay_by_id['idea_1']['y']} "
+      f"idea_2={_lay_by_id['idea_2']['x'],_lay_by_id['idea_2']['y']}")
+check("and the pinned node itself was not moved", _lay_by_id["idea_1"]["x"] == 0.0
+      and _lay_by_id["idea_1"]["y"] == 300.0)
+
+
+section("the reported defect: one theme plus 50 unparented items must not "
+       "sprawl into an 11,200px row (rule 131 -- a structural fix, not a "
+       "font/spacing tweak)")
+
+_wide_state = {
+    "question": "Q",
+    "themes": [{"id": "theme_1", "text": "Programme"}],
+    "unresolved_questions": [{"id": f"question_{i}", "text": f"Question number {i}?"}
+                            for i in range(50)],
+    "state_revision": 1,
+}
+_wide_graph = lc_graph.build_graph({"id": "cons_wide", "question": "Q"}, _wide_state,
+                                   [], [], [], {})
+check("a real theme means this is NOT whole-graph fallback", _wide_graph["fallback"] is False)
+_wide_qids = {f"question_{i}" for i in range(50)}
+check("the 50 unparented questions do not attach to root one at a time",
+      not any(e["from_id"] == "root" and e["to_id"] in _wide_qids for e in _wide_graph["edges"]))
+check("they are grouped into a provisional bucket instead",
+      any(n["kind"] == "bucket" for n in _wide_graph["nodes"]))
+check("every unplaced item is reported, not silently absorbed",
+      _wide_graph["unplaced_count"] == 50, str(_wide_graph["unplaced_count"]))
+_wide_xs = [n["x"] for n in _wide_graph["nodes"]]
+_wide_width = max(_wide_xs) - min(_wide_xs)
+check("the diagram is not 11,200px wide any more -- it wraps instead of sprawling",
+      _wide_width < 2000, f"width={_wide_width}")
+import itertools as _it  # noqa: E402
+_wide_overlaps = sum(
+    1 for _a, _b in _it.combinations(_wide_graph["nodes"], 2)
+    if abs(_a["x"] - _b["x"]) < lc_graph._NODE_DX * 0.8
+    and abs(_a["y"] - _b["y"]) < lc_graph._NODE_DY * 0.8)
+check("no two nodes collide in the resulting layout", _wide_overlaps == 0, str(_wide_overlaps))
+
+
+section("a stale (pre-this-pass) automatic position is reflowed; a pin never "
+       "is (rule 131)")
+
+_stale_views = {
+    "theme_1": {"x": 0.0, "y": 150.0, "pinned": False, "collapsed": False, "layout_version": 0},
+    "idea_pinned": {"x": 9999.0, "y": 9999.0, "pinned": True, "collapsed": False,
+                    "layout_version": 0},
+}
+_stale_state = {
+    "question": "Q", "themes": [{"id": "theme_1", "text": "Venue"}],
+    "ideas": [{"id": "idea_pinned", "text": "A pinned idea"}],
+    "state_revision": 1,
+}
+_stale_edges = [{"id": "se1", "from_id": "theme_1", "to_id": "idea_pinned",
+                 "relation": "contains", "label": "", "inferred": True,
+                 "human_edited": False, "source_turn_ids": []}]
+_stale_graph = lc_graph.build_graph({"id": "cons_stale"}, _stale_state, [], [], _stale_edges,
+                                    _stale_views)
+_stale_by_id = {n["id"]: n for n in _stale_graph["nodes"]}
+check("an old, unpinned position (layout_version 0) is not trusted forever",
+      "theme_1" in _stale_graph["new_positions"])
+check("a pinned position is kept exactly, whatever version it was computed under",
+      _stale_by_id["idea_pinned"]["x"] == 9999.0 and _stale_by_id["idea_pinned"]["y"] == 9999.0)
+check("and a pin is never re-offered as 'new' for the caller to persist again",
+      "idea_pinned" not in _stale_graph["new_positions"])
+
+_current_views = {k: {**v, "layout_version": lc_graph.LAYOUT_VERSION}
+                  for k, v in _stale_views.items() if k == "theme_1"}
+_current_graph = lc_graph.build_graph({"id": "cons_stale2"}, _stale_state, [], [],
+                                      _stale_edges, _current_views)
+check("a position stamped with the CURRENT layout version is trusted and kept exactly",
+      "theme_1" not in _current_graph["new_positions"])
+
+
+section("a large new branch starts collapsed; a small one does not (section 3)")
+
+_collapse_state = {
+    "question": "Q",
+    "themes": [{"id": "theme_big", "text": "Big topic"}, {"id": "theme_small", "text": "Small topic"}],
+    "ideas": [{"id": f"idea_{i}", "text": f"Idea {i}"} for i in range(10)],
+}
+_collapse_edges = (
+    [{"id": f"eb{i}", "from_id": "theme_big", "to_id": f"idea_{i}", "relation": "contains",
+      "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []}
+     for i in range(8)]
+    + [{"id": f"es{i}", "from_id": "theme_small", "to_id": f"idea_{i}", "relation": "contains",
+        "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []}
+       for i in range(8, 10)]
+)
+_collapse_graph = lc_graph.build_graph({"id": "cons_collapse"}, _collapse_state, [], [],
+                                       _collapse_edges, {})
+_collapse_by_id = {n["id"]: n for n in _collapse_graph["nodes"]}
+check("a brand-new branch with more children than the threshold starts collapsed",
+      _collapse_by_id["theme_big"]["collapsed"] is True)
+check("a brand-new branch with only a couple of children starts expanded",
+      _collapse_by_id["theme_small"]["collapsed"] is False)
+
+
+section("Organize ideas: preview holds a proposal; apply commits it; discard "
+       "drops it (rule 132)")
+
+_O = client.post("/live-consultation/sessions",
+                 json={"title": "Old unthemed session", "question": "How should we run it?",
+                       "participants_informed": True}).json()["id"]
+store.save_state(_O, {
+    "question": "How should we run it?",
+    "unresolved_questions": [{"id": "question_1", "text": "Where should we meet?"}],
+    "ideas": [{"id": "idea_1", "text": "Rent the hall"}],
+})
+
+_real_organize = brain.organize
+lc_api.reasoner.organize = lambda session, state_, unplaced, model=None, call=None: \
+    brain.OrganizeResult(True, {
+        "add": {"themes": [{"tmp_id": "t1", "text": "Venue and format"}]},
+        "edges": [
+            {"from": "t1", "to": "question_1", "relation": "contains"},
+            {"from": "t1", "to": "idea_1", "relation": "contains"},
+        ],
+    })
+try:
+    _preview = client.post(f"/live-consultation/sessions/{_O}/graph/organize/preview")
+    check("preview succeeds and proposes a theme plus two placements",
+          _preview.status_code == 200, _preview.text[:300])
+    _preview_json = _preview.json()
+    check("the preview counts match what was proposed",
+          _preview_json.get("proposed_theme_count") == 1
+          and _preview_json.get("proposed_edge_count") == 2, json.dumps(_preview_json))
+    check("the preview describes what it would do, in plain language",
+          any("Venue and format" in line for line in _preview_json.get("summary", [])),
+          str(_preview_json.get("summary")))
+
+    _g_before = client.get(f"/live-consultation/sessions/{_O}/graph").json()["graph"]
+    check("nothing is applied by a preview -- the live map has no theme yet",
+          not any(n["kind"] == "theme" for n in _g_before["nodes"]))
+
+    _discard = client.post(f"/live-consultation/sessions/{_O}/graph/organize/discard")
+    check("discard clears the pending proposal", _discard.json().get("discarded") is True)
+    _apply_after_discard = client.post(f"/live-consultation/sessions/{_O}/graph/organize/apply")
+    check("applying after a discard is refused -- there is nothing waiting",
+          _apply_after_discard.status_code == 404)
+
+    client.post(f"/live-consultation/sessions/{_O}/graph/organize/preview")
+    _apply = client.post(f"/live-consultation/sessions/{_O}/graph/organize/apply")
+    check("apply succeeds", _apply.status_code == 200, _apply.text[:300])
+    _applied_graph = _apply.json()["graph"]
+    _theme_node = next((n for n in _applied_graph["nodes"]
+                        if n["kind"] == "theme" and n["label"] == "Venue and format"), None)
+    check("apply actually commits the proposed theme", _theme_node is not None)
+    _applied_contains = {(e["from_id"], e["to_id"]) for e in _applied_graph["edges"]
+                        if e["relation"] == "contains"}
+    check("both proposed placements really landed",
+          _theme_node is not None
+          and (_theme_node["id"], "question_1") in _applied_contains
+          and (_theme_node["id"], "idea_1") in _applied_contains)
+    _idea_node = next(n for n in _applied_graph["nodes"] if n["id"] == "idea_1")
+    check("Organize ideas never touches an item's own wording",
+          _idea_node["detail"] == "Rent the hall")
+
+    _empty_preview = client.post(f"/live-consultation/sessions/{_O}/graph/organize/preview")
+    check("once everything has a topic, there is nothing left to organise",
+          _empty_preview.status_code == 409)
+finally:
+    lc_api.reasoner.organize = _real_organize
 
 
 section("HTML export shows a declined action's qualifier, and an "

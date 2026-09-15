@@ -1,4 +1,4 @@
-# Rules 73-110, 121-130 — Live Consultation
+# Rules 73-110, 121-132 — Live Consultation
 
 Canonical numbered hard rules for this subsystem. **Numbers are permanent — never
 renumber, only append.** Cited from code comments across the repo.
@@ -997,4 +997,128 @@ live_consultation_graph.py` owns the contract, the validation and the exports;
      reasons there was nothing to do), shown persistently in the archived view
      until `POST .../finish-analysis` — a bounded retry, not a second ending —
      actually clears it.
+
+
+## Rules 131–132 — a readable flow of ideas
+
+Added 2026-09-14 (owner ask, with a screenshot of "Picking a class for Sean":
+the map's cards were tiny, the canvas one enormous horizontal row, the sidebar
+dozens of repeated "Contains" rows). Verify with `scripts/test_live_consultation.py`.
+
+131. **A branch's children wrap into a compact local grid — never one shared
+     row across the WHOLE graph — and an item with no theme is grouped
+     PROVISIONALLY rather than fanned out onto root one at a time.** Two
+     structural defects, reproduced directly against one theme plus 50
+     unparented questions: 51 nodes on one row, 11,200px wide, `fallback:
+     false`.
+     - **`_layout` gave every node at a given DEPTH one shared, unbounded
+       row.** A theme's children and every OTHER theme's children searched
+       the same 1-D line for a free slot, so a branch with many children
+       spread sideways without limit regardless of which topic they actually
+       belonged to. `_grid_cols` now wraps a branch's own children into a
+       grid capped at `MAX_GRID_COLS` node-widths — the branch grows DOWN
+       instead (section 2: "use vertical space") — computed per branch, in
+       branch-LOCAL coordinates anchored on that branch's own position, never
+       sharing a row with a sibling branch's children. The hierarchy is
+       exactly two layers by construction (rule 122: `contains` may only
+       originate from a theme or the root, and may never target one), which
+       is what makes this tractable without a general tree-layout library:
+       branches (few, and never the reported defect) are placed left to
+       right as before; only each branch's OWN leaves needed to stop sharing
+       one global row.
+     - **Category fallback (rule 127) only ever engaged when NO theme existed
+       ANYWHERE.** The moment a meeting had even one real theme, `fallback`
+       went false and every OTHER orphan — an item the model has not placed
+       yet, or one that predates this feature — attached to root
+       INDIVIDUALLY, with nothing bounding how many. `build_graph` now groups
+       every such orphan into a PROVISIONAL bucket by kind (the same
+       fallback-bucket mechanism rule 127 already uses when there is no
+       theme at all, scoped down to just the items that need it) rather than
+       hanging each one off root on its own — still `synthetic`/un-inferred,
+       and counted in the graph payload's new `unplaced_count` so the screen
+       can say plainly that these items are not yet organised, without
+       claiming the whole meeting lacks structure the way `fallback: true`
+       does. This is also what fixed the root's own connection list showing
+       "dozens of Contains rows" in the reported screenshot: root's real
+       children are now a handful of themes and provisional buckets, not
+       every orphan leaf.
+     - **A position computed under the OLD scheme is never trusted forever.**
+       `graph_node_view` gained `layout_version`; `LAYOUT_VERSION` (currently
+       2) is stamped on every position this pass computes, whether
+       auto-placed or dragged by a human, and `_usable_view` trusts a stored
+       x/y only when it is PINNED (a human placed it — honoured regardless of
+       version, since a pin is a deliberate choice, not layout output) or
+       carries the CURRENT version. Everything else is treated as though no
+       row existed at all: recomputed once, under the fixed algorithm, and
+       re-stamped. Because the graph is derived fresh on every read (rule
+       121) this needed no migration step and no explicit reflow action — an
+       ALREADY-OPEN, already-unreadable session improves the very next time
+       its map is read, which is the whole point (section 4: "my existing
+       unreadable consultation must benefit immediately"). Collapsed state is
+       independent of this: reflowing a stale position never touches a
+       node's stored `collapsed` flag, which is read from the view row
+       whenever one exists at all, whatever its layout version.
+     - **A brand-new theme or bucket with more than a handful of children
+       starts COLLAPSED.** Only the very FIRST time it appears (no view row
+       at all) — a stale-position reflow must never silently re-collapse a
+       branch a person deliberately expanded, so this is gated on "no row,"
+       not on "no usable position." This is what keeps the initial view of a
+       real meeting a manageable overview (section 3: "roughly 12-20
+       initially visible") without a separate visibility mechanism: the
+       existing collapse/expand control already hides a branch's
+       descendants, this just changes what a NEW branch's default is. A
+       collapsed branch's own card shows a count and, when any of what it
+       hides still looks unresolved, how many — `branchStats` in
+       `ConceptGraph.tsx`, client-side, from the graph already on screen —
+       so collapsed content stays discoverable rather than reading as a dead
+       end (section 3: "show counts and unresolved-concern/action
+       indicators").
+     - **The layout test this replaces asserted same-ROW spacing** (two
+       siblings at the same depth kept apart by at least one node-width on
+       the x axis alone) — an assumption the wrapped grid can legitimately
+       violate by placing a new sibling in the next ROW instead. The
+       regression is now a genuine non-overlap check in both axes, plus a
+       direct reproduction of the reported case (one theme, 50 unparented
+       questions) asserting the resulting width is bounded and no two nodes
+       collide.
+132. **"Organize ideas" is a separate, explicit, PREVIEWED action from Arrange
+     map — geometric and semantic are not the same button.** Arrange
+     (existing, rule 124) is free and deterministic and never changes which
+     topic anything sits under; it cannot fix a session whose items are
+     provisionally bucketed rather than genuinely themed. For that, a new
+     action reuses the existing reasoning infrastructure exactly the way
+     section 4 asks — "a separate explicit action that shows progress/errors
+     and previews proposed grouping" — never run automatically and never
+     triggered by opening an archive (rule 126's neighbour: a paid call must
+     stay behind an explicit press, full stop).
+     - `reasoner.organize` is a NEW, narrower prompt — not the ordinary
+       per-turn analysis pass — shown the map's EXISTING themes and exactly
+       the items `_unplaced_from_graph` finds sitting in a provisional bucket
+       (rule 131), and restricted, in code, to returning only `{"add":
+       {"themes": [...]}, "edges": [...]}`: nothing it returns can reword a
+       fact, a decision or an action, or add a new leaf item, because
+       `OrganizeResult` strips anything else off the reply before it ever
+       reaches the API layer.
+     - **Preview holds a proposal; nothing is applied until a second,
+       explicit press.** `POST .../graph/organize/preview` makes the one paid
+       call, validates nothing new (the restricted patch is inert until
+       merged), and stores it — `sessions.pending_organize_json`, one row,
+       overwritten by the next preview — with a human-readable summary
+       (`_organize_summary`: "Place 'X' under 'Y'", "New topic: 'Z'") the
+       dashboard shows before anything commits. `POST .../apply` re-merges
+       the SAME stored patch against whatever the map says at that exact
+       moment — the identical rebase discipline `_run_analysis` already uses
+       for the ordinary pass (rule 104), reused rather than duplicated,
+       rather than trusting the preview's snapshot of the map to still be
+       current. `POST .../discard` throws it away. Applying always touches
+       `record_revision` (rule 128): a new theme or connection is new map
+       structure, part of what an approved export covers, whether or not the
+       specific edges changed.
+     - **Refuses out loud rather than doing nothing.** No API key configured,
+       or nothing left unplaced (every item already has a topic) — both a
+       409 with a plain reason, not a silently empty proposal. A reply that
+       cannot be read, or a call that cannot be reached, is reported the same
+       way `analyze` already reports it (rule 79's "bad output loses the
+       pass, never the meeting," applied to this pass too) — nothing is ever
+       half-applied.
 

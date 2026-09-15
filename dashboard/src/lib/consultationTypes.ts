@@ -559,8 +559,19 @@ export interface ConceptGraph {
    *  tree shown is CATEGORY grouping (a fallback), not something the group
    *  discussed — the screen must say so plainly (section 3). */
   fallback: boolean;
+  /** How many real items sit in a provisional (not-yet-themed) bucket even
+   *  though this is NOT whole-graph fallback — some themes exist, but these
+   *  items are not under one yet. 0 whenever nothing is unplaced, and always
+   *  0 in fallback mode itself (which already says so for the whole map). */
+  unplaced_count: number;
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+export interface OrganizePreview {
+  summary: string[];
+  proposed_theme_count: number;
+  proposed_edge_count: number;
 }
 
 export interface RealtimeCredential {

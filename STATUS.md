@@ -31,9 +31,12 @@ See `AGENTS.md` for the full technical orientation — this file is just
 - The Video pipeline, the Colony (+ the Material World / nuclei), the project
   wallet, the API's owner gate, and the prompt-injection hold.
 - Live Consultation: the human-owned record (rules 94-99), request-ordering
-  survival (rules 100-110), and the concept graph (rules 121-130, commits
-  `fcd8307` + `509aeb0` -- the second fixed 11 defects an external review
-  found). Closeout has not yet been used in a real meeting.
+  survival (rules 100-110), and the concept graph (rules 121-132, commits
+  `fcd8307` + `509aeb0` + the concept-map READABILITY pass below -- the
+  layout no longer sprawls into one giant row, orphans get a provisional
+  topic bucket instead of fanning out onto root, and there's now a separate
+  "Organize ideas" action for repairing an old, unthemed session). Closeout
+  has not yet been used in a real meeting.
 - Agent orientation split (`ed21927`): root `AGENTS.md` is a thin routing
   table; the numbered rules live in `docs/rules/*.md`, split by subsystem.
 
@@ -62,6 +65,107 @@ Empty when nothing is in flight.
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-14 (latest) -- Claude Code (Sonnet 5) -- the concept map, made readable
+
+Sheraj's own screenshot of "Picking a class for Sean": almost every card sat in
+one enormous horizontal row beneath the question, the canvas zoomed out until
+they were tiny, and the sidebar listed dozens of repeated "Contains" rows. New
+rules 131-132 in `docs/rules/live-consultation.md`.
+
+**The actual structural bug, confirmed before touching anything.** `_layout`
+gave every node at a given DEPTH one shared, unbounded row -- a theme's
+children searched the SAME 1-D line as every other theme's children for a free
+slot, so nothing bounded how wide a branch with many children could spread. A
+fixture of one real theme plus 50 unparented questions reproduced the reported
+shape exactly (51 nodes sharing root's row). Two independent causes, both in
+`agents/live_consultation_graph.py`:
+- **Orphans fanned out onto root one at a time.** Category fallback (rule 127)
+  only ever engaged when NO theme existed anywhere; the moment a meeting had
+  even one real theme, every OTHER unparented item attached to root
+  individually. `build_graph` now groups every orphan into a PROVISIONAL
+  bucket by kind (the same bucket mechanism rule 127 already used for a
+  fully-unthemed session, just scoped to the items that need it) and reports
+  the count in the graph payload's new `unplaced_count` -- this is also what
+  fixed the "dozens of Contains rows" in root's own sidebar list, since root's
+  real children are now a handful of themes/buckets, not every orphan leaf.
+- **The layout itself had no concept of "this branch's own area."** `_layout`
+  is rewritten so each branch's children wrap into a compact local grid
+  (`_grid_cols`, capped at `MAX_GRID_COLS`) anchored on that branch's own
+  position, instead of sharing one row with every other branch's children --
+  tractable without a general tree-layout library because the hierarchy is
+  exactly two layers by construction (rule 122). A stored position from the
+  OLD scheme is never trusted forever: `graph_node_view` gained
+  `layout_version`, and an unpinned position not stamped with the CURRENT
+  version (`LAYOUT_VERSION`, now 2) is recomputed once and re-stamped, never
+  migrated -- because the graph is derived fresh on every read (rule 121),
+  Sheraj's own already-unreadable session gets the fix the next time it is
+  opened, no migration step or button press required. Pins are honoured
+  regardless of version, always.
+
+**Readability, not just collision avoidance.** A brand-new theme or bucket
+with more than 6 children starts collapsed (only on its first-ever
+appearance -- never re-collapsing a branch a person deliberately expanded),
+and a collapsed card now carries a count and an "N open" hint
+(`branchStats` in `ConceptGraph.tsx`) so what's hidden inside stays
+discoverable. The detail panel's connection list groups by relation and caps
+each group at 8 with a "show N more" toggle, rather than one flat list --
+which, combined with the provisional-bucket fix, is what actually solved the
+reported "dozens of Contains rows." The legend/detail column is now
+collapsible (a button, not a permanent 20rem reservation), defaulting closed
+on a narrow viewport.
+
+**"Organize ideas" (rule 132) -- a second, explicit action, deliberately
+separate from Arrange map.** Arrange is free and geometric and was already
+correct; it cannot fix a session whose items are provisionally bucketed
+rather than genuinely themed, which is exactly what an OLD session needs.
+`reasoner.organize` is a new, narrower prompt shown the map's existing
+themes plus exactly the unplaced items, restricted in code to returning only
+`{"add": {"themes": [...]}, "edges": [...]}` -- nothing it proposes can
+reword a fact, a decision or an action. Preview makes the one paid call and
+HOLDS the result (`sessions.pending_organize_json`) with a plain-language
+summary; apply re-merges that same patch against whatever the map says at
+that moment (rule 104's rebase discipline, reused); discard throws it away.
+Never runs automatically, never on opening an archive.
+
+Also, a smaller prompt change: the ordinary per-turn reasoner now says
+explicitly to keep themes to roughly 3-5, reuse an existing one over a
+near-duplicate, and it may retroactively place an already-on-the-map item
+under a theme that has since become clear -- not only brand-new items.
+
+**Verified:** 893 offline checks in `test_live_consultation.py` (was 811,
++82) -- the reported reproduction case (one theme, 50 unparented items) now
+asserted under 2000px wide with zero colliding nodes, the provisional-bucket
+routing, `layout_version` staleness/reflow/pin-preservation, the
+collapse-by-default threshold, and the full Organize ideas preview/apply/
+discard cycle through the real HTTP endpoints. `npx tsc --noEmit` and
+`npm run build` both clean; the Consultation lazy chunk grew from 311KB to
+321.72KB, the entry bundle unchanged at 247.65KB (rule 112). Two existing
+assertions were UPDATED rather than left broken, because the old behaviour
+they pinned is exactly what this pass changed on purpose: "an item with no
+theme hangs off the root" (now: grouped into a provisional bucket) and a
+same-ROW-only overlap check for two siblings (the wrapped grid can correctly
+place a new sibling in the next row instead; the replacement checks genuine
+non-overlap in both axes).
+
+**Not done, honestly.** No browser-automation tool was available in this
+session, so nothing here has been visually inspected in an actual browser at
+1366x768, 1920x1080, or a narrow viewport -- every frontend claim rests on
+typecheck, the production build, and reading the code, exactly like the two
+concept-map sessions before this one. `reasoner.organize` was never called
+against a real model, only stubbed (the same discipline the rest of this
+suite already uses for `analyze`). No true side-by-side "preview vs. apply"
+diff UI exists for Organize ideas -- the preview is a plain-language summary
+list, not a rendered before/after map. A keyboard-navigation audit, a
+print/PDF pagination pass for a very large complete export, and the
+dashboard-chrome-level "account for the Activity Log's height" ask were all
+out of scope for this pass (the last is outside Live Consultation's own
+files under the parallel-work table). Manual verification steps for the
+visual claims: open an existing multi-item consultation's Concept map tab,
+confirm the initial view shows a manageable number of cards rather than one
+wide row, expand a collapsed theme and see its children wrap into rows
+rather than one line, and try Organize ideas on a session with unplaced
+items.
 
 ### 2026-09-14 (later) -- Claude Code (Sonnet 5) -- agents/api.py split into per-subsystem routers
 

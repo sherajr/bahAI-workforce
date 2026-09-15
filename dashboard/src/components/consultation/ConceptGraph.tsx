@@ -5,13 +5,14 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
-  Download, FileCode, Image as ImageIcon, LayoutGrid, List, Loader2, Maximize2,
-  Minimize2, Network, Pencil, Pin, Quote, Search, Trash2, X,
+  ChevronDown, ChevronRight, Download, FileCode, Image as ImageIcon, LayoutGrid, List,
+  Loader2, Maximize2, Minimize2, Network, PanelRightClose, PanelRightOpen, Pencil, Pin,
+  Quote, Search, Sparkles, Trash2, X,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
   ConceptGraph as ConceptGraphT, ConsultationAction, ConsultationCapabilities,
-  ConsultationDecision, GraphNode, GraphRelation,
+  ConsultationDecision, GraphEdge, GraphNode, GraphRelation, OrganizePreview,
 } from "../../lib/consultationTypes";
 import { Button, Card } from "../ui";
 
@@ -34,8 +35,62 @@ const prefersReducedMotion = () =>
   typeof window !== "undefined"
   && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
-type FlowNodeData = { graphNode: GraphNode; dimmed: boolean; matched: boolean; color: string };
+type BranchStats = { total: number; open: number };
+type FlowNodeData = {
+  graphNode: GraphNode; dimmed: boolean; matched: boolean; color: string; stats?: BranchStats;
+};
 type FlowEdgeData = { relation: GraphRelation; dimmed: boolean };
+
+// Statuses that still count as "open" for a branch's badge, spanning every
+// list's own vocabulary (a lifecycle, a fact state, a decision or action
+// status) — approximate on purpose, since this only drives a discoverability
+// hint on a COLLAPSED card (section 3: "show counts and unresolved-concern/
+// action indicators so collapsed content is discoverable"), never a claim
+// about the record itself.
+const OPEN_STATUSES = new Set([
+  "open", "reported", "disputed", "candidate", "proposed", "accepted", "in_progress",
+]);
+
+/** For every theme/bucket branch: how many leaves it holds (through ANY
+ *  depth of nested branches, though the hierarchy is two layers by
+ *  construction so this is normally just its direct children), and how many
+ *  of those still look unresolved — so a COLLAPSED card can say what is
+ *  hidden inside it instead of only naming the topic. */
+function branchStats(graph: ConceptGraphT): Map<string, BranchStats> {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const children = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (e.relation !== "contains") continue;
+    const list = children.get(e.from_id) ?? [];
+    list.push(e.to_id);
+    children.set(e.from_id, list);
+  }
+  const stats = new Map<string, BranchStats>();
+  function walk(id: string, seen: Set<string>): BranchStats {
+    if (seen.has(id)) return { total: 0, open: 0 };
+    seen = new Set([...seen, id]);
+    let total = 0, open = 0;
+    for (const childId of children.get(id) ?? []) {
+      const child = byId.get(childId);
+      if (!child) continue;
+      if (child.kind === "theme" || child.kind === "bucket") {
+        const sub = walk(childId, seen);
+        total += sub.total;
+        open += sub.open;
+      } else {
+        total += 1;
+        if (child.status && OPEN_STATUSES.has(child.status)) open += 1;
+      }
+    }
+    const result = { total, open };
+    stats.set(id, result);
+    return result;
+  }
+  for (const n of graph.nodes) {
+    if (n.kind === "theme" || n.kind === "bucket") walk(n.id, new Set());
+  }
+  return stats;
+}
 
 function relationStyle(relation: GraphRelation, capabilities: ConsultationCapabilities) {
   const meta = capabilities.edge_relations.find((r) => r.id === relation);
@@ -71,8 +126,9 @@ function collapsedDescendants(graph: ConceptGraphT): Set<string> {
 }
 
 function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">>) {
-  const { graphNode: n, dimmed, matched, color } = data;
+  const { graphNode: n, dimmed, matched, color, stats } = data;
   const isRoot = n.kind === "root";
+  const isBranch = n.kind === "theme" || n.kind === "bucket";
   return (
     <div
       role="button"
@@ -93,7 +149,23 @@ function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">
               style={{ color: n.origin === "fallback_grouping" ? "#a1a1aa" : color }}>
           {n.kind === "bucket" ? "category" : n.kind}
         </span>
-        {n.human_edited && <Pin className="h-3 w-3 shrink-0 text-emerald-400" aria-label="corrected by hand" />}
+        <div className="flex shrink-0 items-center gap-1">
+          {/* A collapsed branch's own card is the only thing still on screen
+             for everything it hides, so it carries a count and an unresolved
+             hint (section 3: "show counts... so collapsed content is
+             discoverable") rather than reading as a dead end. */}
+          {isBranch && n.collapsed && stats && stats.total > 0 && (
+            <span
+              title={stats.open > 0 ? `${stats.total} item(s), ${stats.open} still open`
+                                    : `${stats.total} item(s)`}
+              className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+                stats.open > 0 ? "bg-amber-400/20 text-amber-300" : "bg-slate-800 text-slate-400"}`}
+            >
+              {stats.total}{stats.open > 0 ? ` · ${stats.open} open` : ""}
+            </span>
+          )}
+          {n.human_edited && <Pin className="h-3 w-3 text-emerald-400" aria-label="corrected by hand" />}
+        </div>
       </div>
       <p className="mt-0.5 line-clamp-3 text-sm leading-snug text-slate-100">{n.label}</p>
       {n.status_label && (
@@ -106,8 +178,8 @@ function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">
 const NODE_TYPES = { concept: ConceptNode };
 
 function toFlowNodes(graph: ConceptGraphT, hidden: Set<string>, selectedId: string | null,
-                     matches: Set<string>,
-                     capabilities: ConsultationCapabilities): Node<FlowNodeData, "concept">[] {
+                     matches: Set<string>, capabilities: ConsultationCapabilities,
+                     stats: Map<string, BranchStats>): Node<FlowNodeData, "concept">[] {
   return graph.nodes.filter((n) => !hidden.has(n.id)).map((n) => ({
     id: n.id,
     type: "concept",
@@ -121,6 +193,7 @@ function toFlowNodes(graph: ConceptGraphT, hidden: Set<string>, selectedId: stri
       // nodes"). A fallback-grouping bucket keeps its own neutral grey so it
       // still reads as scaffolding, not something the group said.
       color: n.origin === "fallback_grouping" ? "#71717a" : kindColor(n.kind, capabilities),
+      stats: stats.get(n.id),
     },
     selected: n.id === selectedId,
     draggable: n.kind !== "root",
@@ -236,8 +309,10 @@ function NodeDetail({
   const [editRelation, setEditRelation] = useState<GraphRelation>("related_to");
   const [editLabel, setEditLabel] = useState("");
 
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
   useEffect(() => setDraft(node.detail), [node.id, node.detail]);
-  useEffect(() => setEditingEdgeId(null), [node.id]);
+  useEffect(() => { setEditingEdgeId(null); setExpandedGroups(new Set()); }, [node.id]);
 
   const outgoing = graph.edges.filter((e) => e.from_id === node.id);
   const incoming = graph.edges.filter((e) => e.to_id === node.id);
@@ -267,6 +342,28 @@ function NodeDetail({
   const sameKindNodes = node.has_map_item
     ? otherNodes.filter((n) => n.kind === node.kind && n.record_ref && n.has_map_item)
     : [];
+
+  // Grouped by relation and capped per group (section 3: "group the root's
+  // connection list by topic so it does not repeat dozens of rows") — a
+  // theme with many children, or the root itself before the provisional-
+  // bucket fix, could otherwise print one row per connection with nothing
+  // to tell them apart at a glance.
+  type Conn = { e: GraphEdge; other: string; dir: "from" | "to" };
+  const allConns: Conn[] = [
+    ...incoming.map((e) => ({ e, other: e.from_id, dir: "from" as const })),
+    ...outgoing.map((e) => ({ e, other: e.to_id, dir: "to" as const })),
+  ].filter(({ other }) => byId.has(other));
+  const connGroups = useMemo(() => {
+    const groups = new Map<GraphRelation, Conn[]>();
+    for (const c of allConns) {
+      const list = groups.get(c.e.relation) ?? [];
+      list.push(c);
+      groups.set(c.e.relation, list);
+    }
+    return groups;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.id, graph.edges]);
+  const CONN_GROUP_LIMIT = 8;
 
   return (
     <Card className="flex h-full flex-col overflow-hidden">
@@ -363,46 +460,73 @@ function NodeDetail({
 
         <div>
           <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Connections</p>
-          <ul className="space-y-1">
-            {[...incoming.map((e) => ({ e, other: e.from_id, dir: "from" as const })),
-              ...outgoing.map((e) => ({ e, other: e.to_id, dir: "to" as const }))]
-              .filter(({ other }) => byId.has(other))
-              .map(({ e, other, dir }) => (
-                <li key={e.id} className="flex items-center justify-between gap-2 text-xs">
-                  <button onClick={() => onSelect(other)}
-                          className="min-w-0 flex-1 truncate text-left text-slate-300 hover:text-amber-200">
-                    {relationStyle(e.relation, capabilities).label}
-                    {dir === "from" ? " ← " : " → "}
-                    {byId.get(other)?.label}
-                  </button>
-                  {!readOnly && !e.synthetic && (
-                    <>
+          {allConns.length === 0 ? (
+            <p className="text-xs text-slate-600">No connections yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {[...connGroups.entries()].map(([relation, conns]) => {
+                const expanded = expandedGroups.has(relation);
+                const shown = expanded ? conns : conns.slice(0, CONN_GROUP_LIMIT);
+                return (
+                  <div key={relation}>
+                    {connGroups.size > 1 && (
+                      <p className="mb-0.5 text-[10px] uppercase tracking-wide text-slate-600">
+                        {relationStyle(relation, capabilities).label} ({conns.length})
+                      </p>
+                    )}
+                    <ul className="space-y-1">
+                      {shown.map(({ e, other, dir }) => (
+                        <li key={e.id} className="flex items-center justify-between gap-2 text-xs">
+                          <button onClick={() => onSelect(other)}
+                                  className="min-w-0 flex-1 truncate text-left text-slate-300 hover:text-amber-200">
+                            {connGroups.size === 1 && relationStyle(e.relation, capabilities).label + " "}
+                            {dir === "from" ? "← " : "→ "}
+                            {byId.get(other)?.label}
+                          </button>
+                          {!readOnly && !e.synthetic && (
+                            <>
+                              <button
+                                title="Edit this connection's relation or label"
+                                onClick={() => {
+                                  setEditingEdgeId(e.id);
+                                  setEditRelation(e.relation);
+                                  setEditLabel(e.label);
+                                }}
+                                className="shrink-0 text-slate-600 hover:text-amber-300"
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </button>
+                              <button
+                                title="Reject this connection"
+                                onClick={() => void run(() => api.rejectGraphEdge(sessionId, e.id))}
+                                className="shrink-0 text-slate-600 hover:text-rose-400"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    {conns.length > CONN_GROUP_LIMIT && (
                       <button
-                        title="Edit this connection's relation or label"
-                        onClick={() => {
-                          setEditingEdgeId(e.id);
-                          setEditRelation(e.relation);
-                          setEditLabel(e.label);
-                        }}
-                        className="shrink-0 text-slate-600 hover:text-amber-300"
+                        onClick={() => setExpandedGroups((prev) => {
+                          const next = new Set(prev);
+                          if (expanded) next.delete(relation); else next.add(relation);
+                          return next;
+                        })}
+                        className="mt-0.5 flex items-center gap-1 text-[11px] text-slate-500 hover:text-amber-300"
                       >
-                        <Pencil className="h-3 w-3" />
+                        {expanded
+                          ? <><ChevronDown className="h-3 w-3" /> Show fewer</>
+                          : <><ChevronRight className="h-3 w-3" /> Show {conns.length - CONN_GROUP_LIMIT} more</>}
                       </button>
-                      <button
-                        title="Reject this connection"
-                        onClick={() => void run(() => api.rejectGraphEdge(sessionId, e.id))}
-                        className="shrink-0 text-slate-600 hover:text-rose-400"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </>
-                  )}
-                </li>
-              ))}
-            {incoming.length + outgoing.length === 0 && (
-              <li className="text-xs text-slate-600">No connections yet.</li>
-            )}
-          </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {editingEdgeId && (
             <div className="mt-2 space-y-1.5 rounded border border-slate-800 bg-slate-950/60 p-2">
               <div className="flex flex-wrap gap-1.5">
@@ -505,6 +629,104 @@ function NodeDetail({
   );
 }
 
+// ── "Organize ideas" (section 4/rule 132) ───────────────────────────────────
+//
+// A separate, explicit, paid action from "Arrange map": this one can change
+// WHICH topic something sits under, so it previews before it commits, rather
+// than applying silently the way a drag or a click on Arrange does.
+
+function OrganizePanel({ sessionId, onClose, onChanged }: {
+  sessionId: string; onClose: () => void; onChanged: () => void;
+}) {
+  const [phase, setPhase] = useState<"loading" | "preview" | "applying" | "error">("loading");
+  const [preview, setPreview] = useState<OrganizePreview | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setPhase("loading");
+    api.previewOrganizeGraph(sessionId).then((p) => {
+      if (cancelled) return;
+      setPreview(p);
+      setPhase("preview");
+    }).catch((e: unknown) => {
+      if (cancelled) return;
+      setError(e instanceof Error ? e.message : "Could not prepare a proposal.");
+      setPhase("error");
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  const apply = async () => {
+    setPhase("applying");
+    try {
+      await api.applyOrganizeGraph(sessionId);
+      onChanged();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not apply the proposal.");
+      setPhase("error");
+    }
+  };
+
+  const discard = async () => {
+    try { await api.discardOrganizeGraph(sessionId); } finally { onClose(); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
+      <Card className="flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden">
+        <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
+          <span className="flex items-center gap-1.5 text-sm font-semibold text-slate-100">
+            <Sparkles className="h-4 w-4 text-amber-300" /> Organize ideas
+          </span>
+          <button onClick={() => void discard()} className="text-slate-500 hover:text-slate-200"
+                  aria-label="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {phase === "loading" && (
+            <p className="flex items-center gap-2 text-sm text-slate-400">
+              <Loader2 className="h-4 w-4 animate-spin" /> Looking at what still needs a topic…
+            </p>
+          )}
+          {phase === "error" && (
+            <p className="text-sm text-rose-300">{error}</p>
+          )}
+          {(phase === "preview" || phase === "applying") && preview && (
+            <>
+              <p className="mb-2 text-xs text-slate-400">
+                Nothing is changed yet. This is what Organize ideas would do:
+              </p>
+              <ul className="space-y-1 text-sm text-slate-200">
+                {preview.summary.map((line, i) => <li key={i}>• {line}</li>)}
+                {preview.summary.length === 0 && (
+                  <li className="text-slate-500">No confident placement was found.</li>
+                )}
+              </ul>
+            </>
+          )}
+        </div>
+        {(phase === "preview" || phase === "applying") && preview && (
+          <div className="flex gap-2 border-t border-slate-800 px-4 py-3">
+            <Button className="text-xs" disabled={phase === "applying" || preview.summary.length === 0}
+                    onClick={() => void apply()}>
+              {phase === "applying" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Apply
+            </Button>
+            <Button variant="ghost" className="text-xs" disabled={phase === "applying"}
+                    onClick={() => void discard()}>
+              Discard
+            </Button>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 // ── The canvas ───────────────────────────────────────────────────────────
 
 function Canvas({
@@ -530,6 +752,12 @@ function Canvas({
     typeof window !== "undefined" ? window.innerWidth < 640 : false);
   const [showOutline, setShowOutline] = useState(narrow);
   const [exportBusy, setExportBusy] = useState<string | null>(null);
+  const [organizeOpen, setOrganizeOpen] = useState(false);
+  // The legend/detail column is useful but not always needed — collapsing it
+  // gives the canvas the full width rather than always reserving 20rem
+  // (section 3: "make the detail/legend panel collapsible rather than
+  // permanently reserving a wide column when it is unnecessary").
+  const [showSidePanel, setShowSidePanel] = useState(!narrow);
   const draggingRef = useRef(false);
   const lastSyncedRef = useRef<string>("");
 
@@ -540,6 +768,7 @@ function Canvas({
   }, []);
 
   const hidden = useMemo(() => collapsedDescendants(graph), [graph]);
+  const stats = useMemo(() => branchStats(graph), [graph]);
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return new Set<string>();
@@ -563,10 +792,10 @@ function Canvas({
       `${graph.record_revision}`;
     if (draggingRef.current || key === lastSyncedRef.current) return;
     lastSyncedRef.current = key;
-    setNodes(toFlowNodes(graph, hidden, selectedId, matches, capabilities));
+    setNodes(toFlowNodes(graph, hidden, selectedId, matches, capabilities, stats));
     setEdges(toFlowEdges(graph, hidden, capabilities, selectedId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, hidden, capabilities]);
+  }, [graph, hidden, capabilities, stats]);
 
   // Selection/search only ever restyle existing nodes; they never move one.
   useEffect(() => {
@@ -582,6 +811,7 @@ function Canvas({
 
   const focusNode = useCallback((id: string) => {
     setSelectedId(id);
+    setShowSidePanel(true);
     const n = graph.nodes.find((x) => x.id === id);
     if (n) rf.setCenter(n.x + 100, n.y + 32,
       { zoom: 1, duration: prefersReducedMotion() ? 0 : 400 });
@@ -602,10 +832,29 @@ function Canvas({
 
   return (
     <div className={`flex flex-col gap-2 ${expanded ? "fixed inset-0 z-40 bg-slate-950 p-4" : "h-full"}`}>
+      {organizeOpen && (
+        <OrganizePanel sessionId={sessionId} onClose={() => setOrganizeOpen(false)}
+                       onChanged={onChanged} />
+      )}
       {graph.fallback && (
         <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400">
           No themes or connections have been drawn yet — grouped automatically by category
           for now.
+        </div>
+      )}
+      {!graph.fallback && graph.unplaced_count > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border
+                        border-slate-800 bg-slate-900/40 px-3 py-1.5 text-xs text-slate-500">
+          <span>
+            {graph.unplaced_count} item{graph.unplaced_count === 1 ? "" : "s"} {
+              graph.unplaced_count === 1 ? "isn't" : "aren't"} under a topic yet.
+          </span>
+          {!readOnly && (
+            <button onClick={() => setOrganizeOpen(true)}
+                    className="font-medium text-amber-300/80 hover:text-amber-200">
+              Organize ideas
+            </button>
+          )}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-2">
@@ -626,8 +875,15 @@ function Canvas({
         </Button>
         {!showOutline && (
           <Button variant="secondary" className="text-xs" disabled={arrange.busy}
-                  onClick={() => void arrange.run()}>
+                  onClick={() => void arrange.run()}
+                  title="A deterministic, free reflow -- never an AI call">
             <LayoutGrid className="h-3.5 w-3.5" /> Arrange map
+          </Button>
+        )}
+        {!readOnly && (
+          <Button variant="secondary" className="text-xs" onClick={() => setOrganizeOpen(true)}
+                  title="Propose topics and connections for unplaced items -- previews before it commits">
+            <Sparkles className="h-3.5 w-3.5" /> Organize ideas
           </Button>
         )}
         <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950 px-1 py-1">
@@ -649,9 +905,13 @@ function Canvas({
                 title={expanded ? "Exit expanded view" : "Expand — for a laptop or projected display"}>
           {expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
         </Button>
+        <Button variant="secondary" className="text-xs" onClick={() => setShowSidePanel((v) => !v)}
+                title={showSidePanel ? "Hide the detail panel" : "Show the detail panel"}>
+          {showSidePanel ? <PanelRightClose className="h-3.5 w-3.5" /> : <PanelRightOpen className="h-3.5 w-3.5" />}
+        </Button>
       </div>
 
-      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[1fr_20rem]">
+      <div className={`grid min-h-0 flex-1 gap-3 ${showSidePanel ? "lg:grid-cols-[1fr_20rem]" : "grid-cols-1"}`}>
         <div className="min-h-[22rem] overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
           {showOutline ? (
             <div className="h-full overflow-y-auto p-3">
@@ -670,7 +930,7 @@ function Canvas({
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               nodeTypes={NODE_TYPES}
-              onNodeClick={(_, n) => setSelectedId(n.id)}
+              onNodeClick={(_, n) => { setSelectedId(n.id); setShowSidePanel(true); }}
               onPaneClick={() => setSelectedId(null)}
               onNodeDragStart={() => { draggingRef.current = true; }}
               onNodeDragStop={(_, n) => {
@@ -704,25 +964,27 @@ function Canvas({
           )}
         </div>
 
-        <div className="min-h-0">
-          {selectedNode ? (
-            <NodeDetail
-              node={selectedNode}
-              graph={graph}
-              capabilities={capabilities}
-              sessionId={sessionId}
-              readOnly={readOnly}
-              decisions={decisions}
-              actions={actions}
-              onClose={() => setSelectedId(null)}
-              onChanged={onChanged}
-              onShowSource={onShowSource}
-              onSelect={focusNode}
-            />
-          ) : (
-            <Legend capabilities={capabilities} graph={graph} />
-          )}
-        </div>
+        {showSidePanel && (
+          <div className="min-h-0">
+            {selectedNode ? (
+              <NodeDetail
+                node={selectedNode}
+                graph={graph}
+                capabilities={capabilities}
+                sessionId={sessionId}
+                readOnly={readOnly}
+                decisions={decisions}
+                actions={actions}
+                onClose={() => setSelectedId(null)}
+                onChanged={onChanged}
+                onShowSource={onShowSource}
+                onSelect={focusNode}
+              />
+            ) : (
+              <Legend capabilities={capabilities} graph={graph} />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

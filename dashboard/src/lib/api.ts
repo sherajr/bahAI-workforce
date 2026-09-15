@@ -30,7 +30,7 @@ import type {
   VerifiedWriting,
   ConsultationParticipant, ConsultationTurn, DiarizeResult, ReportResult, ScheduledSpeech,
   ActionStatus, ConsultationAction, ConsultationDecision, ConsultationStateMap, MapItem,
-  ConceptGraph, GraphRelation,
+  ConceptGraph, GraphRelation, OrganizePreview,
 } from "./consultationTypes";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -1410,6 +1410,17 @@ export const api = {
     downloadFile(`/live-consultation/sessions/${id}/graph/export.html`, "GET", undefined,
                 `${(title || "consultation-report").replace(/[^\w \-]+/g, "").trim()
                   || "consultation-report"}.html`),
+  /** "Organize ideas" (section 4/rule 132) — a separate, explicit, paid action
+   *  from Arrange map above. Preview proposes and HOLDS a patch (one paid
+   *  call, nothing applied yet); apply commits exactly that; discard drops
+   *  it. Restricted server-side to themes and connections only. */
+  previewOrganizeGraph: (id: string) =>
+    post<OrganizePreview>(`/live-consultation/sessions/${id}/graph/organize/preview`, {}),
+  applyOrganizeGraph: (id: string) =>
+    post<{ graph: ConceptGraph; notes: string[] }>(
+      `/live-consultation/sessions/${id}/graph/organize/apply`, {}),
+  discardOrganizeGraph: (id: string) =>
+    post<{ discarded: boolean }>(`/live-consultation/sessions/${id}/graph/organize/discard`, {}),
 
   // Health
   health: () => get<{ status: string; service: string }>("/health"),

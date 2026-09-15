@@ -349,6 +349,13 @@ def init_db(db_path: Path | str | None = None) -> None:
                 y REAL,
                 pinned INTEGER NOT NULL DEFAULT 0,
                 collapsed INTEGER NOT NULL DEFAULT 0,
+                -- Which layout ALGORITHM computed x/y, so a position from an
+                -- earlier scheme is never trusted forever (rule 129's
+                -- follow-up: `live_consultation_graph.LAYOUT_VERSION`). 0 on
+                -- every pre-existing row, which is the truth about them — an
+                -- unpinned one is recomputed once and re-stamped the next
+                -- time this session's graph is read.
+                layout_version INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT DEFAULT (datetime('now', 'localtime')),
                 PRIMARY KEY (session_id, node_id)
             );
@@ -493,6 +500,25 @@ def init_db(db_path: Path | str | None = None) -> None:
             # `finish_analysis` retry.
             ("final_pass_note", "ALTER TABLE sessions ADD COLUMN final_pass_note TEXT "
                                 "NOT NULL DEFAULT ''"),
+            # Which layout algorithm computed a stored position — see the
+            # CREATE TABLE comment above. 0 on every row that pre-dates this
+            # column, so an old unpinned position is treated as stale exactly
+            # once, the next time this session's graph is built.
+            ("layout_version", "ALTER TABLE graph_node_view ADD COLUMN layout_version "
+                               "INTEGER NOT NULL DEFAULT 0"),
+            # "Organize ideas" (rule 132): a proposed, ALREADY-VALIDATED but
+            # not-yet-applied theme/connection patch, held here between the
+            # explicit preview and the explicit apply/discard press so the
+            # (paid) reasoning call is never repeated for the same proposal.
+            # Holds `{"patch": ..., "base_revision": ..., "summary": [...]}`
+            # as one JSON blob rather than several columns, since nothing
+            # here is ever queried on — only read back whole and re-merged
+            # against whatever the map says at apply time (rule 104's rebase
+            # discipline, reused rather than duplicated).
+            ("pending_organize_json", "ALTER TABLE sessions ADD COLUMN "
+                                      "pending_organize_json TEXT"),
+            ("pending_organize_created_at", "ALTER TABLE sessions ADD COLUMN "
+                                            "pending_organize_created_at TEXT"),
         ):
             try:
                 conn.execute(ddl)
@@ -2279,30 +2305,43 @@ def list_node_views(session_id: str, db_path: Path | str | None = None) -> dict[
 
 def set_node_view(session_id: str, node_id: str, db_path: Path | str | None = None,
                   x: float | None = None, y: float | None = None,
-                  pinned: bool | None = None, collapsed: bool | None = None) -> dict:
+                  pinned: bool | None = None, collapsed: bool | None = None,
+                  layout_version: int | None = None) -> dict:
     """
     Save where a node sits, or that its branch is collapsed. Pure layout: this
     never touches `state_revision` or `record_revision`, so dragging a node or
     collapsing a branch can never change what the assistant may say (rule 77) or
     invalidate an approved record (rule 102). It bumps its OWN counter
     (`graph_view_revision`) so a second device can still notice the change.
+
+    `layout_version` is stamped whenever the caller is writing a position it
+    computed under the CURRENT algorithm (an auto-placement, or a human drag —
+    both count as "current," since a pin is honoured regardless of version
+    anyway) — `None` leaves whatever is already stored untouched, which is
+    what makes a collapse/pin-only update never accidentally mark a genuinely
+    stale position as fresh.
     """
     with _connect(db_path) as conn:
         existing = conn.execute(
             "SELECT * FROM graph_node_view WHERE session_id = ? AND node_id = ?",
             (session_id, node_id)).fetchone()
-        cur = dict(existing) if existing else {"x": None, "y": None, "pinned": 0, "collapsed": 0}
+        cur = dict(existing) if existing else {"x": None, "y": None, "pinned": 0, "collapsed": 0,
+                                               "layout_version": 0}
         if x is not None: cur["x"] = x
         if y is not None: cur["y"] = y
         if pinned is not None: cur["pinned"] = 1 if pinned else 0
         if collapsed is not None: cur["collapsed"] = 1 if collapsed else 0
+        if layout_version is not None: cur["layout_version"] = int(layout_version)
         conn.execute(
-            """INSERT INTO graph_node_view (session_id, node_id, x, y, pinned, collapsed, updated_at)
-                   VALUES (?,?,?,?,?,?,?)
+            """INSERT INTO graph_node_view (session_id, node_id, x, y, pinned, collapsed,
+                                            layout_version, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(session_id, node_id) DO UPDATE SET
                    x = excluded.x, y = excluded.y, pinned = excluded.pinned,
-                   collapsed = excluded.collapsed, updated_at = excluded.updated_at""",
-            (session_id, node_id, cur["x"], cur["y"], cur["pinned"], cur["collapsed"], _now()))
+                   collapsed = excluded.collapsed, layout_version = excluded.layout_version,
+                   updated_at = excluded.updated_at""",
+            (session_id, node_id, cur["x"], cur["y"], cur["pinned"], cur["collapsed"],
+             cur["layout_version"], _now()))
         conn.execute("UPDATE sessions SET graph_view_revision = graph_view_revision + 1 WHERE id = ?",
                      (session_id,))
         conn.commit()
@@ -2323,6 +2362,51 @@ def clear_unpinned_node_views(session_id: str, db_path: Path | str | None = None
                      (session_id,))
         conn.commit()
     return cur.rowcount
+
+
+# ── "Organize ideas" (rule 132) ─────────────────────────────────────────────
+#
+# A held, already-validated proposal — never a second live copy of the map.
+# `graph/organize/preview` computes and stores it (one paid call); `apply`
+# re-merges it against whatever the map says AT THAT MOMENT (the same rebase
+# discipline `_run_analysis` already uses, rule 104, reused rather than
+# duplicated) and commits; `discard` throws it away. Nothing here is read by
+# anything except those three endpoints.
+
+def set_pending_organize(session_id: str, patch: dict, base_revision: int, summary: list[str],
+                         db_path: Path | str | None = None) -> None:
+    payload = json.dumps({"patch": patch, "base_revision": base_revision, "summary": summary},
+                         ensure_ascii=False)
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET pending_organize_json = ?, pending_organize_created_at = ? "
+            "WHERE id = ?", (payload, _now(), session_id))
+        conn.commit()
+
+
+def get_pending_organize(session_id: str, db_path: Path | str | None = None) -> Optional[dict]:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT pending_organize_json, pending_organize_created_at FROM sessions WHERE id = ?",
+            (session_id,)).fetchone()
+    if not row or not row["pending_organize_json"]:
+        return None
+    try:
+        data = json.loads(row["pending_organize_json"])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("patch"), dict):
+        return None
+    data["created_at"] = row["pending_organize_created_at"]
+    return data
+
+
+def clear_pending_organize(session_id: str, db_path: Path | str | None = None) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET pending_organize_json = NULL, pending_organize_created_at = NULL "
+            "WHERE id = ?", (session_id,))
+        conn.commit()
 
 
 def redirect_graph_edges(session_id: str, old_id: str, new_id_: str,

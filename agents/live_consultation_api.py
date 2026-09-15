@@ -2403,8 +2403,15 @@ def _graph_snapshot(session_id: str, session: Optional[dict] = None,
     built = graph.build_graph(session, state, decisions, actions, edges_rows, views)
     new_positions = built.pop("new_positions", {})
     if persist_positions:
-        for node_id, (x, y) in new_positions.items():
-            store.set_node_view(session_id, node_id, x=x, y=y, pinned=False)
+        for node_id, (x, y, default_collapsed) in new_positions.items():
+            kwargs = {"x": x, "y": y, "pinned": False, "layout_version": graph.LAYOUT_VERSION}
+            # Only for a node with no stored view row at all (see the graph
+            # payload's own comment) -- a stale position being reflowed under
+            # the new layout must never silently re-collapse a branch a
+            # person deliberately expanded.
+            if default_collapsed is not None:
+                kwargs["collapsed"] = default_collapsed
+            store.set_node_view(session_id, node_id, **kwargs)
     return built
 
 
@@ -2459,6 +2466,14 @@ def set_graph_node_view(session_id: str, node_id: str, req: NodeViewIn):
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="Nothing to change.")
+    # A human placing a node by hand is, by definition, a CURRENT position —
+    # stamped the same as an auto-computed one, so it is never later treated
+    # as a stale leftover from an old layout scheme (it would not matter for
+    # a pinned drag either way, since a pin is honoured regardless of
+    # version, but stamping it keeps the field meaningful if it is ever
+    # unpinned).
+    if "x" in fields or "y" in fields:
+        fields["layout_version"] = graph.LAYOUT_VERSION
     view = store.set_node_view(session_id, node_id, **fields)
     return {"view": view, "session": store.get_session(session_id)}
 
@@ -2467,10 +2482,151 @@ def set_graph_node_view(session_id: str, node_id: str, req: NodeViewIn):
 def arrange_graph(session_id: str):
     """Recompute the layout for everything nobody has explicitly pinned. A
     deliberate reset (section 5: "an explicit Arrange map control") — a
-    position someone dragged and pinned is left exactly where they put it."""
+    position someone dragged and pinned is left exactly where they put it.
+    Purely geometric: no AI call, and it changes nothing about which theme
+    (if any) an item sits under. For THAT, see "Organize ideas" below."""
     _session_or_404(session_id)
     store.clear_unpinned_node_views(session_id)
     return {"graph": _graph_snapshot(session_id)}
+
+
+# ── "Organize ideas" (rule 132) ──────────────────────────────────────────────
+#
+# Deliberately separate from Arrange map above: Arrange is geometric and free;
+# this is semantic and paid, so it is never run silently and never triggered
+# by opening an archive (section 4: "never make archive opening trigger a
+# paid call"). It is the repair path for a session that predates good theming,
+# or one where the ordinary per-turn pass has left real items unplaced —
+# `preview` proposes and HOLDS a patch (one paid call), `apply` commits
+# exactly that patch (re-merged against whatever the map says at that moment,
+# the same rebase discipline `_run_analysis` already uses — rule 104), and
+# `discard` throws it away. Nothing here can reword a fact, a decision or an
+# action: `reasoner.organize` returns only `{"add": {"themes": [...]}, "edges":
+# [...]}`, and `apply` merges exactly that and nothing else.
+
+def _unplaced_from_graph(built: dict) -> list[dict]:
+    """Every real item currently sitting in a PROVISIONAL bucket — exactly
+    the set `build_graph` could not place under a real theme, whether that is
+    because a few items lack one (the common case) or because nothing in this
+    session has a theme yet at all (a full-fallback session, where "Organize
+    ideas" is exactly the repair path for an old, unthemed meeting)."""
+    bucket_ids = {n["id"] for n in built["nodes"] if n["kind"] == "bucket"}
+    if not bucket_ids:
+        return []
+    parented = {e["to_id"] for e in built["edges"]
+               if e["relation"] == graph.HIERARCHY_RELATION and e["from_id"] in bucket_ids}
+    by_id = {n["id"]: n for n in built["nodes"]}
+    return [{"id": nid, "kind": by_id[nid]["kind"], "text": by_id[nid]["detail"]}
+            for nid in parented if nid in by_id]
+
+
+def _truncate(text: str, limit: int = 60) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _organize_summary(patch: dict, state: dict, unplaced: list[dict]) -> list[str]:
+    """A human-readable preview of what a proposed organize patch would do —
+    never applied from here, only described."""
+    label_by_id = {u["id"]: u["text"] for u in unplaced}
+    for name in core.ITEM_LISTS:
+        for item in (state.get(name) or []):
+            if isinstance(item, dict) and item.get("id"):
+                text = item.get("action") if name == "action_items" else item.get("text")
+                if text:
+                    label_by_id.setdefault(item["id"], text)
+    new_theme_label = {t.get("tmp_id"): t.get("text", "") for t in patch.get("add", {}).get("themes", [])
+                      if isinstance(t, dict) and t.get("tmp_id")}
+
+    def label(node_id: str) -> str:
+        return _truncate(new_theme_label.get(node_id) or label_by_id.get(node_id) or node_id)
+
+    lines: list[str] = []
+    for t in patch.get("add", {}).get("themes", []):
+        if isinstance(t, dict) and (t.get("text") or "").strip():
+            lines.append(f"New topic: “{_truncate(t['text'])}”")
+    for e in patch.get("edges", []):
+        if not isinstance(e, dict):
+            continue
+        frm, to = str(e.get("from") or ""), str(e.get("to") or "")
+        if not frm or not to:
+            continue
+        relation = e.get("relation", "related_to")
+        if relation == graph.HIERARCHY_RELATION:
+            lines.append(f"Place “{label(to)}” under “{label(frm)}”")
+        else:
+            rel_label = graph.RELATION_META.get(relation, {}).get("label", relation).lower()
+            lines.append(f"“{label(frm)}” {rel_label} “{label(to)}”")
+    return lines[:60]
+
+
+@router.post("/sessions/{session_id}/graph/organize/preview")
+def preview_organize(session_id: str):
+    session = _session_or_404(session_id)
+    if not realtime.available():
+        raise HTTPException(status_code=409, detail=(
+            "No OpenAI API key is configured, so ideas cannot be organised."))
+    built = _graph_snapshot(session_id, session, persist_positions=False)
+    unplaced = _unplaced_from_graph(built)
+    if not unplaced:
+        raise HTTPException(status_code=409, detail=(
+            "Nothing to organise -- every item already has a topic."))
+    state = store.get_state(session_id)
+    result = reasoner.organize(session, state, unplaced)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.note)
+    summary = _organize_summary(result.patch, state, unplaced)
+    store.set_pending_organize(session_id, patch=result.patch,
+                               base_revision=int(state.get("state_revision") or 0),
+                               summary=summary)
+    return {
+        "summary": summary,
+        "proposed_theme_count": len(result.patch.get("add", {}).get("themes", [])),
+        "proposed_edge_count": len(result.patch.get("edges", [])),
+    }
+
+
+@router.post("/sessions/{session_id}/graph/organize/apply")
+def apply_organize(session_id: str):
+    _session_or_404(session_id)
+    pending = store.get_pending_organize(session_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail=(
+            "There is no proposed organisation waiting -- run Organize ideas again."))
+    fresh = store.get_state(session_id)
+    merged, merge_notes, resolved_edges = reasoner.merge(fresh, pending["patch"])
+    validated, problem = reasoner.validate_state(merged)
+    if problem:
+        store.clear_pending_organize(session_id)
+        raise HTTPException(status_code=409, detail=(
+            "The record changed since this was proposed and it no longer applies "
+            "cleanly -- run Organize ideas again. " + problem))
+    if int(fresh.get("state_revision") or 0) != int(pending.get("base_revision") or 0):
+        merge_notes = list(merge_notes) + [
+            "the record changed since this was proposed; applied onto the current version"]
+    saved = store.save_state(session_id, validated)
+    graph_notes, _edges_changed = _apply_graph_patch(session_id, resolved_edges, saved)
+    store.clear_pending_organize(session_id)
+    # Any successful apply here changed the map's TOPOLOGY (a new theme, or a
+    # connection), which is part of what an approved export covers (rule 128) —
+    # unconditional, rather than gated on `_edges_changed`, because adding a
+    # theme with no edges (should not happen in practice, but is not itself
+    # invalid) is still new map structure.
+    _touch_record(session_id)
+    return {"graph": _graph_snapshot(session_id), "notes": list(merge_notes) + graph_notes}
+
+
+@router.post("/sessions/{session_id}/graph/organize/discard")
+def discard_organize(session_id: str):
+    _session_or_404(session_id)
+    store.clear_pending_organize(session_id)
+    return {"discarded": True}
+
+
+@router.get("/sessions/{session_id}/graph/organize/pending")
+def get_pending_organize(session_id: str):
+    _session_or_404(session_id)
+    return {"pending": store.get_pending_organize(session_id)}
 
 
 def _edge_or_404(session_id: str, edge_id: str) -> dict:
