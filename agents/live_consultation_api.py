@@ -656,6 +656,16 @@ def _detail(session: dict) -> dict:
         "record_revision": int(session.get("record_revision") or 0),
         "deletion_generation": int(session.get("deletion_generation") or 0),
         "mode_info": core.MODES.get(session.get("mode") or core.DEFAULT_MODE, {}),
+        # Whether an immutable approved MAP snapshot exists, distinct from the
+        # live one — a cheap boolean rather than the snapshot itself (which can
+        # be fetched from its own endpoint), so a full session read stays
+        # cheap even once a meeting has been approved several times over.
+        "has_approved_graph": bool(session.get("approved_graph_json")),
+        # A PERSISTENT record that the closing analysis pass did not finish —
+        # not just this one response's `note`, which used to be the only place
+        # it appeared and was routinely discarded by the caller navigating
+        # away (section 4). Empty string means nothing is outstanding.
+        "final_pass_note": session.get("final_pass_note") or "",
     }
 
 
@@ -704,14 +714,24 @@ def session_updates(session_id: str, turns_rev: int = 0, state_revision: int = -
                 "turns_rev": head["rev"], "turns_total": head["count"]}
 
     changed = store.turns_since(session_id, since_rev=turns_rev, source=source, limit=limit)
+    more = len(changed) >= limit
+    # The cursor handed back is the revision of the LAST turn actually
+    # delivered, not the session's absolute head. Returning the head
+    # regardless of `limit` sent a cursor describing rows the caller had never
+    # received: a request capped at 200 of 205 changed turns got back cursor
+    # 205 (the head), and the next poll — now starting AFTER everything, with
+    # nothing left `> 205` — silently skipped the five it never got. When
+    # `changed` is non-empty and nothing was truncated, its last row's revision
+    # already equals the head, so this is never a smaller cursor than before.
+    cursor_rev = changed[-1]["turn_rev"] if changed else head["rev"]
     state_changed = state_revision != now_state
     record_changed = record_revision != now_record
     out = {
         "resync": False,
-        "turns_rev": head["rev"], "turns_total": head["count"],
+        "turns_rev": cursor_rev, "turns_total": head["count"],
         "turns_source": head["source"],
         "turns": changed,
-        "more": len(changed) >= limit,
+        "more": more,
         "state_revision": now_state, "record_revision": now_record,
         "deletion_generation": generation,
         "transcript_deleted": bool(session.get("transcript_deleted_at")),
@@ -787,42 +807,43 @@ def confirm_informed(session_id: str):
         participants_informed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
 
-@router.post("/sessions/{session_id}/end")
-def end_session(session_id: str, final_pass: bool = True):
+_BUSY_NOTE = "An analysis pass is already running."
+
+
+def _run_final_pass(session: dict) -> tuple[str, bool]:
     """
-    Close the meeting and, if there is anything unread and a key configured,
-    make one last analysis pass so the record is complete.
+    Make the closing analysis pass. Returns `(note, incomplete)`.
 
-    A failed final pass is reported, never fatal: the transcript and the map as
-    they stand are already saved, and losing them to a model error would be
-    the worst possible moment for it.
+    `incomplete` is TRUE only when the closing summary is not trustworthy as
+    a finished thing — the bounded wait timed out because a pass was already
+    in flight, or the pass ran and genuinely failed. It is FALSE for the
+    ordinary, honest reasons there was nothing to do (nothing new was said, no
+    key is configured) — those are not an incomplete state, they are the
+    correct outcome, and must not raise a persistent warning that never
+    clears.
     """
-    session = _session_or_404(session_id)
+    if not realtime.available():
+        return "", False
+    try:
+        result = _run_analysis(session, final_pass=True, wait_if_busy=FINAL_ANALYSIS_WAIT_S)
+    except Exception as e:
+        return (f"The closing summary could not be made ({type(e).__name__}). "
+                "Everything said is saved."), True
+    note = result.get("note", "")
+    if not result.get("ran"):
+        return note, (note == _BUSY_NOTE)
+    if not result.get("ok"):
+        return note, True
+    return note, False
 
-    # Pressing End again is not a second ending (rule 107). It used to re-run
-    # the closing analysis AND rewrite the report -- two paid calls, on a
-    # meeting that was already over, for a record that does not change.
-    if store.already_ended(session_id):
-        detail = _detail(store.get_session(session_id))
-        detail["note"] = ("This consultation had already ended, so nothing was run "
-                          "again. The record is as it was.")
-        return detail
 
-    ended = store.end_session(session_id)
-    note = ""
-    if final_pass and realtime.available():
-        try:
-            result = _run_analysis(ended or session, final_pass=True,
-                                   wait_if_busy=FINAL_ANALYSIS_WAIT_S)
-            note = result.get("note", "")
-        except Exception as e:
-            note = f"The closing summary could not be made ({type(e).__name__}). Everything said is saved."
-    # The report is what the room actually wants when the meeting stops, so it
-    # is written here rather than waiting for someone to ask (owner ask
-    # 2026-08-25). It is built AFTER the final analysis pass, so it summarises
-    # the finished map rather than the map as it stood a minute before the end.
-    # A failure here is a note, never an error: the meeting is over and
-    # everything said is already saved.
+def _write_report(session_id: str, note: str) -> str:
+    """
+    Build and save the DRAFT report from whatever the record says right now,
+    appending to `note` rather than replacing it — a failed final pass and a
+    failed report write are two different things that can both be true at
+    once, and each must be readable on its own.
+    """
     try:
         current = store.get_session(session_id)
         built = report.build_report(
@@ -844,6 +865,69 @@ def end_session(session_id: str, final_pass: bool = True):
     except Exception as e:
         note = (note + f" The report could not be written ({type(e).__name__}); "
                        "it can be written by hand from the record.").strip()
+    return note
+
+
+@router.post("/sessions/{session_id}/end")
+def end_session(session_id: str, final_pass: bool = True):
+    """
+    Close the meeting and, if there is anything unread and a key configured,
+    make one last analysis pass so the record is complete.
+
+    A failed or incomplete final pass is reported, never fatal — the
+    transcript and the map as they stand are already saved — but it is no
+    longer reported ONLY in this one HTTP response, which used to be thrown
+    away the moment the room navigated to closeout (section 4: "the current
+    End mutation ignores the response note as it navigates away"). `note`
+    that means "the closing pass did not finish" is now ALSO written to
+    `final_pass_note`, a persistent field the archived session can go on
+    showing — with a `finish_analysis` retry (section 4's "recovery path")
+    — until it clears.
+    """
+    session = _session_or_404(session_id)
+
+    # Pressing End again is not a second ending (rule 107). It used to re-run
+    # the closing analysis AND rewrite the report -- two paid calls, on a
+    # meeting that was already over, for a record that does not change.
+    if store.already_ended(session_id):
+        detail = _detail(store.get_session(session_id))
+        detail["note"] = ("This consultation had already ended, so nothing was run "
+                          "again. The record is as it was.")
+        return detail
+
+    ended = store.end_session(session_id)
+    note, incomplete = ("", False)
+    if final_pass:
+        note, incomplete = _run_final_pass(ended or session)
+    # The report is what the room actually wants when the meeting stops, so it
+    # is written here rather than waiting for someone to ask (owner ask
+    # 2026-08-25). It is built AFTER the final analysis pass, so it summarises
+    # the finished map rather than the map as it stood a minute before the end.
+    note = _write_report(session_id, note)
+    store.update_session(session_id, final_pass_note=(note if incomplete else ""))
+    detail = _detail(store.get_session(session_id))
+    detail["note"] = note
+    return detail
+
+
+@router.post("/sessions/{session_id}/finish-analysis")
+def finish_analysis(session_id: str):
+    """
+    The recovery path for an incomplete closing pass (section 4) — a retry,
+    not a second ending: `end_session` itself is untouched by this and stays
+    idempotent (rule 107). Safe to press more than once: it is bounded exactly
+    like the original attempt and clears `final_pass_note` only on an actual
+    success, so a still-busy pass leaves the persistent warning standing
+    rather than clearing it on a guess.
+    """
+    session = _session_or_404(session_id)
+    if not session.get("final_pass_note"):
+        detail = _detail(session)
+        detail["note"] = "There was nothing incomplete to finish."
+        return detail
+    note, incomplete = _run_final_pass(session)
+    note = _write_report(session_id, note)
+    store.update_session(session_id, final_pass_note=(note if incomplete else ""))
     detail = _detail(store.get_session(session_id))
     detail["note"] = note
     return detail
@@ -884,19 +968,29 @@ def label_turn(session_id: str, turn_id: int, req: LabelIn):
 
 # ── Analysis ────────────────────────────────────────────────────────────────
 
-def _apply_graph_patch(session_id: str, resolved_edges: list[dict], saved_state: dict) -> list[str]:
+def _apply_graph_patch(session_id: str, resolved_edges: list[dict],
+                       saved_state: dict) -> tuple[list[str], bool]:
     """
     Validate the reasoner's proposed connections against the map as it ACTUALLY
     stands after this pass, and store the ones that pass. Deliberately run
     AFTER `save_state` rather than alongside the item rebase above: `saved_state`
     is already whatever the map says now (rebased or not), so this is correct
     in both cases without a second rebase of its own.
+
+    Returns `(notes, changed)` — the caller needs to know whether a connection
+    was actually added or refined, because that is part of what
+    `_record_status` (rule 102) has to treat as a change to the record: an
+    export includes the map's semantic relationships, and a connection arriving
+    after the record was approved must be able to make it STALE, the same as a
+    corrected owner does.
     """
     if not resolved_edges:
-        return []
+        return [], False
     node_ids, node_kind = graph.node_universe(saved_state)
     rejected = store.rejected_edge_keys(session_id)
-    accepted, notes = graph.validate_edges(resolved_edges, {}, node_ids, node_kind, rejected)
+    valid_turns = _valid_turn_id_set(session_id)
+    accepted, notes = graph.validate_edges(resolved_edges, {}, node_ids, node_kind, rejected,
+                                           valid_turn_ids=valid_turns)
     changed = False
     for e in accepted:
         row = store.upsert_graph_edge(
@@ -906,7 +1000,7 @@ def _apply_graph_patch(session_id: str, resolved_edges: list[dict], saved_state:
             changed = True
     if changed:
         store.bump_graph_revision(session_id)
-    return notes
+    return notes, changed
 
 
 def _run_analysis(session: dict, force: bool = False, final_pass: bool = False,
@@ -1012,6 +1106,17 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False,
         # dropped here, so an action that later learned an owner matched the
         # old row by text and was handed back unchanged. Real cost, measured on
         # this database before the fix: 169 action items, 2 owners, 0 due dates.
+        #
+        # Snapshotted BEFORE the upserts below, so the analysis pass can tell
+        # whether anything it wrote actually changed the record (rule 102) —
+        # every existing decision/action is re-upserted on every pass whether
+        # or not its wording moved, so a naive "something was upserted" flag
+        # would mark the record changed on almost every analysis, which is not
+        # the honest signal `_record_status` needs.
+        before_decisions = {d["id"]: (d.get("text"), d.get("rationale"), d.get("support"))
+                            for d in store.list_decisions(sid)}
+        before_actions = {a["id"]: (a.get("action"), a.get("owner"), a.get("due"))
+                          for a in store.list_action_items(sid)}
         for cand in saved.get("decision_candidates", []):
             store.upsert_decision_candidate(
                 sid, cand.get("text", ""), cand.get("rationale", ""),
@@ -1020,14 +1125,30 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False,
         for act in saved.get("action_items", []):
             store.upsert_action_item(sid, act.get("action", ""), act.get("owner"),
                                      act.get("due"), map_id=act.get("id") or None)
+        after_decisions = {d["id"]: (d.get("text"), d.get("rationale"), d.get("support"))
+                          for d in store.list_decisions(sid)}
+        after_actions = {a["id"]: (a.get("action"), a.get("owner"), a.get("due"))
+                        for a in store.list_action_items(sid)}
+        record_changed = (before_decisions != after_decisions or before_actions != after_actions)
 
         # The concept map's proposed connections — same "validate against what
         # is ACTUALLY there, right now" discipline as the rebase above, which is
         # exactly what makes a separate edge-rebase unnecessary: `saved` is
         # already the final, post-rebase map, so validating against it is
         # correct whether or not a rebase happened.
-        graph_notes = _apply_graph_patch(sid, result.resolved_edges, saved)
+        graph_notes, edges_changed = _apply_graph_patch(sid, result.resolved_edges, saved)
         result.notes = list(result.notes) + graph_notes
+        record_changed = record_changed or edges_changed
+
+        # A new decision or action, or a semantic connection, is part of what
+        # an approved export covers (rule 102) — same class as a human editing
+        # the record directly. Without this, a late-arriving analysis result
+        # (one still in flight when the meeting ended, say — rule 126) could
+        # add content to an ALREADY-APPROVED record while `_record_status` kept
+        # reporting "Approved, and current," because nothing here had ever told
+        # it the record moved.
+        if record_changed:
+            _touch_record(sid)
 
         added = []
         for obs in result.observations:
@@ -1052,6 +1173,14 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False,
         lock.release()
 
 
+def _valid_turn_id_set(session_id: str) -> set[str]:
+    """Every real turn id in this session, as strings — shared between map-item
+    provenance (`_validate_provenance`) and connection provenance
+    (`_apply_graph_patch`), so a citation on either one is held to the same
+    "must open something real" standard."""
+    return {str(t["id"]) for t in store.list_turns(session_id)}
+
+
 def _validate_provenance(session_id: str, state: dict) -> tuple[dict, int]:
     """Drop any `source_turn_ids` entry that is not a real turn in this session.
 
@@ -1060,7 +1189,7 @@ def _validate_provenance(session_id: str, state: dict) -> tuple[dict, int]:
     so. What it must at least be is real: a citation that opens nothing is
     worse than none, because it looks like corroboration.
     """
-    valid = {str(t["id"]) for t in store.list_turns(session_id)}
+    valid = _valid_turn_id_set(session_id)
     dropped = 0
     for name in core.ITEM_LISTS:
         for item in state.get(name) or []:
@@ -1909,7 +2038,8 @@ def approve_report(session_id: str, req: ApproveIn):
         session_id, approved_md=built["markdown"], approved_at=now,
         approved_revision=status["revision"],
         report_md=built["markdown"], report_at=now,
-        report_narrative_json=json.dumps(built.get("narrative") or {}, ensure_ascii=False))
+        report_narrative_json=json.dumps(built.get("narrative") or {}, ensure_ascii=False),
+        approved_graph_json=_snapshot_approved_graph(session_id, session))
     current = store.get_session(session_id)
     return {"approved": built["markdown"], "session": current,
             "record": _record_status(current)}
@@ -2050,9 +2180,28 @@ def edit_action(session_id: str, action_id: str, req: ActionPatchIn):
 
 @router.delete("/sessions/{session_id}/actions/{action_id}")
 def remove_action(session_id: str, action_id: str):
+    """
+    Delete a commitment. The canonical row is the whole record of it, so this
+    also strips the working-map item behind it (if any) and tombstones its id
+    — without that, a deleted action's map item stayed on the map with no
+    canonical row behind it, and the graph rendered it back as a fresh,
+    still-"proposed" phantom, because nothing else here told it the action was
+    gone (rule 104's reasoning, applied to a deletion the map itself is not
+    the entry point for).
+    """
     _session_or_404(session_id)
-    if not store.delete_action_item(action_id, session_id=session_id):
+    existing = next((a for a in store.list_action_items(session_id) if a["id"] == action_id), None)
+    if not existing or not store.delete_action_item(action_id, session_id=session_id):
         raise HTTPException(status_code=404, detail="No such action item in this session.")
+    map_id = existing.get("map_id")
+    if map_id:
+        state = store.get_state(session_id)
+        items = state.get("action_items") or []
+        kept = [i for i in items if not (isinstance(i, dict) and i.get("id") == map_id)]
+        if len(kept) != len(items):
+            state["action_items"] = kept
+            store.save_state(session_id, state)
+            store.record_removed_map_item(session_id, "action_items", map_id)
     _touch_record(session_id)
     return {"deleted": True}
 
@@ -2171,7 +2320,8 @@ def closeout(session_id: str, req: CloseoutIn):
                 approved_revision=int(updated.get("record_revision") or 0),
                 report_md=built["markdown"], report_at=now,
                 report_narrative_json=json.dumps(built.get("narrative") or {},
-                                                 ensure_ascii=False))
+                                                 ensure_ascii=False),
+                approved_graph_json=_snapshot_approved_graph(session_id, updated))
             updated = store.get_session(session_id)
         except Exception as e:
             note = (f"The closeout is saved, but the record could not be rebuilt "
@@ -2258,9 +2408,42 @@ def _graph_snapshot(session_id: str, session: Optional[dict] = None,
     return built
 
 
+def _snapshot_approved_graph(session_id: str, session: dict) -> str:
+    """The map exactly as it stands at the moment a record is approved,
+    frozen into `approved_graph_json` — an IMMUTABLE archive, never another
+    editable source of truth (section 2). Bound to the same revision as
+    `approved_md`/`approved_revision`, written in the same call, so the two
+    can never describe different moments.
+
+    Positions are not persisted from here: a snapshot is read, never dragged,
+    and the live graph's own positions are unaffected either way."""
+    return json.dumps(_graph_snapshot(session_id, session, persist_positions=False),
+                      ensure_ascii=False)
+
+
 @router.get("/sessions/{session_id}/graph")
 def get_graph(session_id: str):
     return {"graph": _graph_snapshot(session_id)}
+
+
+@router.get("/sessions/{session_id}/graph/approved")
+def get_approved_graph(session_id: str):
+    """The map as it stood when the record was last approved — an ARCHIVE,
+    distinguishable from whatever the live map has become since (section 2).
+    404 when nothing has ever been approved, the truthful answer rather than
+    quietly substituting the current graph for it."""
+    session = _session_or_404(session_id)
+    raw = session.get("approved_graph_json")
+    if not raw:
+        raise HTTPException(status_code=404, detail=(
+            "Nobody has approved a record for this consultation yet, so there is no "
+            "approved map to show."))
+    try:
+        snapshot = json.loads(raw)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=500, detail="The approved map could not be read.")
+    return {"graph": snapshot, "approved_at": session.get("approved_at"),
+            "approved_revision": int(session.get("approved_revision") or 0)}
 
 
 @router.patch("/sessions/{session_id}/graph/nodes/{node_id}/view")
@@ -2297,6 +2480,17 @@ def _edge_or_404(session_id: str, edge_id: str) -> dict:
     raise HTTPException(status_code=404, detail="No such connection in this session.")
 
 
+def _assert_contains_ok(from_id: str, to_id: str, relation: str, node_kind: dict[str, str]) -> None:
+    if relation != graph.HIERARCHY_RELATION:
+        return
+    if node_kind.get(from_id) != "theme":
+        raise HTTPException(status_code=400,
+                            detail="Only a theme can contain something on the map.")
+    if not graph.contains_target_ok(to_id, node_kind):
+        raise HTTPException(status_code=400,
+                            detail="A theme cannot contain the question or another theme.")
+
+
 @router.post("/sessions/{session_id}/graph/edges")
 def add_graph_edge(session_id: str, req: EdgeIn):
     """
@@ -2309,17 +2503,26 @@ def add_graph_edge(session_id: str, req: EdgeIn):
     if relation not in graph.EDGE_RELATIONS:
         raise HTTPException(status_code=400, detail=f"Unknown relation: {relation}")
     state = store.get_state(session_id)
-    node_ids, node_kind = graph.node_universe(state)
+    node_ids, node_kind = graph.node_universe(
+        state, store.list_decisions(session_id), store.list_action_items(session_id))
     if req.from_id not in node_ids or req.to_id not in node_ids:
         raise HTTPException(status_code=400, detail="That connection names a node that does not exist.")
     if req.from_id == req.to_id:
         raise HTTPException(status_code=400, detail="A connection cannot point a node at itself.")
-    if relation == graph.HIERARCHY_RELATION and node_kind.get(req.from_id) != "theme":
-        raise HTTPException(status_code=400,
-                            detail="Only a theme can contain something on the map.")
+    _assert_contains_ok(req.from_id, req.to_id, relation, node_kind)
+    existing_edges = store.list_graph_edges(session_id)
+    is_new = not any(e["from_id"] == req.from_id and e["to_id"] == req.to_id
+                     and e["relation"] == relation for e in existing_edges)
+    if is_new and len(existing_edges) >= graph.MAX_STORED_EDGES:
+        raise HTTPException(status_code=409, detail=(
+            "This map already holds as many connections as it can — remove one before "
+            "adding another."))
     edge = store.upsert_graph_edge(session_id, req.from_id, req.to_id, relation,
                                    label=req.label, human_edited=True)
+    if not edge:
+        raise HTTPException(status_code=409, detail="That connection could not be added.")
     store.bump_graph_revision(session_id)
+    _touch_record(session_id)
     return {"edge": edge, "graph": _graph_snapshot(session_id, session)}
 
 
@@ -2332,12 +2535,10 @@ def edit_graph_edge(session_id: str, edge_id: str, req: EdgePatchIn):
         relation = str(fields["relation"]).strip().lower()
         if relation not in graph.EDGE_RELATIONS:
             raise HTTPException(status_code=400, detail=f"Unknown relation: {relation}")
-        if relation == graph.HIERARCHY_RELATION:
-            state = store.get_state(session_id)
-            _, node_kind = graph.node_universe(state)
-            if node_kind.get(existing["from_id"]) != "theme":
-                raise HTTPException(status_code=400,
-                                    detail="Only a theme can contain something on the map.")
+        state = store.get_state(session_id)
+        _, node_kind = graph.node_universe(
+            state, store.list_decisions(session_id), store.list_action_items(session_id))
+        _assert_contains_ok(existing["from_id"], existing["to_id"], relation, node_kind)
         fields["relation"] = relation
     if not fields:
         raise HTTPException(status_code=400, detail="Nothing to change.")
@@ -2345,6 +2546,7 @@ def edit_graph_edge(session_id: str, edge_id: str, req: EdgePatchIn):
     if not edge:
         raise HTTPException(status_code=404, detail="No such connection in this session.")
     store.bump_graph_revision(session_id)
+    _touch_record(session_id)
     return {"edge": edge, "graph": _graph_snapshot(session_id)}
 
 
@@ -2355,6 +2557,7 @@ def reject_graph_edge(session_id: str, edge_id: str):
     _session_or_404(session_id)
     _edge_or_404(session_id, edge_id)
     store.reject_graph_edge(edge_id, session_id=session_id)
+    _touch_record(session_id)
     store.bump_graph_revision(session_id)
     return {"deleted": True, "graph": _graph_snapshot(session_id)}
 
@@ -2372,8 +2575,11 @@ def merge_graph_nodes(session_id: str, req: MergeNodesIn):
     if req.list_name not in core.ITEM_LISTS:
         raise HTTPException(status_code=400,
                             detail=f"There is no '{req.list_name}' in the consultation map.")
-    saved = store.merge_map_items(session_id, req.list_name, req.keep_id, req.remove_id,
-                                  text=req.text)
+    try:
+        saved = store.merge_map_items(session_id, req.list_name, req.keep_id, req.remove_id,
+                                      text=req.text)
+    except store.MergeRefused as e:
+        raise HTTPException(status_code=409, detail=str(e))
     if not saved:
         raise HTTPException(status_code=404,
                             detail="Both nodes must exist, in the same list, to be merged.")

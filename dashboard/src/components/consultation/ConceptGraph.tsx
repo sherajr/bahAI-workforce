@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider,
+  Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, ReactFlowProvider,
   type Edge, type Node, type NodeProps, useEdgesState, useNodesState, useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   Download, FileCode, Image as ImageIcon, LayoutGrid, List, Loader2, Maximize2,
-  Minimize2, Network, Pin, Quote, Search, Trash2, X,
+  Minimize2, Network, Pencil, Pin, Quote, Search, Trash2, X,
 } from "lucide-react";
 import { api } from "../../lib/api";
 import type {
@@ -34,7 +34,7 @@ const prefersReducedMotion = () =>
   typeof window !== "undefined"
   && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
-type FlowNodeData = { graphNode: GraphNode; dimmed: boolean; matched: boolean };
+type FlowNodeData = { graphNode: GraphNode; dimmed: boolean; matched: boolean; color: string };
 type FlowEdgeData = { relation: GraphRelation; dimmed: boolean };
 
 function relationStyle(relation: GraphRelation, capabilities: ConsultationCapabilities) {
@@ -71,7 +71,7 @@ function collapsedDescendants(graph: ConceptGraphT): Set<string> {
 }
 
 function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">>) {
-  const { graphNode: n, dimmed, matched } = data;
+  const { graphNode: n, dimmed, matched, color } = data;
   const isRoot = n.kind === "root";
   return (
     <div
@@ -79,7 +79,7 @@ function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">
       tabIndex={0}
       aria-label={`${n.kind}: ${n.label}`}
       style={{
-        borderColor: (n as GraphNode).origin === "fallback_grouping" ? "#71717a" : undefined,
+        borderColor: color,
         opacity: dimmed ? 0.25 : 1,
       }}
       className={`w-[200px] rounded-lg border-2 bg-slate-900 px-3 py-2 text-left shadow-sm transition-opacity
@@ -90,7 +90,7 @@ function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">
       <Handle type="source" position={Position.Bottom} className="!opacity-0" />
       <div className="flex items-center justify-between gap-1">
         <span className="truncate text-[10px] font-semibold uppercase tracking-wide"
-              style={{ color: n.origin === "fallback_grouping" ? "#a1a1aa" : undefined }}>
+              style={{ color: n.origin === "fallback_grouping" ? "#a1a1aa" : color }}>
           {n.kind === "bucket" ? "category" : n.kind}
         </span>
         {n.human_edited && <Pin className="h-3 w-3 shrink-0 text-emerald-400" aria-label="corrected by hand" />}
@@ -106,12 +106,22 @@ function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">
 const NODE_TYPES = { concept: ConceptNode };
 
 function toFlowNodes(graph: ConceptGraphT, hidden: Set<string>, selectedId: string | null,
-                     matches: Set<string>): Node<FlowNodeData, "concept">[] {
+                     matches: Set<string>,
+                     capabilities: ConsultationCapabilities): Node<FlowNodeData, "concept">[] {
   return graph.nodes.filter((n) => !hidden.has(n.id)).map((n) => ({
     id: n.id,
     type: "concept",
     position: { x: n.x, y: n.y },
-    data: { graphNode: n, dimmed: matches.size > 0 && !matches.has(n.id), matched: matches.has(n.id) },
+    data: {
+      graphNode: n, dimmed: matches.size > 0 && !matches.has(n.id), matched: matches.has(n.id),
+      // A node's kind colour used to appear only in the legend and the
+      // minimap, never on the box itself — every card looked the same shade
+      // of slate regardless of whether it was a concern, an idea or a
+      // decision (section 6: "restrained colours actually applied to
+      // nodes"). A fallback-grouping bucket keeps its own neutral grey so it
+      // still reads as scaffolding, not something the group said.
+      color: n.origin === "fallback_grouping" ? "#71717a" : kindColor(n.kind, capabilities),
+    },
     selected: n.id === selectedId,
     draggable: n.kind !== "root",
   }));
@@ -125,6 +135,7 @@ function toFlowEdges(graph: ConceptGraphT, hidden: Set<string>, capabilities: Co
       const style = relationStyle(e.relation, capabilities);
       const touchesFocus = focusId != null && (e.from_id === focusId || e.to_id === focusId);
       const showLabel = e.kind === "cross" && (focusId == null || touchesFocus);
+      const colour = e.kind === "hierarchy" ? "#475569" : "#eab308";
       return {
         id: e.id,
         source: e.from_id,
@@ -135,11 +146,18 @@ function toFlowEdges(graph: ConceptGraphT, hidden: Set<string>, capabilities: Co
         labelStyle: { fill: "#cbd5e1", fontSize: 10 },
         labelBgStyle: { fill: "#0f172a", fillOpacity: 0.8 },
         style: {
-          stroke: e.kind === "hierarchy" ? "#475569" : "#eab308",
+          stroke: colour,
           strokeWidth: e.kind === "hierarchy" ? 1.5 : touchesFocus ? 2.5 : 1.5,
           strokeDasharray: style.dash,
           opacity: focusId != null && !touchesFocus && e.kind === "cross" ? 0.15 : 0.9,
         },
+        // A cross-link has no shape to read direction from the way a
+        // hierarchy edge's tree layout already implies it — "depends_on" and
+        // "leads_to" point somewhere specific, and nothing on screen used to
+        // say which way (section 6: "visible direction on directional
+        // relationships").
+        markerEnd: e.kind === "cross"
+          ? { type: MarkerType.ArrowClosed, color: colour, width: 14, height: 14 } : undefined,
         data: { relation: e.relation, dimmed: false },
       };
     });
@@ -214,15 +232,24 @@ function NodeDetail({
   const [connectTo, setConnectTo] = useState("");
   const [connectRelation, setConnectRelation] = useState<GraphRelation>("related_to");
   const [mergeWith, setMergeWith] = useState("");
+  const [editingEdgeId, setEditingEdgeId] = useState<string | null>(null);
+  const [editRelation, setEditRelation] = useState<GraphRelation>("related_to");
+  const [editLabel, setEditLabel] = useState("");
 
   useEffect(() => setDraft(node.detail), [node.id, node.detail]);
+  useEffect(() => setEditingEdgeId(null), [node.id]);
 
   const outgoing = graph.edges.filter((e) => e.from_id === node.id);
   const incoming = graph.edges.filter((e) => e.to_id === node.id);
+  // `record_ref.id` is always the canonical row's OWN id now (never the
+  // working-map id) — matched on `.id` first. `.map_id` stays as a fallback
+  // for any stale cached graph payload still carrying the older shape.
   const decisionRow = node.kind === "decision" && node.record_ref
-    ? decisions.find((d) => d.map_id === node.record_ref!.id) : undefined;
+    ? decisions.find((d) => d.id === node.record_ref!.id || d.map_id === node.record_ref!.id)
+    : undefined;
   const actionRow = node.kind === "action" && node.record_ref
-    ? actions.find((a) => a.map_id === node.record_ref!.id) : undefined;
+    ? actions.find((a) => a.id === node.record_ref!.id || a.map_id === node.record_ref!.id)
+    : undefined;
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -233,7 +260,13 @@ function NodeDetail({
   const relationOptions = capabilities.edge_relations.filter(
     (r) => r.id !== "contains" || node.kind === "theme");
   const otherNodes = graph.nodes.filter((n) => n.id !== node.id && n.kind !== "root");
-  const sameKindNodes = otherNodes.filter((n) => n.kind === node.kind && n.record_ref);
+  // Merging is a working-map operation (`merge_map_items` combines two map
+  // items); a canonical-only node — a human-created action, or one whose map
+  // item was stripped by transcript deletion — has none to merge, on either
+  // side, so both this node and the candidate must have one.
+  const sameKindNodes = node.has_map_item
+    ? otherNodes.filter((n) => n.kind === node.kind && n.record_ref && n.has_map_item)
+    : [];
 
   return (
     <Card className="flex h-full flex-col overflow-hidden">
@@ -343,13 +376,26 @@ function NodeDetail({
                     {byId.get(other)?.label}
                   </button>
                   {!readOnly && !e.synthetic && (
-                    <button
-                      title="Reject this connection"
-                      onClick={() => void run(() => api.rejectGraphEdge(sessionId, e.id))}
-                      className="shrink-0 text-slate-600 hover:text-rose-400"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
+                    <>
+                      <button
+                        title="Edit this connection's relation or label"
+                        onClick={() => {
+                          setEditingEdgeId(e.id);
+                          setEditRelation(e.relation);
+                          setEditLabel(e.label);
+                        }}
+                        className="shrink-0 text-slate-600 hover:text-amber-300"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      <button
+                        title="Reject this connection"
+                        onClick={() => void run(() => api.rejectGraphEdge(sessionId, e.id))}
+                        className="shrink-0 text-slate-600 hover:text-rose-400"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </>
                   )}
                 </li>
               ))}
@@ -357,6 +403,31 @@ function NodeDetail({
               <li className="text-xs text-slate-600">No connections yet.</li>
             )}
           </ul>
+          {editingEdgeId && (
+            <div className="mt-2 space-y-1.5 rounded border border-slate-800 bg-slate-950/60 p-2">
+              <div className="flex flex-wrap gap-1.5">
+                <select value={editRelation}
+                        onChange={(e) => setEditRelation(e.target.value as GraphRelation)}
+                        className="rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-xs text-slate-200">
+                  {relationOptions.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                </select>
+                <input value={editLabel} onChange={(e) => setEditLabel(e.target.value)}
+                       placeholder="Optional label"
+                       className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-xs text-slate-200" />
+              </div>
+              <div className="flex gap-1.5">
+                <Button className="text-xs" disabled={busy}
+                        onClick={() => void run(() => api.editGraphEdge(sessionId, editingEdgeId, {
+                          relation: editRelation, label: editLabel,
+                        })).then(() => setEditingEdgeId(null))}>
+                  Save
+                </Button>
+                <Button variant="ghost" className="text-xs" onClick={() => setEditingEdgeId(null)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         {!readOnly && (
@@ -483,10 +554,16 @@ function Canvas({
   // while a drag is in progress -- and never reshuffle a node whose position
   // has not changed (section 5: "do not recenter the whole diagram").
   useEffect(() => {
-    const key = `${graph.content_revision}:${graph.graph_revision}:${graph.view_revision}`;
+    // `record_revision` moves on a decision confirmed, an action accepted, an
+    // owner corrected, or a connection a human drew/edited/rejected — none of
+    // which bump content/graph/view. Leaving it out of the key meant a
+    // correction could sit on screen unrefreshed until something else
+    // happened to move one of the other three (section 1).
+    const key = `${graph.content_revision}:${graph.graph_revision}:${graph.view_revision}:` +
+      `${graph.record_revision}`;
     if (draggingRef.current || key === lastSyncedRef.current) return;
     lastSyncedRef.current = key;
-    setNodes(toFlowNodes(graph, hidden, selectedId, matches));
+    setNodes(toFlowNodes(graph, hidden, selectedId, matches, capabilities));
     setEdges(toFlowEdges(graph, hidden, capabilities, selectedId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, hidden, capabilities]);

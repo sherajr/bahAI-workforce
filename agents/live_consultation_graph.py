@@ -148,32 +148,87 @@ def _lifecycle_node(item: dict) -> tuple[str, dict]:
     return status, {"resolution_note": item.get("resolution_note") or ""}
 
 
-def _decision_node(item: dict, decisions_by_map_id: dict) -> tuple[str, dict]:
-    row = decisions_by_map_id.get(item.get("id"))
-    if row:
-        return row.get("status") or "candidate", {
-            "rationale": row.get("rationale") or "",
-            "support": row.get("support") or "",
-            "concerns": row.get("concerns") or [],
-            "retained_concerns": row.get("retained_concerns") or [],
-            "confirmed_at": row.get("confirmed_at"),
-        }
-    return "candidate", {"rationale": item.get("rationale") or "", "concerns": item.get("concerns") or []}
+def _decision_node(row: dict) -> tuple[str, dict]:
+    return row.get("status") or "candidate", {
+        "rationale": row.get("rationale") or "",
+        "support": row.get("support") or "",
+        "concerns": row.get("concerns") or [],
+        "retained_concerns": row.get("retained_concerns") or [],
+        "confirmed_at": row.get("confirmed_at"),
+    }
 
 
-def _action_node(item: dict, actions_by_map_id: dict) -> tuple[str, dict]:
+def _action_node(row: dict) -> tuple[str, dict]:
     from agents.live_consultation import DEFAULT_ACTION_STATUS
-    row = actions_by_map_id.get(item.get("id"))
-    if row:
-        return row.get("status") or DEFAULT_ACTION_STATUS, {
-            "owner": row.get("owner"), "due": row.get("due"),
-            "owner_accepted": row.get("owner_accepted"),
-            "accepted_by": row.get("accepted_by") or "",
-            "blocker": row.get("blocker") or "",
-            "support_needed": row.get("support_needed") or "",
-            "success_criteria": row.get("success_criteria") or "",
-        }
-    return DEFAULT_ACTION_STATUS, {"owner": item.get("owner"), "due": item.get("due")}
+    return row.get("status") or DEFAULT_ACTION_STATUS, {
+        "owner": row.get("owner"), "due": row.get("due"),
+        "owner_accepted": row.get("owner_accepted"),
+        "accepted_by": row.get("accepted_by") or "",
+        "blocker": row.get("blocker") or "",
+        "support_needed": row.get("support_needed") or "",
+        "success_criteria": row.get("success_criteria") or "",
+    }
+
+
+def _canonical_row_node(row: dict, list_name: str) -> Optional[dict]:
+    """
+    A node built DIRECTLY from a canonical `decisions`/`action_items` row that
+    has no matching working-map item — a human-created action (`create_action_item`
+    never gets a `map_id`), or a row whose map item was stripped by transcript
+    deletion (rule 103: confirmed decisions and accepted commitments survive
+    deletion; their map items may not). Never a copy that can drift: this reads
+    the SAME row `_decision_node`/`_action_node` would overlay onto a map item,
+    so a canonical-only row is exactly as authoritative as a matched one.
+
+    The node id is the row's own `map_id` when it has one — so an edge stored
+    against that id (from before the map item vanished) keeps resolving — and
+    the row's own id otherwise, since a purely human-created row never had a
+    map id to lose.
+    """
+    kind = "decision" if list_name == "decision_candidates" else "action"
+    text = (row.get("text") if list_name == "decision_candidates" else row.get("action")) or ""
+    text = text.strip()
+    if not text:
+        return None
+    if list_name == "decision_candidates":
+        status, extra = _decision_node(row)
+    else:
+        status, extra = _action_node(row)
+    node_id = row.get("map_id") or row["id"]
+    return {
+        "id": node_id, "kind": kind, "label": _short_label(text), "detail": text,
+        "status": status, "status_label": _status_label(kind, status),
+        "human_edited": bool(row.get("human_edited")),
+        "source_turn_ids": [],
+        "record_ref": {"list": list_name, "id": row["id"]},
+        "extra": extra,
+        "origin": "human" if row.get("human_edited") else "model",
+        "has_map_item": False,
+    }
+
+
+def _orphan_canonical_rows(state: dict, decisions: list[dict],
+                          actions: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Canonical rows with no matching working-map item, by list.
+
+    A decision/action row is "claimed" by whichever map item shares its
+    `map_id` — normally every row created via the analysis pass (rule 95). A
+    row is an ORPHAN when its `map_id` is empty (a human-created action, which
+    never gets one) or points at an item that is no longer in the map (most
+    commonly: the transcript was deleted and only reviewed/edited items
+    survived, rule 103 — a confirmed decision or an accepted action must not
+    vanish from the map just because its working note did).
+    """
+    claimed: set[str] = set()
+    for item in (state.get("decision_candidates") or []):
+        if isinstance(item, dict) and item.get("id"):
+            claimed.add(item["id"])
+    for item in (state.get("action_items") or []):
+        if isinstance(item, dict) and item.get("id"):
+            claimed.add(item["id"])
+    orphan_decisions = [d for d in decisions if not (d.get("map_id") and d["map_id"] in claimed)]
+    orphan_actions = [a for a in actions if not (a.get("map_id") and a["map_id"] in claimed)]
+    return orphan_decisions, orphan_actions
 
 
 def _status_label(kind: str, status: Optional[str]) -> Optional[str]:
@@ -194,8 +249,42 @@ def _status_label(kind: str, status: Optional[str]) -> Optional[str]:
 
 def _item_node(list_name: str, item: dict, decisions_by_map_id: dict,
                actions_by_map_id: dict) -> Optional[dict]:
+    """
+    Build a node from a working-map item — except for a decision or action,
+    where the CANONICAL row (`decisions`/`action_items`, keyed by `map_id`) is
+    authoritative and the map item is only how the node was first noticed.
+
+    Two things follow from that, both load-bearing (section 1):
+      * the node's wording is the row's `text`/`action`, not the map item's —
+        `edit_action`/`edit_decision` write the row, and until this the graph
+        went on showing what was first heard, however many times it was
+        corrected.
+      * a decision/action map item with NO matching row is treated as
+        deleted, not as a still-proposed node with nothing overlaid: the only
+        way a map item loses its row is a human deleting the commitment out
+        from under it (`remove_action`), and a stale row-less node reappearing
+        because the map item itself was left behind is exactly the phantom
+        this refusal exists to prevent.
+    """
     kind = LIST_TO_KIND[list_name]
-    text = item.get("action") if list_name == "action_items" else item.get("text")
+    row = None
+    if list_name == "decision_candidates":
+        row = decisions_by_map_id.get(item.get("id"))
+    elif list_name == "action_items":
+        row = actions_by_map_id.get(item.get("id"))
+    if list_name in ("decision_candidates", "action_items") and not row:
+        return None
+    item_text = item.get("action") if list_name == "action_items" else item.get("text")
+    if row:
+        row_text = row.get("text") if list_name == "decision_candidates" else row.get("action")
+        # The row is authoritative, but an empty row field (never happens with
+        # a real database row — both columns are `NOT NULL DEFAULT ''` written
+        # at creation — falls back to the map item rather than treating a
+        # blank as evidence the row itself is gone) is not the same signal as
+        # no row at all.
+        text = (row_text or "").strip() or (item_text or "").strip()
+    else:
+        text = item_text
     text = (text or "").strip()
     if not text or not item.get("id"):
         return None
@@ -204,11 +293,12 @@ def _item_node(list_name: str, item: dict, decisions_by_map_id: dict,
     if list_name == "facts":
         status, extra = _fact_node(item)
     elif list_name == "decision_candidates":
-        status, extra = _decision_node(item, decisions_by_map_id)
+        status, extra = _decision_node(row)
     elif list_name == "action_items":
-        status, extra = _action_node(item, actions_by_map_id)
+        status, extra = _action_node(row)
     elif list_name != "themes":
         status, extra = _lifecycle_node(item)
+    human_edited = bool(item.get("human_edited")) or bool(row and row.get("human_edited"))
     return {
         "id": item["id"],
         "kind": kind,
@@ -216,11 +306,15 @@ def _item_node(list_name: str, item: dict, decisions_by_map_id: dict,
         "detail": text,
         "status": status,
         "status_label": _status_label(kind, status),
-        "human_edited": bool(item.get("human_edited")),
+        "human_edited": human_edited,
         "source_turn_ids": [str(t) for t in (item.get("source_turn_ids") or [])],
-        "record_ref": {"list": list_name, "id": item["id"]},
+        "record_ref": {"list": list_name, "id": (row["id"] if row else item["id"])},
         "extra": extra,
-        "origin": "human" if item.get("human_edited") else "model",
+        "origin": "human" if human_edited else "model",
+        # Whether this node has a working-map item behind it, as opposed to a
+        # canonical-only row (`_canonical_row_node`) — merge and delete-map-item
+        # both operate on map items, so the UI needs to know which is which.
+        "has_map_item": True,
     }
 
 
@@ -235,6 +329,7 @@ def _root_node(session: dict, state: dict) -> dict:
         "id": ROOT_ID, "kind": "root", "label": label, "detail": detail,
         "status": None, "status_label": None, "human_edited": False,
         "source_turn_ids": [], "record_ref": None, "extra": {}, "origin": "root",
+        "has_map_item": False,
     }
 
 
@@ -245,7 +340,7 @@ def _bucket_node(kind: str) -> dict:
         "label": meta.get("plural", kind.title()), "detail": meta.get("plural", kind.title()),
         "status": None, "status_label": None, "human_edited": False,
         "source_turn_ids": [], "record_ref": None, "extra": {},
-        "origin": "fallback_grouping",
+        "origin": "fallback_grouping", "has_map_item": False,
     }
 
 
@@ -291,6 +386,21 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
             node = _item_node(list_name, item, decisions_by_map_id, actions_by_map_id)
             if node:
                 nodes[node["id"]] = node
+
+    # Canonical decisions/actions with no working-map item behind them any
+    # more — a human-created action (never had one) or a confirmed decision /
+    # accepted action whose map item was stripped by transcript deletion
+    # (rule 103). Never omitted: the approved record survives even when the
+    # note that first raised it does not.
+    orphan_decisions, orphan_actions = _orphan_canonical_rows(state, decisions, actions)
+    for row in orphan_decisions:
+        node = _canonical_row_node(row, "decision_candidates")
+        if node:
+            nodes.setdefault(node["id"], node)
+    for row in orphan_actions:
+        node = _canonical_row_node(row, "action_items")
+        if node:
+            nodes.setdefault(node["id"], node)
 
     themes_present = any(n["kind"] == "theme" for n in nodes.values())
     fallback = not themes_present and not edges_rows
@@ -369,6 +479,13 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
         "content_revision": int(state.get("state_revision") or 0),
         "graph_revision": int(session.get("graph_revision") or 0),
         "view_revision": int(session.get("graph_view_revision") or 0),
+        # A decision/action node's wording and status, and the presence of an
+        # edge a human just drew or rejected, can all change WITHOUT bumping
+        # `content_revision` or `graph_revision` (confirming a decision, an
+        # owner accepting, an edited action all bump only this one — rule 102).
+        # The client's resync key has to include it or a correction can sit on
+        # screen unrefreshed until something else happens to move (section 1).
+        "record_revision": int(session.get("record_revision") or 0),
         "fallback": fallback,
         "nodes": list(nodes.values()),
         "edges": edges,
@@ -423,17 +540,52 @@ def _layout(nodes: dict[str, dict], edges: list[dict],
     for node_id in order:
         by_depth.setdefault(depth[node_id], []).append(node_id)
 
+    def _free_slot(taken: list[float]) -> float:
+        """The nearest-to-centre x that does not sit within one node-width of
+        anything already placed at this level.
+
+        This is COLLISION-AWARE, unlike the index-based scheme it replaced: the
+        old version divided the row's width evenly by position among ALL nodes
+        at the level (existing and new together) and gave a brand-new node
+        whatever slot its index landed on — with no regard for where an
+        existing, already-positioned node (dragged, or placed on an earlier
+        read) actually sat. A first leaf kept at x=0 and a second one added
+        later landed at x=110 by that arithmetic: at this component's 200px
+        node width, a 90px overlap. Searching outward from centre for the
+        nearest slot that clears every already-taken position (by distance,
+        not by exact match — a human-dragged position is rarely a clean
+        multiple of the grid) fixes that while staying deterministic: the same
+        inputs always search the same candidates in the same order.
+        """
+        def clear(x: float) -> bool:
+            return all(abs(x - t) >= _NODE_DX for t in taken)
+        if clear(0.0):
+            return 0.0
+        n = 1
+        while n < 10000:          # a safety bound, never reached in practice
+            for candidate in (n * _NODE_DX, -n * _NODE_DX):
+                if clear(candidate):
+                    return candidate
+            n += 1
+        return 0.0
+
     positions: dict[str, tuple] = {}
     new_positions: dict[str, tuple] = {}
     for level, ids in sorted(by_depth.items()):
-        width = len(ids)
-        for i, node_id in enumerate(ids):
+        occupied_x: list[float] = []
+        pending: list[str] = []
+        for node_id in ids:
             view = views.get(node_id)
             if view and view.get("x") is not None and view.get("y") is not None:
-                positions[node_id] = (float(view["x"]), float(view["y"]))
-                continue
-            x = (i - (width - 1) / 2.0) * _NODE_DX
-            y = level * _NODE_DY
+                x = float(view["x"])
+                positions[node_id] = (x, float(view["y"]))
+                occupied_x.append(x)
+            else:
+                pending.append(node_id)
+        y = level * _NODE_DY
+        for node_id in pending:
+            x = _free_slot(occupied_x)
+            occupied_x.append(x)
             positions[node_id] = (x, y)
             new_positions[node_id] = (x, y)
     return positions, new_positions
@@ -441,11 +593,17 @@ def _layout(nodes: dict[str, dict], edges: list[dict],
 
 # ── Patch validation (section 3: "validate before applying, atomically") ────
 
-def node_universe(state: dict) -> tuple[set[str], dict[str, str]]:
+def node_universe(state: dict, decisions: Optional[list[dict]] = None,
+                  actions: Optional[list[dict]] = None) -> tuple[set[str], dict[str, str]]:
     """Every id an edge may legally reference right now, and each one's kind —
     what `validate_edges` checks proposed connections against. Cheap: it never
     builds a full node (no label truncation, no decision/action overlay), only
-    what validation needs."""
+    what validation needs.
+
+    `decisions`/`actions` are optional and add the canonical-only rows a human
+    might want to connect (`_orphan_canonical_rows`) — a model never needs them,
+    because it only ever proposes edges against ids it was just shown, which are
+    always working-map ids."""
     ids = {ROOT_ID}
     kinds = {ROOT_ID: "root"}
     for list_name, kind in LIST_TO_KIND.items():
@@ -453,6 +611,17 @@ def node_universe(state: dict) -> tuple[set[str], dict[str, str]]:
             if isinstance(item, dict) and item.get("id"):
                 ids.add(item["id"])
                 kinds[item["id"]] = kind
+    if decisions is not None or actions is not None:
+        orphan_decisions, orphan_actions = _orphan_canonical_rows(
+            state, decisions or [], actions or [])
+        for row in orphan_decisions:
+            node_id = row.get("map_id") or row["id"]
+            ids.add(node_id)
+            kinds[node_id] = "decision"
+        for row in orphan_actions:
+            node_id = row.get("map_id") or row["id"]
+            ids.add(node_id)
+            kinds[node_id] = "action"
     return ids, kinds
 
 
@@ -461,8 +630,26 @@ def resolve_edge_ref(ref: str, tmp_map: dict[str, str]) -> str:
     return tmp_map.get(ref, ref)
 
 
+def contains_target_ok(to_id: str, node_kind: dict[str, str]) -> bool:
+    """Whether `to_id` may legally be CONTAINED by a theme.
+
+    Only a theme (or the synthetic root) may be the "from" of a `contains`
+    edge (checked by the caller); this is the other half — the "to" may never
+    itself be a theme or the root. Without this half, "theme A contains theme
+    B" and "theme A contains root" both passed every existing check (root and
+    a theme both exist as real node ids, so the existence check does not catch
+    them), which is a REAL cycle: root -> A -> root. The hierarchy is a strict
+    two layers, root -> theme -> leaf, and this is what keeps it that way —
+    not a general cycle walk, because a leaf can never be a `contains` "from"
+    at all, so nothing deeper than two layers can ever be proposed in the
+    first place.
+    """
+    return to_id != ROOT_ID and node_kind.get(to_id) not in ("theme", "bucket")
+
+
 def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
-                    node_kind: dict[str, str], rejected: set[tuple]) -> tuple[list[dict], list[str]]:
+                    node_kind: dict[str, str], rejected: set[tuple],
+                    valid_turn_ids: Optional[set[str]] = None) -> tuple[list[dict], list[str]]:
     """
     Turn a model's raw `edges` proposals into validated, ready-to-store dicts.
 
@@ -470,12 +657,20 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
     same "one bad element loses the pass, not the meeting" discipline as
     `reasoner.merge` (rule 79). Endpoints are resolved through `tmp_map` first,
     so an edge that names a node the SAME patch just created still resolves.
+
+    `valid_turn_ids`, when given, is checked the same way `_validate_provenance`
+    checks a map item's `source_turn_ids`: a citation naming a turn that is not
+    real in THIS session is worse than none, because it reads as corroboration
+    that never happened. `None` skips the check (the pure, DB-less callers — the
+    test suite chief among them — do not always have a turn table to check
+    against).
     """
     accepted: list[dict] = []
     notes: list[str] = []
     if not isinstance(raw_edges, list):
         return accepted, notes
     dropped_unknown = dropped_bad_contains = dropped_rejected = dropped_self = 0
+    dropped_provenance = 0
     for raw in raw_edges[:MAX_EDGES_PER_PATCH]:
         if not isinstance(raw, dict):
             continue
@@ -493,30 +688,40 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
             dropped_unknown += 1
             continue
         # Acyclic by construction (see module docstring): `contains` may only
-        # originate from a theme. A model proposing containment from anything
-        # else is dropped rather than silently reparented.
-        if relation == HIERARCHY_RELATION and node_kind.get(from_id) != "theme":
+        # originate from a theme, and may never TARGET a theme or the root —
+        # both halves are needed, or "theme A contains theme B" (and B contains
+        # A right back) passes every other check here.
+        if relation == HIERARCHY_RELATION and (
+                node_kind.get(from_id) != "theme" or not contains_target_ok(to_id, node_kind)):
             dropped_bad_contains += 1
             continue
         if (from_id, to_id, relation) in rejected:
             dropped_rejected += 1
             continue
         stated = bool(raw.get("stated"))
+        source_turn_ids = [str(t) for t in (raw.get("source_turn_ids") or [])][:8]
+        if valid_turn_ids is not None:
+            kept = [t for t in source_turn_ids if t in valid_turn_ids]
+            if len(kept) != len(source_turn_ids):
+                dropped_provenance += len(source_turn_ids) - len(kept)
+            source_turn_ids = kept
         accepted.append({
             "from_id": from_id, "to_id": to_id, "relation": relation,
             "label": str(raw.get("label") or "")[:MAX_EDGE_LABEL_CHARS],
             "inferred": not stated,
-            "source_turn_ids": [str(t) for t in (raw.get("source_turn_ids") or [])][:8],
+            "source_turn_ids": source_turn_ids,
         })
     if dropped_unknown:
         notes.append(f"{dropped_unknown} proposed connection(s) named a node that does not exist")
     if dropped_bad_contains:
         notes.append(f"{dropped_bad_contains} proposed connection(s) tried to contain "
-                     "something from outside a theme, and were dropped")
+                     "something other than a plain item under a theme, and were dropped")
     if dropped_rejected:
         notes.append(f"{dropped_rejected} proposed connection(s) had already been rejected by hand")
     if dropped_self:
         notes.append(f"{dropped_self} proposed connection(s) pointed a node at itself")
+    if dropped_provenance:
+        notes.append(f"{dropped_provenance} source reference(s) on a connection dropped as unrecognised")
     return accepted, notes
 
 
@@ -555,6 +760,13 @@ def render_svg(graph: dict, title: str = "") -> str:
     parts: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0f} {height:.0f}" '
         f'width="{width:.0f}" height="{height:.0f}" font-family="Arial, Helvetica, sans-serif">',
+        # A marker for the cross-links only — a hierarchy edge's direction is
+        # already visible from the tree shape, but "supports"/"depends_on" and
+        # the rest have no shape to read direction from otherwise (section 6:
+        # "visible direction on directional relationships").
+        '<defs><marker id="rel-arrow" viewBox="0 0 10 10" refX="8" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M0,0 L10,5 L0,10 z" fill="#eab308"/></marker></defs>',
         '<rect width="100%" height="100%" fill="#0f172a"/>',
     ]
     if title:
@@ -567,15 +779,24 @@ def render_svg(graph: dict, title: str = "") -> str:
             continue
         meta = RELATION_META.get(e["relation"], {})
         dash = {'dashed': '6,4', 'dotted': '2,3'}.get(meta.get("style", "solid"), "")
-        colour = "#475569" if e["kind"] == "hierarchy" else "#eab308"
+        cross = e["kind"] != "hierarchy"
+        colour = "#475569" if not cross else "#eab308"
         x1, y1, x2, y2 = X(a["x"]), Y(a["y"]), X(b["x"]), Y(b["y"])
         dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        marker_attr = ' marker-end="url(#rel-arrow)"' if cross else ""
         parts.append(f'<line x1="{x1:.0f}" y1="{y1:.0f}" x2="{x2:.0f}" y2="{y2:.0f}" '
-                     f'stroke="{colour}" stroke-width="1.5"{dash_attr} opacity="0.8"/>')
-        if e["kind"] != "hierarchy" and e.get("label"):
-            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-            parts.append(f'<text x="{mx:.0f}" y="{my:.0f}" font-size="10" fill="#cbd5e1" '
-                         f'text-anchor="middle">{_xml_escape(e["label"] or meta.get("label",""))}</text>')
+                     f'stroke="{colour}" stroke-width="1.5"{dash_attr}{marker_attr} opacity="0.8"/>')
+        # A relation always reads SOME label — the custom one if a human wrote
+        # one, otherwise the relation's own name — never nothing at all. This
+        # used to omit the label entirely whenever no custom text had been set,
+        # which is most edges: a model rarely bothers to caption a connection
+        # whose relation already says what it is.
+        if cross:
+            label_text = e.get("label") or meta.get("label", "")
+            if label_text:
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                parts.append(f'<text x="{mx:.0f}" y="{my:.0f}" font-size="10" fill="#cbd5e1" '
+                             f'text-anchor="middle">{_xml_escape(label_text)}</text>')
 
     for n in nodes:
         colour = NODE_KIND_META.get(n["kind"], {}).get("color", "#64748b")
@@ -648,13 +869,43 @@ def render_png_bytes(graph: dict, title: str = "") -> bytes:
     if title:
         draw.text((width / 2, 24), title, fill="#f1f5f9", font=title_font, anchor="mm")
 
+    def _styled_line(p1: tuple, p2: tuple, colour: str, style: str) -> None:
+        """PIL has no native dashed stroke; approximate one by drawing short
+        segments, so a "challenges" edge still reads differently from a
+        "supports" one on the raster export, not only on the SVG (section 6:
+        "PNG currently loses relationship … styles")."""
+        if style == "solid":
+            draw.line([p1, p2], fill=colour, width=2)
+            return
+        import math
+        x1, y1 = p1
+        x2, y2 = p2
+        length = math.hypot(x2 - x1, y2 - y1) or 1.0
+        dash_len, gap_len = (6, 4) if style == "dashed" else (2, 3)
+        step = dash_len + gap_len
+        t = 0.0
+        while t < length:
+            t_end = min(length, t + dash_len)
+            f0, f1 = t / length, t_end / length
+            draw.line([(x1 + (x2 - x1) * f0, y1 + (y2 - y1) * f0),
+                      (x1 + (x2 - x1) * f1, y1 + (y2 - y1) * f1)], fill=colour, width=2)
+            t += step
+
     by_id = {n["id"]: n for n in nodes}
     for e in edges:
         a, b = by_id.get(e["from_id"]), by_id.get(e["to_id"])
         if not a or not b:
             continue
-        colour = "#475569" if e["kind"] == "hierarchy" else "#eab308"
-        draw.line([(X(a["x"]), Y(a["y"])), (X(b["x"]), Y(b["y"]))], fill=colour, width=2)
+        meta = RELATION_META.get(e["relation"], {})
+        cross = e["kind"] != "hierarchy"
+        colour = "#475569" if not cross else "#eab308"
+        p1, p2 = (X(a["x"]), Y(a["y"])), (X(b["x"]), Y(b["y"]))
+        _styled_line(p1, p2, colour, meta.get("style", "solid") if cross else "solid")
+        if cross:
+            label_text = e.get("label") or meta.get("label", "")
+            if label_text:
+                mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+                draw.text((mx, my), label_text, fill="#cbd5e1", font=small, anchor="mm")
 
     for n in nodes:
         colour = NODE_KIND_META.get(n["kind"], {}).get("color", "#64748b")
@@ -728,6 +979,25 @@ def render_html_export(session: dict, graph: dict, narrative: dict,
         "</style></head><body>",
         f"<h1>{esc(title)}</h1>",
     ]
+    # An approval-state banner — this export has never had one, so a reader
+    # could not tell a reviewed record from a live draft still changing under
+    # someone's hands (section 6: "no approval-state banner"). The three
+    # states mirror `_record_status`: never approved, approved and current,
+    # approved but the record has moved on since.
+    approved_at = session.get("approved_at")
+    if not approved_at:
+        parts.append("<p class='meta'><strong>Draft — not yet approved.</strong> Nobody has "
+                     "reviewed and approved this record.</p>")
+    else:
+        stale = (int(session.get("record_revision") or 0)
+                 != int(session.get("approved_revision") or 0))
+        if stale:
+            parts.append(f"<p class='meta'><strong>Approved {esc(approved_at)}, but the "
+                         "record has changed since.</strong> This export reflects the "
+                         "CURRENT map, not the one that was approved.</p>")
+        else:
+            parts.append(f"<p class='meta'><strong>Approved {esc(approved_at)}, and "
+                         "current.</strong></p>")
     if session.get("question"):
         parts.append(f"<p class='meta'><strong>The question before the group:</strong> "
                      f"{esc(session['question'])}</p>")
@@ -756,9 +1026,27 @@ def render_html_export(session: dict, graph: dict, narrative: dict,
     if listed:
         parts.append("<ul>")
         for a in listed:
-            owner = esc(a.get("owner") or "Owner not assigned")
+            owner = (a.get("owner") or "").strip() or "Owner not assigned"
+            # A name is a PROPOSAL until somebody records that the person
+            # accepted it (rule 95) — the same three-state qualifier the report
+            # and the plain-text export already carry. This export used to
+            # print the owner's name with no qualifier at all, so an EXPLICITLY
+            # DECLINED action read exactly like an accepted one.
+            accepted = a.get("owner_accepted")
+            if (a.get("owner") or "").strip():
+                if accepted is None:
+                    owner += " — not yet accepted"
+                elif accepted:
+                    by = (a.get("accepted_by") or "").strip()
+                    owner += " — accepted" + (f" (recorded by {by})" if by else "")
+                else:
+                    owner += " — did not accept"
             due = f", due {esc(a['due'])}" if a.get("due") else ""
-            parts.append(f"<li><strong>{esc(a['action'])}</strong> — {owner}{due}</li>")
+            status = a.get("status") or "proposed"
+            from agents.live_consultation import ACTION_STATUS_LABELS
+            mark = (f" <em>({esc(ACTION_STATUS_LABELS.get(status, status).lower())})</em>"
+                   if status not in ("proposed", "accepted") else "")
+            parts.append(f"<li><strong>{esc(a['action'])}</strong> — {esc(owner)}{due}{mark}</li>")
         parts.append("</ul>")
     else:
         parts.append("<p>No action items were recorded.</p>")

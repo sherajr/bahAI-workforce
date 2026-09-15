@@ -1199,6 +1199,10 @@ export const api = {
     post<ConsultationDetail>(`/live-consultation/sessions/${id}/start`),
   endConsultation: (id: string) =>
     post<ConsultationDetail>(`/live-consultation/sessions/${id}/end`, {}),
+  /** The recovery path when `end`'s closing pass did not finish (section 4) —
+   *  a retry, never a second ending. */
+  finishConsultationAnalysis: (id: string) =>
+    post<ConsultationDetail>(`/live-consultation/sessions/${id}/finish-analysis`, {}),
   // Silent: transcript turns arrive every few seconds and would drown the
   // Activity Log, which exists to show Sheraj what the workforce is doing.
   addConsultationTurn: (id: string, body: {
@@ -1368,6 +1372,12 @@ export const api = {
   // Derived on every read, never a second copy (agents/live_consultation_graph.py).
   getConsultationGraph: (id: string) =>
     get<{ graph: ConceptGraph }>(`/live-consultation/sessions/${id}/graph`),
+  /** The map exactly as it stood when the record was last approved — an
+   *  archive, distinct from the live graph above (section 2). 404 when
+   *  nothing has ever been approved. */
+  getApprovedConsultationGraph: (id: string) =>
+    get<{ graph: ConceptGraph; approved_at: string | null; approved_revision: number }>(
+      `/live-consultation/sessions/${id}/graph/approved`),
   setGraphNodeView: (id: string, nodeId: string,
                     body: { x?: number; y?: number; pinned?: boolean; collapsed?: boolean }) =>
     request<{ view: unknown; session: ConsultationSession }>(

@@ -351,6 +351,13 @@ export interface ConsultationDetail {
   open_threads: OpenThreads;
   note?: string;
   deleted?: TranscriptDeletion;
+  /** An immutable map snapshot exists from the last approval, distinct from
+   *  whatever the live map has become since (section 2). */
+  has_approved_graph?: boolean;
+  /** Persists across a page reload, unlike a one-off response `note` — set
+   *  when the closing analysis pass did not finish, cleared by a successful
+   *  `finish-analysis` retry (section 4). Empty means nothing outstanding. */
+  final_pass_note?: string;
 }
 
 /** Is what you would export the thing somebody actually approved? */
@@ -506,6 +513,11 @@ export interface GraphNode {
    *  decision's rationale/retained concerns, a fact's evidence note). */
   extra: Record<string, unknown>;
   origin: "model" | "human" | "root" | "fallback_grouping";
+  /** False for a decision/action built directly from its canonical row with
+   *  no working-map item behind it (a human-created action, or one whose map
+   *  item was stripped by transcript deletion) — merge and delete-map-item
+   *  both operate on map items, so the UI has to know which nodes have one. */
+  has_map_item: boolean;
   x: number;
   y: number;
   pinned: boolean;
@@ -537,6 +549,12 @@ export interface ConceptGraph {
   content_revision: number;
   graph_revision: number;
   view_revision: number;
+  /** A decision's status, an action's owner/acceptance, and a semantic
+   *  connection a human just drew or rejected can all change WITHOUT moving
+   *  any of the three revisions above — confirming a decision or accepting an
+   *  action only bumps this one. Include it in any client-side resync key or
+   *  a correction can sit unrefreshed on screen. */
+  record_revision: number;
   /** True when there are no themes and no extracted connections yet, so the
    *  tree shown is CATEGORY grouping (a fallback), not something the group
    *  discussed — the screen must say so plainly (section 3). */

@@ -3704,6 +3704,493 @@ _ended_export = client.get(f"/live-consultation/sessions/{_G}/graph/export.html"
 check("and can still be exported", _ended_export.status_code == 200)
 
 
+section("the concept map: node wording tracks the canonical row, and a deleted "
+       "commitment leaves no phantom (section 1 of the 2026-09-14 follow-up)")
+
+_W1 = client.post("/live-consultation/sessions",
+                  json={"title": "Corrections", "question": "Where and who",
+                        "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W1}/turns",
+           json={"text": "Let's book the hall.", "realtime_item_id": "w1", "is_final": True})
+_W1_REPLY = json.dumps({"add": {
+    "action_items": [{"action": "Call the hall", "source_turn_ids": ["1"]}],
+    "decision_candidates": [{"text": "Meet indoors", "source_turn_ids": ["1"]}],
+}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W1_REPLY)
+client.post(f"/live-consultation/sessions/{_W1}/analyze", json={"force": True})
+
+_w1_detail = client.get(f"/live-consultation/sessions/{_W1}").json()
+_w1_action = next(a for a in _w1_detail["action_items"] if a["action"] == "Call the hall")
+_w1_decision = next(d for d in _w1_detail["decisions"] if d["text"] == "Meet indoors")
+
+_w1_graph_before = client.get(f"/live-consultation/sessions/{_W1}/graph").json()["graph"]
+_w1_action_node = next(n for n in _w1_graph_before["nodes"] if n["kind"] == "action")
+_w1_decision_node = next(n for n in _w1_graph_before["nodes"] if n["kind"] == "decision")
+check("the action node starts with the wording first heard",
+      _w1_action_node["detail"] == "Call the hall")
+
+client.patch(f"/live-consultation/sessions/{_W1}/actions/{_w1_action['id']}",
+            json={"action": "Call the park instead"})
+client.patch(f"/live-consultation/sessions/{_W1}/decisions/{_w1_decision['id']}",
+            json={"text": "Meet outdoors"})
+
+_w1_graph_after = client.get(f"/live-consultation/sessions/{_W1}/graph").json()["graph"]
+_w1_action_node2 = next(n for n in _w1_graph_after["nodes"] if n["id"] == _w1_action_node["id"])
+_w1_decision_node2 = next(n for n in _w1_graph_after["nodes"] if n["id"] == _w1_decision_node["id"])
+check("editing an action through its own endpoint updates the graph's wording",
+      _w1_action_node2["detail"] == "Call the park instead", _w1_action_node2["detail"])
+check("editing a decision through its own endpoint updates the graph's wording",
+      _w1_decision_node2["detail"] == "Meet outdoors", _w1_decision_node2["detail"])
+check("record_revision moved", _w1_graph_after["record_revision"] > _w1_graph_before["record_revision"])
+check("content_revision did not (no new analysis pass ran)",
+      _w1_graph_after["content_revision"] == _w1_graph_before["content_revision"])
+check("graph_revision did not (no connection changed)",
+      _w1_graph_after["graph_revision"] == _w1_graph_before["graph_revision"])
+
+_manual_r = client.post(f"/live-consultation/sessions/{_W1}/actions",
+                        json={"action": "Ring the caretaker"})
+_manual_id = _manual_r.json()["action_item"]["id"]
+_w1_graph3 = client.get(f"/live-consultation/sessions/{_W1}/graph").json()["graph"]
+_manual_node = next((n for n in _w1_graph3["nodes"] if n.get("record_ref")
+                     and n["record_ref"]["id"] == _manual_id), None)
+check("a human-created action with no map item still appears on the map",
+      _manual_node is not None)
+check("and is marked as having no working-map item behind it",
+      _manual_node is not None and _manual_node["has_map_item"] is False)
+
+client.delete(f"/live-consultation/sessions/{_W1}/actions/{_w1_action['id']}")
+_w1_graph4 = client.get(f"/live-consultation/sessions/{_W1}/graph").json()["graph"]
+check("a deleted action leaves no node at all -- not even a fresh 'proposed' phantom",
+      not any(n["id"] == _w1_action_node["id"] for n in _w1_graph4["nodes"]),
+      json.dumps([n["id"] for n in _w1_graph4["nodes"]]))
+
+
+section("the concept map: a confirmed decision and an accepted action survive "
+       "transcript deletion (section 2)")
+
+_W2 = client.post("/live-consultation/sessions",
+                  json={"title": "Deletion and the map",
+                        "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W2}/turns",
+           json={"text": "We should book the hall and meet Saturday.",
+                 "realtime_item_id": "w2", "is_final": True})
+_W2_REPLY = json.dumps({"add": {
+    "action_items": [{"action": "Book the hall", "source_turn_ids": ["1"]}],
+    "decision_candidates": [{"text": "Meet on Saturday", "source_turn_ids": ["1"]}],
+    "ideas": [{"text": "An idea nobody ever reviews", "source_turn_ids": ["1"]}],
+}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W2_REPLY)
+client.post(f"/live-consultation/sessions/{_W2}/analyze", json={"force": True})
+
+_w2_detail = client.get(f"/live-consultation/sessions/{_W2}").json()
+_w2_action = next(a for a in _w2_detail["action_items"] if a["action"] == "Book the hall")
+_w2_decision = next(d for d in _w2_detail["decisions"] if d["text"] == "Meet on Saturday")
+client.post(f"/live-consultation/sessions/{_W2}/actions/{_w2_action['id']}/accept",
+           json={"accepted": True})
+client.post(f"/live-consultation/sessions/{_W2}/decisions/{_w2_decision['id']}/confirm", json={})
+
+_w2_graph_before = client.get(f"/live-consultation/sessions/{_W2}/graph").json()["graph"]
+check("before deletion, the accepted action and confirmed decision are both on the map",
+      any(n["kind"] == "action" for n in _w2_graph_before["nodes"])
+      and any(n["kind"] == "decision" for n in _w2_graph_before["nodes"]))
+check("and so is the never-reviewed idea",
+      any(n["kind"] == "idea" for n in _w2_graph_before["nodes"]))
+
+client.delete(f"/live-consultation/sessions/{_W2}/transcript")
+_w2_graph_after = client.get(f"/live-consultation/sessions/{_W2}/graph").json()["graph"]
+check("after deleting the transcript, the accepted action is STILL on the map",
+      any(n["kind"] == "action" and "hall" in n["detail"] for n in _w2_graph_after["nodes"]),
+      json.dumps([n["kind"] for n in _w2_graph_after["nodes"]]))
+check("and so is the confirmed decision",
+      any(n["kind"] == "decision" and "Saturday" in n["detail"] for n in _w2_graph_after["nodes"]))
+check("but the idea nobody ever reviewed is gone -- it was made of the deleted words",
+      not any(n["kind"] == "idea" for n in _w2_graph_after["nodes"]))
+
+
+section("the concept map: an immutable approved snapshot, distinct from the live "
+       "map (section 2)")
+
+_W3 = client.post("/live-consultation/sessions",
+                  json={"title": "Approval snapshot",
+                        "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W3}/turns",
+           json={"text": "Let's discuss the venue.", "realtime_item_id": "w3", "is_final": True})
+_before_approve = client.get(f"/live-consultation/sessions/{_W3}/graph/approved")
+check("no approved map exists before anything is approved", _before_approve.status_code == 404)
+
+client.post(f"/live-consultation/sessions/{_W3}/report/approve", json={})
+_approved1 = client.get(f"/live-consultation/sessions/{_W3}/graph/approved")
+check("an approved snapshot exists once the report is approved", _approved1.status_code == 200)
+_approved_node_count = len(_approved1.json()["graph"]["nodes"])
+
+_W3_REPLY = json.dumps({
+    "add": {"themes": [{"tmp_id": "t1", "text": "Venue"}],
+           "ideas": [{"tmp_id": "n1", "text": "Use the community hall",
+                     "source_turn_ids": ["1"]}]},
+    "edges": [{"from": "t1", "to": "n1", "relation": "contains"}],
+})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W3_REPLY)
+client.post(f"/live-consultation/sessions/{_W3}/turns",
+           json={"text": "The community hall would work.", "realtime_item_id": "w3b",
+                 "is_final": True})
+client.post(f"/live-consultation/sessions/{_W3}/analyze", json={"force": True})
+_live_after = client.get(f"/live-consultation/sessions/{_W3}/graph").json()["graph"]
+check("the LIVE map grew", len(_live_after["nodes"]) > _approved_node_count)
+
+_approved2 = client.get(f"/live-consultation/sessions/{_W3}/graph/approved").json()
+check("the approved snapshot did not grow -- an archive, not a second live view",
+      len(_approved2["graph"]["nodes"]) == _approved_node_count)
+
+_status_after = client.get(f"/live-consultation/sessions/{_W3}").json()["record"]
+check("the record reports itself stale once a connection moved the map on after "
+     "approval (section 4's record_revision fix, exercised here)",
+      _status_after["stale"] is True, json.dumps(_status_after))
+
+
+section("merging two nodes folds their canonical rows too, and refuses to lose a "
+       "real commitment (section 3)")
+
+_W4 = client.post("/live-consultation/sessions",
+                  json={"title": "Merge and commitments",
+                        "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W4}/turns",
+           json={"text": "Two ideas about the same action.", "realtime_item_id": "w4",
+                 "is_final": True})
+_W4_REPLY = json.dumps({"add": {"action_items": [
+    {"action": "Book the hall", "source_turn_ids": ["1"]},
+    {"action": "Reserve the community hall", "source_turn_ids": ["1"]},
+]}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W4_REPLY)
+client.post(f"/live-consultation/sessions/{_W4}/analyze", json={"force": True})
+
+_w4_map = client.get(f"/live-consultation/sessions/{_W4}").json()["state"]["action_items"]
+check("two near-duplicate actions were both noticed", len(_w4_map) == 2)
+_keep_map_id, _remove_map_id = _w4_map[0]["id"], _w4_map[1]["id"]
+_w4_state = client.get(f"/live-consultation/sessions/{_W4}").json()
+check("both canonical rows exist before any merge", len(_w4_state["action_items"]) == 2)
+
+_merge1 = client.post(f"/live-consultation/sessions/{_W4}/graph/merge",
+                      json={"list_name": "action_items", "keep_id": _keep_map_id,
+                            "remove_id": _remove_map_id, "text": "Book the community hall"})
+check("merging two unaccepted actions succeeds", _merge1.status_code == 200, _merge1.text[:200])
+_w4_after = client.get(f"/live-consultation/sessions/{_W4}").json()
+check("only ONE canonical action row survives the merge -- not two",
+      len(_w4_after["action_items"]) == 1, json.dumps(_w4_after["action_items"]))
+_w4_graph = client.get(f"/live-consultation/sessions/{_W4}/graph").json()["graph"]
+check("and the graph shows exactly one action node",
+      sum(1 for n in _w4_graph["nodes"] if n["kind"] == "action") == 1)
+
+_W5 = client.post("/live-consultation/sessions",
+                  json={"title": "Merge refusal", "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W5}/turns",
+           json={"text": "Two committed actions.", "realtime_item_id": "w5", "is_final": True})
+_W5_REPLY = json.dumps({"add": {"action_items": [
+    {"action": "Book the hall", "source_turn_ids": ["1"]},
+    {"action": "Reserve the hall", "source_turn_ids": ["1"]},
+]}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W5_REPLY)
+client.post(f"/live-consultation/sessions/{_W5}/analyze", json={"force": True})
+_w5_map = client.get(f"/live-consultation/sessions/{_W5}").json()["state"]["action_items"]
+_a1id, _a2id = _w5_map[0]["id"], _w5_map[1]["id"]
+_w5_actions = client.get(f"/live-consultation/sessions/{_W5}").json()["action_items"]
+client.post(f"/live-consultation/sessions/{_W5}/actions/{_w5_actions[0]['id']}/accept",
+           json={"accepted": True, "accepted_by": "Sam"})
+client.post(f"/live-consultation/sessions/{_W5}/actions/{_w5_actions[1]['id']}/accept",
+           json={"accepted": False})
+_merge_refused = client.post(f"/live-consultation/sessions/{_W5}/graph/merge",
+                             json={"list_name": "action_items", "keep_id": _a1id,
+                                   "remove_id": _a2id})
+check("merging two actions with DISAGREEING commitments is refused",
+      _merge_refused.status_code == 409, _merge_refused.text[:300])
+check("and the refusal points at the existing controls",
+      "accept" in _merge_refused.text.lower())
+_w5_after = client.get(f"/live-consultation/sessions/{_W5}").json()
+check("nothing was lost -- both actions still exist", len(_w5_after["action_items"]) == 2)
+
+_W6 = client.post("/live-consultation/sessions",
+                  json={"title": "Decision merge", "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W6}/turns",
+           json={"text": "Two ways of saying the same decision.", "realtime_item_id": "w6",
+                 "is_final": True})
+_W6_REPLY = json.dumps({"add": {"decision_candidates": [
+    {"text": "Meet on Saturday", "source_turn_ids": ["1"]},
+    {"text": "Gather this Saturday", "source_turn_ids": ["1"]},
+]}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W6_REPLY)
+client.post(f"/live-consultation/sessions/{_W6}/analyze", json={"force": True})
+_w6_map = client.get(f"/live-consultation/sessions/{_W6}").json()["state"]["decision_candidates"]
+_keep_id, _remove_id = _w6_map[0]["id"], _w6_map[1]["id"]
+_w6_decisions = client.get(f"/live-consultation/sessions/{_W6}").json()["decisions"]
+_remove_row = next(d for d in _w6_decisions if d["map_id"] == _remove_id)
+client.post(f"/live-consultation/sessions/{_W6}/decisions/{_remove_row['id']}/confirm", json={})
+_merge2 = client.post(f"/live-consultation/sessions/{_W6}/graph/merge",
+                      json={"list_name": "decision_candidates", "keep_id": _keep_id,
+                            "remove_id": _remove_id})
+check("merging a confirmed decision into an unconfirmed one succeeds",
+      _merge2.status_code == 200, _merge2.text[:200])
+_w6_after = client.get(f"/live-consultation/sessions/{_W6}").json()
+check("only one canonical decision row survives", len(_w6_after["decisions"]) == 1)
+check("and the survivor carries the confirmation forward",
+      _w6_after["decisions"][0]["status"] == "confirmed")
+
+
+section("connections: cycles are rejected on both sides, provenance is checked, "
+       "and a changed relation is tombstoned (section 5)")
+
+_W7 = client.post("/live-consultation/sessions",
+                  json={"title": "Cycles and tombstones",
+                        "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W7}/turns",
+           json={"text": "Turn one.", "realtime_item_id": "w7a", "is_final": True})
+_W7_REPLY = json.dumps({"add": {
+    "themes": [{"tmp_id": "ta", "text": "Venue"}, {"tmp_id": "tb", "text": "Programme"}],
+    "ideas": [{"tmp_id": "n1", "text": "Use the hall", "source_turn_ids": ["1"]}],
+}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W7_REPLY)
+client.post(f"/live-consultation/sessions/{_W7}/analyze", json={"force": True})
+_w7_graph = client.get(f"/live-consultation/sessions/{_W7}/graph").json()["graph"]
+_themes7 = [n for n in _w7_graph["nodes"] if n["kind"] == "theme"]
+_theme_a, _theme_b = _themes7[0], _themes7[1]
+
+_cycle1 = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
+                      json={"from_id": _theme_a["id"], "to_id": _theme_b["id"],
+                            "relation": "contains"})
+check("a human cannot make one theme contain another", _cycle1.status_code == 400)
+_cycle2 = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
+                      json={"from_id": _theme_a["id"], "to_id": "root", "relation": "contains"})
+check("a human cannot make a theme contain the question itself", _cycle2.status_code == 400)
+
+_node_ids7, _node_kind7 = lc_graph.node_universe(store.get_state(_W7))
+_bad_model_edges = [
+    {"from": _theme_a["id"], "to": _theme_b["id"], "relation": "contains"},
+    {"from": _theme_b["id"], "to": _theme_a["id"], "relation": "contains"},
+    {"from": _theme_a["id"], "to": "root", "relation": "contains"},
+]
+_accepted7, _notes7 = lc_graph.validate_edges(_bad_model_edges, {}, _node_ids7, _node_kind7, set())
+check("none of the three cyclical proposals survive validation -- from a model, "
+     "not only from a human",
+      _accepted7 == [], str(_accepted7))
+
+_idea7 = next(n for n in _w7_graph["nodes"] if n["kind"] == "idea")
+_prov_edges = [{"from": _idea7["id"], "to": _theme_a["id"], "relation": "related_to",
+               "source_turn_ids": ["9999"]}]
+_accepted8, _ = lc_graph.validate_edges(_prov_edges, {}, _node_ids7, _node_kind7, set(),
+                                        valid_turn_ids={"1"})
+check("a connection's citation of a turn that does not exist is dropped, not stored",
+      _accepted8[0]["source_turn_ids"] == [], str(_accepted8))
+
+_manual7 = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
+                       json={"from_id": _idea7["id"], "to_id": _theme_a["id"],
+                             "relation": "supports"})
+_edge7_id = _manual7.json()["edge"]["id"]
+client.patch(f"/live-consultation/sessions/{_W7}/graph/edges/{_edge7_id}",
+            json={"relation": "related_to"})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                 call=lambda m: json.dumps({"edges": [
+                     {"from": _idea7["id"], "to": _theme_a["id"], "relation": "supports"}]}))
+client.post(f"/live-consultation/sessions/{_W7}/turns",
+           json={"text": "Another turn.", "realtime_item_id": "w7b", "is_final": True})
+client.post(f"/live-consultation/sessions/{_W7}/analyze", json={"force": True})
+_w7_graph2 = client.get(f"/live-consultation/sessions/{_W7}/graph").json()["graph"]
+check("changing a connection's relation tombstones the OLD form, so a model "
+     "cannot quietly bring it back",
+      not any(e["from_id"] == _idea7["id"] and e["to_id"] == _theme_a["id"]
+              and e["relation"] == "supports" for e in _w7_graph2["edges"]),
+      json.dumps([e for e in _w7_graph2["edges"] if e["from_id"] == _idea7["id"]]))
+
+_manual7b = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
+                        json={"from_id": _idea7["id"], "to_id": _theme_b["id"],
+                              "relation": "challenges"})
+client.delete(f"/live-consultation/sessions/{_W7}/graph/edges/{_manual7b.json()['edge']['id']}")
+_W7_REPLY2 = json.dumps({"add": {"ideas": [{"text": "A second idea", "source_turn_ids": ["1"]}]}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W7_REPLY2)
+client.post(f"/live-consultation/sessions/{_W7}/turns",
+           json={"text": "A third turn.", "realtime_item_id": "w7c", "is_final": True})
+client.post(f"/live-consultation/sessions/{_W7}/analyze", json={"force": True})
+_w7_ideas = client.get(f"/live-consultation/sessions/{_W7}").json()["state"]["ideas"]
+_second_idea_id = next(i["id"] for i in _w7_ideas if i["id"] != _idea7["id"])
+client.post(f"/live-consultation/sessions/{_W7}/graph/merge",
+           json={"list_name": "ideas", "keep_id": _second_idea_id, "remove_id": _idea7["id"]})
+_rejected_after_merge = store.rejected_edge_keys(_W7)
+check("a rejection tombstone survives a merge, redirected onto the survivor",
+      (_second_idea_id, _theme_b["id"], "challenges") in _rejected_after_merge,
+      str(_rejected_after_merge))
+
+_W8 = client.post("/live-consultation/sessions",
+                  json={"title": "Edge cap", "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_W8}/turns",
+           json={"text": "One turn.", "realtime_item_id": "w8", "is_final": True})
+_W8_REPLY = json.dumps({"add": {
+    "themes": [{"tmp_id": "t", "text": "Venue"}],
+    "ideas": [{"tmp_id": "n1", "text": "Idea one", "source_turn_ids": ["1"]},
+             {"tmp_id": "n2", "text": "Idea two", "source_turn_ids": ["1"]}],
+}})
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W8_REPLY)
+client.post(f"/live-consultation/sessions/{_W8}/analyze", json={"force": True})
+_w8_graph = client.get(f"/live-consultation/sessions/{_W8}/graph").json()["graph"]
+_w8_ideas = [n for n in _w8_graph["nodes"] if n["kind"] == "idea"]
+_w8_theme = next(n for n in _w8_graph["nodes"] if n["kind"] == "theme")
+check("no stored edges yet", len(store.list_graph_edges(_W8)) == 0)
+
+_old_cap = lc_graph.MAX_STORED_EDGES
+lc_graph.MAX_STORED_EDGES = 1
+try:
+    _cap_ok = client.post(f"/live-consultation/sessions/{_W8}/graph/edges",
+                          json={"from_id": _w8_ideas[0]["id"], "to_id": _w8_theme["id"],
+                                "relation": "supports"})
+    check("a first new connection is accepted while under the cap",
+          _cap_ok.status_code == 200, _cap_ok.text[:200])
+    _cap_refused = client.post(f"/live-consultation/sessions/{_W8}/graph/edges",
+                               json={"from_id": _w8_ideas[1]["id"], "to_id": _w8_theme["id"],
+                                     "relation": "supports"})
+    check("MAX_STORED_EDGES is actually enforced, not just declared",
+          _cap_refused.status_code == 409, _cap_refused.text[:200])
+finally:
+    lc_graph.MAX_STORED_EDGES = _old_cap
+
+
+section("a duplicate addition's tmp_id resolves to the EXISTING item it "
+       "duplicates (section 5)")
+
+_dup_state = {"ideas": [{"id": "idea_1", "text": "Use the community hall", "source_turn_ids": []}],
+             "needs_and_concerns": [{"id": "concern_1", "text": "Cost", "lifecycle": "open"}],
+             "state_revision": 3}
+_dup_patch = {"add": {"ideas": [{"tmp_id": "n1", "text": "Use the community hall",
+                                "source_turn_ids": ["5"]}]},
+             "edges": [{"from": "n1", "to": "concern_1", "relation": "related_to"}]}
+_dup_merged, _dup_notes, _dup_resolved = brain.merge(_dup_state, _dup_patch)
+check("a duplicate is not added twice", len(_dup_merged["ideas"]) == 1)
+check("its tmp_id resolves to the EXISTING item's real id, rather than being "
+     "left unresolved and the connection silently dropped",
+      _dup_resolved[0]["from"] == "idea_1", str(_dup_resolved))
+
+
+section("layout places a new node without overlapping one already there (section 6)")
+
+_lay_state = {"question": "Q", "ideas": [
+    {"id": "idea_1", "text": "First idea"}, {"id": "idea_2", "text": "Second idea"}],
+    "state_revision": 1}
+_lay_views = {"idea_1": {"x": 0.0, "y": 300.0, "pinned": True, "collapsed": False}}
+_lay_graph = lc_graph.build_graph({"id": "cons_lay"}, _lay_state, [], [], [], _lay_views)
+_lay_by_id = {n["id"]: n for n in _lay_graph["nodes"]}
+_dx = abs(_lay_by_id["idea_2"]["x"] - _lay_by_id["idea_1"]["x"])
+check("a new node at the same depth as an existing pinned one does not overlap it",
+      _dx >= lc_graph._NODE_DX,
+      f"idea_1={_lay_by_id['idea_1']['x']} idea_2={_lay_by_id['idea_2']['x']}")
+
+
+section("HTML export shows a declined action's qualifier, and an "
+       "approval-state banner (section 6)")
+
+_exp_graph = lc_graph.build_graph({"id": "cons_exp", "question": "Q"},
+                                  {"question": "Q", "state_revision": 1}, [], [], [], {})
+_exp_actions = [{"action": "Bring refreshments", "owner": "Nasrin", "owner_accepted": False,
+                "status": "proposed"}]
+_html_draft = lc_graph.render_html_export(
+    {"id": "cons_exp", "title": "Test", "question": "Q"}, _exp_graph, {}, [], _exp_actions, [])
+check("a declined action is shown WITH its qualifier, not silently as accepted",
+      "did not accept" in _html_draft)
+check("an unapproved export says it is a draft", "not yet approved" in _html_draft.lower())
+
+_html_current = lc_graph.render_html_export(
+    {"id": "cons_exp", "title": "Test", "question": "Q", "approved_at": "2026-09-10 10:00:00",
+     "record_revision": 3, "approved_revision": 3}, _exp_graph, {}, [], [], [])
+check("an approved, current export says so plainly",
+      "Approved" in _html_current and "current" in _html_current)
+
+_html_stale = lc_graph.render_html_export(
+    {"id": "cons_exp", "title": "Test", "question": "Q", "approved_at": "2026-09-10 10:00:00",
+     "record_revision": 5, "approved_revision": 3}, _exp_graph, {}, [], [], [])
+check("an approved but STALE export says the record moved on", "changed since" in _html_stale)
+
+
+section("the report narrative survives reuse under its correct key (section 7)")
+
+_narr_fresh = {"in_short": "A short summary.", "discussion": "How it actually went.",
+              "still_open": "What remains."}
+_rep = report.build_report(session={"id": "cons_r", "title": "T"}, state={"summary": ""},
+                           decisions=[], actions=[], writings=[], turns=[], participants=[],
+                           narrative=_narr_fresh)
+check("reusing a freshly-written narrative keeps the discussion section",
+      "How it actually went." in _rep["markdown"], _rep["markdown"])
+
+_narr_legacy = {"in_short": "A short summary.", "how_we_got_here": "Written under the old key.",
+               "still_open": ""}
+_rep2 = report.build_report(session={"id": "cons_r2", "title": "T"}, state={"summary": ""},
+                            decisions=[], actions=[], writings=[], turns=[], participants=[],
+                            narrative=_narr_legacy)
+check("a narrative stored under the OLD key name is still shown, not silently dropped",
+      "Written under the old key." in _rep2["markdown"], _rep2["markdown"])
+
+
+section("an incremental poll cursor never skips a line it could not fit in one "
+       "page (section 7)")
+
+_P = client.post("/live-consultation/sessions",
+                 json={"title": "Cursor paging", "participants_informed": True}).json()["id"]
+for _i in range(5):
+    client.post(f"/live-consultation/sessions/{_P}/turns",
+               json={"text": f"Line {_i}", "realtime_item_id": f"p{_i}", "is_final": True})
+_page1 = client.get(f"/live-consultation/sessions/{_P}/updates?turns_rev=0&limit=3").json()
+check("a capped page reports it is not everything", _page1["more"] is True)
+check("its cursor is the LAST DELIVERED turn's revision, not the session's absolute head",
+      _page1["turns_rev"] < 5, json.dumps(_page1["turns_rev"]))
+_page2 = client.get(f"/live-consultation/sessions/{_P}/updates"
+                    f"?turns_rev={_page1['turns_rev']}&limit=3").json()
+_seen_ids = {t["id"] for t in _page1["turns"]} | {t["id"] for t in _page2["turns"]}
+check("continuing from that cursor delivers every remaining line -- none skipped",
+      len(_seen_ids) == 5, json.dumps(sorted(_seen_ids)))
+
+
+section("an incomplete closing pass is reported PERSISTENTLY, with a recovery "
+       "path (section 4)")
+
+_E1 = client.post("/live-consultation/sessions",
+                  json={"title": "Incomplete close",
+                        "participants_informed": True}).json()["id"]
+client.post(f"/live-consultation/sessions/{_E1}/turns",
+           json={"text": "Something worth analysing.", "realtime_item_id": "e1",
+                 "is_final": True})
+
+_old_wait = lc_api.FINAL_ANALYSIS_WAIT_S
+lc_api.FINAL_ANALYSIS_WAIT_S = 0.05
+try:
+    _elock = lc_api._lock_for(_E1)
+    check("the lock starts free", _elock.acquire(blocking=False))
+    try:
+        _end_resp = client.post(f"/live-consultation/sessions/{_E1}/end", json={"final_pass": True})
+    finally:
+        _elock.release()
+finally:
+    lc_api.FINAL_ANALYSIS_WAIT_S = _old_wait
+check("ending while an analysis pass is busy still ends the meeting",
+      _end_resp.json()["session"]["status"] == "ended")
+_e1_detail = client.get(f"/live-consultation/sessions/{_E1}").json()
+check("the incomplete closing pass is recorded PERSISTENTLY on the session, "
+     "not only in the one response End returned",
+      bool(_e1_detail["final_pass_note"]), json.dumps(_e1_detail.get("final_pass_note")))
+
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+    _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
+                 call=lambda m: json.dumps({"summary": "Caught up."}))
+_finish = client.post(f"/live-consultation/sessions/{_E1}/finish-analysis")
+check("finish-analysis is the recovery path, and it succeeds once the lock is free",
+      _finish.status_code == 200, _finish.text[:200])
+_e1_after = client.get(f"/live-consultation/sessions/{_E1}").json()
+check("a successful retry clears the persistent incomplete-state note",
+      _e1_after["final_pass_note"] == "", json.dumps(_e1_after["final_pass_note"]))
+
+
 section("ending waits briefly for an in-flight analysis, but never for ever (rule 90/104)")
 
 import threading  # noqa: E402

@@ -203,8 +203,19 @@ def build_report(session: dict, state: dict, decisions: list[dict], actions: lis
     something that is not a writing problem.
     """
     if narrative:
-        fields = {k: str(narrative.get(k) or "").strip()
-                  for k in ("in_short", "how_we_got_here", "still_open")}
+        # `_narrative` writes "discussion"; this reuse path read
+        # "how_we_got_here" — a key that field was never written under — so
+        # every reuse (every `/report/approve`, every closeout approval,
+        # every `reuse_narrative=True` rebuild) silently dropped the "How the
+        # group got there" section. The old name is kept as a fallback in case
+        # any already-stored `report_narrative_json` was ever written under
+        # it, rather than assumed to have never existed.
+        fields = {
+            "in_short": str(narrative.get("in_short") or "").strip(),
+            "discussion": str(narrative.get("discussion")
+                             or narrative.get("how_we_got_here") or "").strip(),
+            "still_open": str(narrative.get("still_open") or "").strip(),
+        }
         note = ""
     else:
         fields, note = _narrative(session, state, call=call)

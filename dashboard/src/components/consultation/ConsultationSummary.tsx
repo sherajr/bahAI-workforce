@@ -67,6 +67,22 @@ export function ConsultationSummary({
     onSuccess: () => refresh(),
   });
 
+  // The recovery path for an incomplete closing pass (section 4) — the note
+  // persists on the session, so it is still here after a reload, not only in
+  // the one response that used to be thrown away when End navigated here.
+  const finishAnalysis = useMutation({
+    mutationFn: () => api.finishConsultationAnalysis(sessionId),
+    onSuccess: () => refresh(),
+  });
+
+  const [showApprovedMap, setShowApprovedMap] = useState(false);
+  const { data: approvedGraphData, isError: approvedGraphErrored } = useQuery({
+    queryKey: ["consultation-graph-approved", sessionId],
+    queryFn: () => api.getApprovedConsultationGraph(sessionId),
+    enabled: showApprovedMap,
+    refetchInterval: false,
+  });
+
   const mapSpeaker = useMutation({
     mutationFn: ({ id, key }: { id: string; key: string | null }) =>
       api.mapConsultationSpeaker(sessionId, id, key),
@@ -131,6 +147,24 @@ export function ConsultationSummary({
           </Button>
         </div>
       </div>
+
+      {/* Persistent — this is a field on the session, not a one-off response
+          note, precisely so it survives the navigation from End to here
+          (section 4). It clears itself once `finish-analysis` actually
+          succeeds. */}
+      {data.final_pass_note && (
+        <ErrorNote>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>The closing analysis did not finish: {data.final_pass_note}</span>
+            <Button variant="secondary" className="text-xs" disabled={finishAnalysis.isPending}
+                    onClick={() => void finishAnalysis.mutate()}>
+              {finishAnalysis.isPending ? (
+                <><Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Finishing…</>
+              ) : "Finish analysis"}
+            </Button>
+          </div>
+        </ErrorNote>
+      )}
 
       <div className="flex gap-1 border-b border-slate-800">
         {(["report", "map", "detail"] as const).map((v) => (
@@ -215,21 +249,72 @@ export function ConsultationSummary({
         ) : !graphData ? (
           <p className="text-sm text-slate-400">Loading…</p>
         ) : (
-          <div className="h-[70vh] min-h-[28rem]">
-            <ConceptGraphView
-              graph={graphData.graph}
-              capabilities={capabilities}
-              sessionId={sessionId}
-              title={session.title}
-              readOnly
-              decisions={data.decisions}
-              actions={data.action_items}
-              onChanged={refresh}
-              onShowSource={setSourceTurns}
-            />
+          <div className="space-y-2">
+            {/* The map has never had a way to correct a connection once the
+                meeting ended — everything else here (decisions, actions,
+                the transcript) could already be corrected by hand, but this
+                one screen offered no flow to it at all (section 2). It is the
+                SAME editing surface the live view uses; nothing here is a
+                second way to write the record. */}
+            {data.has_approved_graph && data.record?.stale && (
+              <Card>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm text-slate-300">
+                  <span>
+                    This map has changed since the record was approved
+                    {data.record?.approved_at ? ` on ${data.record.approved_at.slice(0, 16)}` : ""}.
+                  </span>
+                  <Button variant="secondary" className="text-xs"
+                          onClick={() => setShowApprovedMap(true)}>
+                    View the approved map
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
+            <div className="h-[70vh] min-h-[28rem]">
+              <ConceptGraphView
+                graph={graphData.graph}
+                capabilities={capabilities}
+                sessionId={sessionId}
+                title={session.title}
+                readOnly={false}
+                decisions={data.decisions}
+                actions={data.action_items}
+                onChanged={refresh}
+                onShowSource={setSourceTurns}
+              />
+            </div>
           </div>
         )
       )}
+
+      <Modal open={showApprovedMap} onClose={() => setShowApprovedMap(false)}
+             title="The approved map" widthClassName="max-w-5xl">
+        {approvedGraphErrored ? (
+          <ErrorNote>The approved map could not be loaded.</ErrorNote>
+        ) : !approvedGraphData ? (
+          <p className="text-sm text-slate-400">Loading…</p>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-500">
+              Approved {(approvedGraphData.approved_at ?? "").slice(0, 16)}. This is an archive
+              — it does not change as the map above is corrected.
+            </p>
+            <div className="h-[60vh] min-h-[24rem]">
+              <ConceptGraphView
+                graph={approvedGraphData.graph}
+                capabilities={capabilities}
+                sessionId={sessionId}
+                title={session.title}
+                readOnly
+                decisions={data.decisions}
+                actions={data.action_items}
+                onChanged={() => {}}
+                onShowSource={setSourceTurns}
+              />
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {view === "detail" && (
         <ConsultationDetailPanel

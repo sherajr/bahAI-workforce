@@ -109,6 +109,14 @@ export function LiveConsultationSession({
     }
   }, [live.passage, live.floorState]);
 
+  // `end`'s response carries a `note` -- most often nothing worth reading,
+  // occasionally "the closing summary could not be made". The mutation used
+  // to navigate straight to closeout regardless, discarding it (section 4).
+  // It is ALSO now written to the session as `final_pass_note`, which is what
+  // makes it visible again after this navigation happens -- this modal is
+  // just the courtesy of showing it before the room moves on, rather than
+  // making them go find it.
+  const [endNote, setEndNote] = useState<string | null>(null);
   const endSession = useMutation({
     mutationFn: async () => {
       // AWAITED. `stop()` finishes and finalises the recording, and ending the
@@ -118,7 +126,11 @@ export function LiveConsultationSession({
       await live.stop();
       return api.endConsultation(sessionId);
     },
-    onSuccess: () => { refresh(); onEnded(); },
+    onSuccess: (result) => {
+      refresh();
+      if ((result.note ?? "").trim()) setEndNote(result.note!.trim());
+      else onEnded();
+    },
   });
 
   /**
@@ -596,6 +608,18 @@ export function LiveConsultationSession({
                 Those lines are no longer in the transcript.
               </p>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {endNote && (
+        <Modal open onClose={() => { setEndNote(null); onEnded(); }}
+               title="The meeting has ended">
+          <div className="space-y-4 text-sm text-slate-300">
+            <p>{endNote}</p>
+            <div className="flex justify-end">
+              <Button onClick={() => { setEndNote(null); onEnded(); }}>Continue</Button>
+            </div>
           </div>
         </Modal>
       )}

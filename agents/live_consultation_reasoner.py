@@ -483,8 +483,19 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str], list[dict]]:
             if not isinstance(incoming, list):
                 continue
             current = out.setdefault(name, [])
-            seen = {_norm(i.get("action") if name == "action_items" else i.get("text", ""))
-                    for i in current if isinstance(i, dict)}
+            # Normalised text -> id, so a duplicate can be traced back to the
+            # item it duplicates. This used to be a plain set: a raw item that
+            # matched an EXISTING one was skipped (correctly — the map does not
+            # need a near-duplicate), but if it carried a "tmp_id", that id was
+            # simply never registered anywhere. An edge in the same patch
+            # referencing it then resolved to nothing, `validate_edges` could
+            # not find the id it named, and the connection was dropped entirely
+            # — even though the item the model meant IS on the map, under a
+            # different, older id.
+            by_key: dict[str, str] = {
+                _norm(i.get("action") if name == "action_items" else i.get("text", "")): i.get("id", "")
+                for i in current if isinstance(i, dict)
+            }
             for raw in incoming:
                 if isinstance(raw, str):
                     raw = {"action": raw} if name == "action_items" else {"text": raw}
@@ -492,18 +503,23 @@ def merge(state: dict, patch: dict) -> tuple[dict, list[str], list[dict]]:
                     continue
                 body = (raw.get("action") if name == "action_items" else raw.get("text")) or ""
                 key = _norm(body)
-                if not key or key in seen:
+                tmp_id = str(raw.get("tmp_id") or "").strip()
+                if not key:
                     continue
-                seen.add(key)
+                if key in by_key:
+                    if tmp_id and by_key[key]:
+                        tmp_to_real[tmp_id] = by_key[key]
+                    continue
                 entry = dict(raw)
                 entry["id"] = _next_id(ID_PREFIX.get(name, name), current)
+                entry.pop("tmp_id", None)
                 # A scratch id the model invented for THIS pass, so an edge in
                 # the same patch can reference a node that did not exist a
                 # moment ago. Resolved below, into `tmp_to_real`; never stored
                 # on the item itself.
-                tmp_id = str(entry.pop("tmp_id", "") or "").strip()
                 if tmp_id:
                     tmp_to_real[tmp_id] = entry["id"]
+                by_key[key] = entry["id"]
                 entry["source_turn_ids"] = _clean_turn_ids(raw.get("source_turn_ids"))
                 # Nothing arriving from a model is human-touched, whatever the
                 # reply claims about itself (rule 95).

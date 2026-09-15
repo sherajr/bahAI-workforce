@@ -32,6 +32,13 @@ DB_PATH = PRIVATE_DIR / "consultation.db"
 AUDIO_DIR = PRIVATE_DIR / "consultation_audio"
 
 
+class MergeRefused(Exception):
+    """`merge_map_items` raises this instead of silently discarding a real
+    commitment — an accepted action, a confirmed decision, or retained
+    concerns. The caller (the API layer) turns it into a 409 naming the
+    existing correction controls instead."""
+
+
 def assert_test_db(path: Path | str) -> Path:
     """Refuse to run tests against the owner's real private database."""
     path = Path(path).resolve()
@@ -471,6 +478,21 @@ def init_db(db_path: Path | str | None = None) -> None:
                                "INTEGER NOT NULL DEFAULT 0"),
             ("graph_view_revision", "ALTER TABLE sessions ADD COLUMN graph_view_revision "
                                     "INTEGER NOT NULL DEFAULT 0"),
+            # The IMMUTABLE approved graph — a snapshot, bound to the same
+            # `approved_revision` as `approved_md`, so an archived session can
+            # show the map exactly as it was reviewed even after a later
+            # correction (or a late-arriving analysis pass) has moved the LIVE
+            # one on. Null until something is actually approved, which is the
+            # truth about every pre-existing session.
+            ("approved_graph_json", "ALTER TABLE sessions ADD COLUMN approved_graph_json TEXT"),
+            # Set when `end_session`'s closing analysis pass did NOT complete
+            # (still busy after the bounded wait, or it genuinely failed) —
+            # a persistent, visible incomplete-state marker rather than a note
+            # that lived only in one HTTP response and vanished the moment the
+            # room navigated to the closeout screen. Cleared by a successful
+            # `finish_analysis` retry.
+            ("final_pass_note", "ALTER TABLE sessions ADD COLUMN final_pass_note TEXT "
+                                "NOT NULL DEFAULT ''"),
         ):
             try:
                 conn.execute(ddl)
@@ -574,7 +596,11 @@ def update_session(session_id: str, db_path: Path | str | None = None, **fields)
                # 2026-09-09: the approved record and its reusable prose
                # (rules 102/103). Same allowlist gotcha as above.
                "approved_md", "approved_at", "approved_revision",
-               "report_narrative_json", "cleanup_pending"}
+               "report_narrative_json", "cleanup_pending",
+               # The approved graph snapshot (section 2), bound to the same
+               # revision as the fields just above.
+               "approved_graph_json",
+               "final_pass_note"}
     sets, values = [], []
     for key, value in fields.items():
         if key not in allowed or value is None:
@@ -2159,6 +2185,15 @@ def upsert_graph_edge(session_id: str, from_id: str, to_id: str, relation: str,
             conn.commit()
             return _edge_out(dict(conn.execute(
                 "SELECT * FROM graph_edges WHERE id = ?", (row["id"],)).fetchone()))
+        # A genuinely NEW row, so the stored cap applies (an update above never
+        # grows the table). `MAX_STORED_EDGES` is declared in the graph module
+        # and was never actually enforced anywhere — an unbounded graph is an
+        # unbounded page to render, the same reasoning as the per-patch cap.
+        from agents.live_consultation_graph import MAX_STORED_EDGES
+        count = conn.execute(
+            "SELECT COUNT(*) FROM graph_edges WHERE session_id = ?", (session_id,)).fetchone()[0]
+        if count >= MAX_STORED_EDGES:
+            return None
         eid = new_id("edge")
         conn.execute(
             """INSERT INTO graph_edges (id, session_id, from_id, to_id, relation, label,
@@ -2177,7 +2212,16 @@ def update_graph_edge(edge_id: str, session_id: str, db_path: Path | str | None 
                       **fields) -> Optional[dict]:
     """A human correcting a connection's relation or label. Endpoints are
     immutable by design — moving an edge to a different node is a reject-and-add,
-    the same as any other identity change in this file."""
+    the same as any other identity change in this file.
+
+    Changing the RELATION also tombstones the old (from, to, old_relation)
+    triple, the same way rejecting an edge does. Without this, a person
+    changing "supports" to "related_to" left no record that "supports" had
+    been corrected away — the unique key on `graph_edges` is keyed on the
+    relation too, so the old form is simply gone from that table, and the next
+    analysis pass proposing "supports" again (nothing here told it not to)
+    would insert it as a brand-new row, quietly undoing the correction.
+    """
     allowed = {"relation", "label"}
     sets, values = [], []
     for key, value in fields.items():
@@ -2193,6 +2237,14 @@ def update_graph_edge(edge_id: str, session_id: str, db_path: Path | str | None 
     values.append(_now())
     where, params = _scope("id = ?", [edge_id], session_id)
     with _connect(db_path) as conn:
+        before = conn.execute(f"SELECT * FROM graph_edges WHERE {where}", params).fetchone()
+        if not before:
+            return None
+        if "relation" in fields and fields["relation"] and str(fields["relation"]).strip().lower() != before["relation"]:
+            conn.execute(
+                """INSERT OR IGNORE INTO graph_edge_rejections
+                       (session_id, from_id, to_id, relation) VALUES (?,?,?,?)""",
+                (before["session_id"], before["from_id"], before["to_id"], before["relation"]))
         conn.execute(f"UPDATE graph_edges SET {', '.join(sets)} WHERE {where}", [*values, *params])
         conn.commit()
         row = conn.execute(f"SELECT * FROM graph_edges WHERE {where}", params).fetchone()
@@ -2278,7 +2330,15 @@ def redirect_graph_edges(session_id: str, old_id: str, new_id_: str,
     """After a human merges two nodes, point any connection that named the
     now-gone id at the survivor instead of just losing it. A collision with a
     connection the survivor already has is resolved by keeping one row (the
-    unique key would otherwise refuse the second)."""
+    unique key would otherwise refuse the second).
+
+    A REJECTION tombstone naming the old id is redirected the same way. Left
+    behind, it would only ever be dead weight for the dropped id — but the
+    protection it was giving the SURVIVOR's own record of what a human took
+    apart would otherwise be lost the moment that id happens to be the one
+    that gets merged away, and a model could then quietly recreate exactly the
+    connection the merge was supposed to be carrying forward, not erasing.
+    """
     changed = 0
     with _connect(db_path) as conn:
         for column in ("from_id", "to_id"):
@@ -2301,10 +2361,145 @@ def redirect_graph_edges(session_id: str, old_id: str, new_id_: str,
                     conn.execute(f"UPDATE graph_edges SET {column} = ? WHERE id = ?",
                                 (new_id_, row["id"]))
                 changed += 1
+            rej_rows = conn.execute(
+                f"SELECT from_id, to_id, relation FROM graph_edge_rejections "
+                f"WHERE session_id = ? AND {column} = ?", (session_id, old_id)).fetchall()
+            for row in rej_rows:
+                new_from = new_id_ if column == "from_id" else row["from_id"]
+                new_to = new_id_ if column == "to_id" else row["to_id"]
+                if new_from != new_to:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO graph_edge_rejections
+                               (session_id, from_id, to_id, relation) VALUES (?,?,?,?)""",
+                        (session_id, new_from, new_to, row["relation"]))
+            conn.execute(
+                f"DELETE FROM graph_edge_rejections WHERE session_id = ? AND {column} = ?",
+                (session_id, old_id))
         conn.execute("DELETE FROM graph_node_view WHERE session_id = ? AND node_id = ?",
                      (session_id, old_id))
         conn.commit()
     return changed
+
+
+_RISKY_ACTION_STATUSES = ("in_progress", "blocked", "completed", "dropped")
+
+
+def _committed_action(row: dict) -> bool:
+    return row.get("owner_accepted") is not None or row.get("status") in _RISKY_ACTION_STATUSES
+
+
+def _merge_canonical_actions(session_id: str, keep_map_id: str, remove_map_id: str,
+                             db_path: Path | str | None = None) -> None:
+    """
+    Fold the canonical `action_items` rows behind two merging map items into
+    one, instead of leaving both survive the merge (the bug: the map showed one
+    node, and both canonical rows — one of them now unreachable by any map item
+    — went on existing).
+
+    An accepted commitment is never the one silently discarded (rule 101's
+    reasoning, applied to a merge instead of an edit): if EITHER side already
+    carries a real commitment and they disagree about it, the merge is refused
+    outright — `MergeRefused` — and the person is pointed at Accept / Did not
+    accept instead of having this function guess which one should win.
+    """
+    with _connect(db_path) as conn:
+        keep_row = conn.execute(
+            "SELECT * FROM action_items WHERE session_id = ? AND map_id = ?",
+            (session_id, keep_map_id)).fetchone()
+        remove_row = conn.execute(
+            "SELECT * FROM action_items WHERE session_id = ? AND map_id = ?",
+            (session_id, remove_map_id)).fetchone()
+    if not remove_row or (keep_row and dict(keep_row)["id"] == dict(remove_row)["id"]):
+        return
+    if not keep_row:
+        # The surviving map item has no canonical row of its own yet — adopt
+        # the other side's row rather than leaving it orphaned or duplicated.
+        with _connect(db_path) as conn:
+            conn.execute("UPDATE action_items SET map_id = ? WHERE id = ?",
+                        (keep_map_id, dict(remove_row)["id"]))
+            conn.commit()
+        return
+    keep_row, remove_row = dict(keep_row), dict(remove_row)
+    keep_committed, remove_committed = _committed_action(keep_row), _committed_action(remove_row)
+    if keep_committed and remove_committed:
+        same = ((keep_row.get("owner") or "").strip().lower()
+                == (remove_row.get("owner") or "").strip().lower()
+                and keep_row.get("owner_accepted") == remove_row.get("owner_accepted")
+                and keep_row.get("status") == remove_row.get("status"))
+        if not same:
+            raise MergeRefused(
+                "Both of these actions already carry a commitment — an owner's "
+                "acceptance, or work already under way — and they do not agree. "
+                "Merging would silently lose one of them. Use Accept / Did not "
+                "accept, or edit the action directly, instead.")
+    elif remove_committed and not keep_committed:
+        # The side being removed is the one carrying the real commitment; fold
+        # it onto the survivor rather than losing it.
+        with _connect(db_path) as conn:
+            conn.execute(
+                """UPDATE action_items
+                      SET owner = ?, due = COALESCE(?, due), status = ?,
+                          owner_accepted = ?, accepted_by = ?, accepted_at = ?,
+                          human_edited = 1
+                    WHERE id = ?""",
+                (remove_row.get("owner"), remove_row.get("due"), remove_row.get("status"),
+                 remove_row.get("owner_accepted"), remove_row.get("accepted_by"),
+                 remove_row.get("accepted_at"), keep_row["id"]))
+            conn.commit()
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM action_items WHERE id = ?", (remove_row["id"],))
+        conn.commit()
+
+
+def _merge_canonical_decisions(session_id: str, keep_map_id: str, remove_map_id: str,
+                               db_path: Path | str | None = None) -> None:
+    """The decision half of `_merge_canonical_actions` — a CONFIRMED decision
+    is the thing that must never be silently discarded here."""
+    with _connect(db_path) as conn:
+        keep_row = conn.execute(
+            "SELECT * FROM decisions WHERE session_id = ? AND map_id = ?",
+            (session_id, keep_map_id)).fetchone()
+        remove_row = conn.execute(
+            "SELECT * FROM decisions WHERE session_id = ? AND map_id = ?",
+            (session_id, remove_map_id)).fetchone()
+    if not remove_row or (keep_row and dict(keep_row)["id"] == dict(remove_row)["id"]):
+        return
+    if not keep_row:
+        with _connect(db_path) as conn:
+            conn.execute("UPDATE decisions SET map_id = ? WHERE id = ?",
+                        (keep_map_id, dict(remove_row)["id"]))
+            conn.commit()
+        return
+    keep_row, remove_row = dict(keep_row), dict(remove_row)
+    keep_confirmed = keep_row.get("status") == "confirmed"
+    remove_confirmed = remove_row.get("status") == "confirmed"
+    if keep_confirmed and remove_confirmed:
+        if (keep_row.get("text") or "").strip().lower() != (remove_row.get("text") or "").strip().lower():
+            raise MergeRefused(
+                "Both of these are confirmed decisions with different wording. "
+                "Merging would silently discard one of them. Use \"Not a "
+                "decision\" on whichever should stand down, or edit the wording "
+                "directly, instead.")
+    elif remove_confirmed and not keep_confirmed:
+        with _connect(db_path) as conn:
+            conn.execute(
+                """UPDATE decisions SET status = 'confirmed', confirmed_at = ?,
+                          retained_concerns_json = ?, human_edited = 1 WHERE id = ?""",
+                (remove_row.get("confirmed_at"), remove_row.get("retained_concerns_json"),
+                 keep_row["id"]))
+            conn.commit()
+    else:
+        merged_concerns = sorted(
+            set(json.loads(keep_row.get("retained_concerns_json") or "[]"))
+            | set(json.loads(remove_row.get("retained_concerns_json") or "[]")))
+        if merged_concerns:
+            with _connect(db_path) as conn:
+                conn.execute("UPDATE decisions SET retained_concerns_json = ? WHERE id = ?",
+                            (json.dumps(merged_concerns), keep_row["id"]))
+                conn.commit()
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM decisions WHERE id = ?", (remove_row["id"],))
+        conn.commit()
 
 
 def merge_map_items(session_id: str, list_name: str, keep_id: str, remove_id: str,
@@ -2321,6 +2516,11 @@ def merge_map_items(session_id: str, list_name: str, keep_id: str, remove_id: st
     `removed_map_items` (rule 104's tombstone) so a later pass cannot quietly
     resurrect it as a near-duplicate. Every stored connection naming the removed
     id is redirected to the survivor rather than silently dropped.
+
+    For a decision or an action, the CANONICAL rows behind the two map items
+    are folded together too (`_merge_canonical_actions`/`_merge_canonical_decisions`)
+    — done FIRST, and before any state is touched, so a refusal (`MergeRefused`)
+    leaves nothing half-changed.
     """
     if keep_id == remove_id:
         return None
@@ -2332,6 +2532,10 @@ def merge_map_items(session_id: str, list_name: str, keep_id: str, remove_id: st
     remove = next((i for i in items if isinstance(i, dict) and i.get("id") == remove_id), None)
     if not keep or not remove:
         return None
+    if list_name == "action_items":
+        _merge_canonical_actions(session_id, keep_id, remove_id, db_path=db_path)
+    elif list_name == "decision_candidates":
+        _merge_canonical_decisions(session_id, keep_id, remove_id, db_path=db_path)
     field = "action" if list_name == "action_items" else "text"
     if text and text.strip():
         keep[field] = text.strip()
@@ -2339,6 +2543,9 @@ def merge_map_items(session_id: str, list_name: str, keep_id: str, remove_id: st
                                      | set(remove.get("source_turn_ids") or []))
     keep["human_edited"] = True
     keep["human_reviewed"] = True
+    if list_name == "decision_candidates" and isinstance(state.get("confirmed_decision"), dict) \
+            and state["confirmed_decision"].get("id") == remove_id:
+        state["confirmed_decision"]["id"] = keep_id
     state[list_name] = [i for i in items if not (isinstance(i, dict) and i.get("id") == remove_id)]
     saved = save_state(session_id, state, db_path=db_path)
     record_removed_map_item(session_id, list_name, remove_id, db_path=db_path)

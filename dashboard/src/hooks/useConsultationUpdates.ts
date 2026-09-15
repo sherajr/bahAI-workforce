@@ -41,6 +41,16 @@ export function useConsultationUpdates(sessionId: string | null, active: boolean
       const current = qc.getQueryData<ConsultationDetail>(key);
       if (!current) return;                    // the full read has not landed yet
       busyRef.current = true;
+      // A page of changes at the cap means there are more; take the next one
+      // now rather than waiting out the interval. This used to be a plain
+      // `void tick()` called from INSIDE the block below, while `busyRef`
+      // was still true — the recursive call's very first line then saw
+      // `busyRef.current` set and returned immediately, doing nothing, so
+      // the "take the next page now" behaviour never actually ran; the
+      // remaining pages waited out the full interval like anything else.
+      // Recording the intent here and firing it after `finally` resets the
+      // flag is what makes the immediate follow-up real.
+      let more = false;
       try {
         const delta = await api.consultationUpdates(sessionId, {
           turns_rev: current.turns_rev ?? 0,
@@ -57,6 +67,7 @@ export function useConsultationUpdates(sessionId: string | null, active: boolean
           return;
         }
         if (!delta.changed) return;             // the cheap, common answer
+        more = delta.more;
 
         qc.setQueryData<ConsultationDetail>(key, (prev) => {
           if (!prev) return prev;
@@ -90,10 +101,6 @@ export function useConsultationUpdates(sessionId: string | null, active: boolean
           if (delta.record) next.record = delta.record;
           return next;
         });
-
-        // A page of changes at the cap means there are more; take the next one
-        // now rather than waiting out the interval.
-        if (delta.more) void tick();
       } catch {
         // A failed poll is not an error worth showing: the next one is four
         // seconds away, and the full read is still the source of truth. A
@@ -101,6 +108,7 @@ export function useConsultationUpdates(sessionId: string | null, active: boolean
       } finally {
         busyRef.current = false;
       }
+      if (more) void tick();
     };
 
     const timer = window.setInterval(() => { void tick(); }, intervalMs);
