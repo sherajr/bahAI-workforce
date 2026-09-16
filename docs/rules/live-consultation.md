@@ -1360,3 +1360,198 @@ test framework (root `AGENTS.md`).
      rests on the stubbed synthetic fixture in the test suite, not a live
      call — semantic extraction quality on a real meeting remains unverified.
 
+
+## Rule 136 — a semantic connection places an item, without inventing a topic
+
+Added 2026-09-16, in response to the owner's next round of feedback on rule
+135's map: "the full map still is unreadable and jumbled." Confirmed against
+the code AND the real "Picking a class for Sean" session before changing
+anything: an item with no `contains` parent was bucketed strictly by its own
+KIND — every unplaced idea in "Ideas", every unplaced fact in "Facts" — even
+when it carried a real `answers`/`supports`/`challenges`/etc. connection to
+something already placed. That is the concrete shape of "generic category
+hubs... mixed with a real topic": a proposal that directly answers the
+question sat in the same bucket as an unrelated fact, and the connection that
+would have explained WHY it mattered was thrown away for layout purposes.
+Verify with `scripts/test_live_consultation.py`.
+
+136. **An unplaced item's semantic connections are checked BEFORE it is
+     dropped into a kind bucket, and where it lands says which is true.**
+     `build_graph`'s unplaced-item pass (`agents/live_consultation_graph.py`)
+     is now a three-way, deterministic, ONE-HOP lookup (`semantic_anchor`),
+     never a transitive closure solver:
+     - An item connected (via any cross-relation) to something that already
+       has a real topic is shown under that SAME topic, as a sibling of what
+       it connects to — not a second, generic bucket next to the real one.
+     - An item connected straight to the question itself (an `answers` edge
+       to root, or any other cross-link to root) gets a bucket that SAYS so
+       ("Connected to the question") rather than being sorted by kind.
+     - Only an item with neither a topic NOR any semantic connection at all
+       falls back to the original kind bucket — the honest last resort,
+       unchanged from rule 127/131.
+     - **Coverage is now two honest, distinct counts, not one.**
+       `unplaced_count` keeps its ORIGINAL meaning (genuinely disconnected)
+       and can only get SMALLER relative to an older read of the same
+       session, never larger or differently shaped — an existing caller is
+       never surprised. `connected_no_topic_count` is new: items shown under
+       a topic (or the new answers-bucket) purely because of a semantic
+       connection, not because a person or the model ever explicitly grouped
+       them there (section 5C: "separate missing topic membership, no
+       supported semantic connection, and folded detail"). The dashboard's
+       coverage banner (`ConceptGraph.tsx`) shows both, scoped to Full map
+       only — Focus's own honest "nothing to focus on yet" banner already
+       covers the question-led case.
+     - **Cross-links are no longer drawn across the WHOLE canvas by
+       default.** With nothing selected, `toFlowEdges` now drops a
+       non-touching cross-relation edge entirely rather than rendering it at
+       15% opacity — still fully present, still crossing the whole map,
+       which was most of "many long connections, scattered cards." Selecting
+       a node still reveals exactly its own connections, labelled.
+     - **A collapsed branch shows what is actually inside it.** `branchStats`
+       (`ConceptGraph.tsx`) now also collects up to three representative leaf
+       labels, preferring a proposal or concern over a generic fact, so a
+       collapsed card reads as "Course comparison: 12 items, e.g. Compare
+       both courses' syllabuses..." instead of an empty folder with a number
+       on it (section 5A: "Empty folder cards plus item counts are
+       insufficient").
+     - **Verified against the real "Picking a class for Sean" session**
+       (read-only, via `store` + `build_graph` directly — no server restart,
+       no write): `unplaced_count` fell from 343 to 339 and
+       `connected_no_topic_count` picked up exactly the 4 items with an
+       `answers` edge to root, which now sit in "Connected to the question"
+       instead of scattered across kind buckets.
+     - **Explicitly NOT done:** the fuller vision of restructuring the
+       Full map's TOP-LEVEL branches into content-specific "inquiry areas"
+       (question-led groups as the PRIMARY display tree, themes as a
+       secondary facet) — this stage improves placement of items that
+       already have no topic, it does not re-architect how topics themselves
+       are organised. A dedicated coverage PANEL (as opposed to the compact
+       banner here) was not built. Aggregating same-endpoint edges at a
+       lower zoom level was not needed — the codebase never combined
+       opposite relations into a misleading net one, so there was nothing to
+       fix there.
+
+
+## Rule 137 — Focus is a real neighbourhood: no duplicates, no dropped relations, no dead ends
+
+Added 2026-09-16, alongside rule 136, from the same feedback ("Focus map
+looking much better... Maybe could show more details"). Five concrete defects
+were reproduced against the actual `consultationFocus.ts` at commit
+`c70891e` before it was touched (a Node script transpiling and exercising the
+REAL helper via the `typescript` package already a dashboard dependency — no
+new package, no browser): a shared supporting concept was rendered under
+every proposal that cited it, with the SAME React Flow node id each time; only
+`supports`/`elaborates`/`challenges` were ever read, so a `clarifies`,
+`depends_on` or `addresses` connection on a proposal was invisible and
+uncounted; `MAX_PROPOSALS = 4` silently dropped a genuine fifth alternative;
+one combined "+N" badge could not say what kind of thing was hidden; and
+`focusId` always defaulted to root because nothing ever called `buildFocusView`
+with anything else. Verify with `scripts/verify_consultation_focus.mjs` (new
+— see below) and `scripts/test_live_consultation.py`.
+
+137. **`consultationFocus.ts` is rewritten around one rule: a node gets
+     exactly one card, every relation type that bears on a proposal is
+     counted, and nothing is dropped without saying so.**
+     - **No duplicate render ids.** A node cited by more than one proposal is
+       placed ONCE — under whichever proposal cites it first — and every
+       other proposal that also relates to it gets a routed cross-edge
+       straight to that same card instance, never a second copy (section 7:
+       "no duplicate render IDs... shared meaning not deleted").
+     - **Five relation groups per proposal, not two.** `concern`
+       (`challenges` in), `reason` (`supports`/`elaborates` in), `question`
+       (`clarifies` in — a question clarifying this proposal), `dependency`
+       (`depends_on` OUT — the proposal depends on X), and `adjustment`
+       (`addresses` pointing at the proposal OR at one of its own shown
+       concerns — "adjustments that address its concerns"). Each is counted
+       independently (`FocusGroupCount`) whether or not it is currently
+       rendered.
+     - **Every proposal is placed — never a hard cap that silently drops
+       one.** Proposals wrap into rows (`maxPerRow`, default 3) instead of
+       one ever-widening row or a `.slice(0, 4)`; a generous ceiling (24)
+       guards render cost on a pathological map without ever engaging on any
+       case this brief or its test table names.
+     - **Detail is a level, not a font size.** `DetailLevel` (`brief` /
+       `standard` / `detailed`) sets how many of each GROUP show by default
+       (0 / 1 / 3) — Brief still reports every count as a badge, it just
+       starts collapsed. `expandedGroups` (`${proposalId}::${kind}`) lets a
+       person open ONE specific group in place ("2 more reasons") without
+       leaving Focus or affecting any other group or proposal — replacing
+       the old combined "+N" badge that could not say what kind of thing was
+       hidden.
+     - **`focusId` is a real, navigable parameter.** `focusableQuestions`
+       reports every question/investigate item with at least one `answers`
+       edge; `NodeDetail` offers "Focus on this question" for any of them; a
+       breadcrumb ("Main question / Now focused on: …") and an
+       "Other questions" chip row make non-root Focus reachable and legible,
+       not just technically supported. A search/outline result outside the
+       CURRENT neighbourhood is re-tried against `nearestFocusableQuestion`
+       (one hop: is it a question itself, does it answer one, or does it
+       bear on a proposal that does) before falling back to Full map —
+       "reveal a meaningful neighbourhood... preserve a way back," not an
+       automatic dead end.
+     - **Edges are routed to the side that actually faces the other card.**
+       `ConceptNode` now exposes eight handles (top/bottom/left/right, each
+       source AND target); `pickHandles` chooses the pair whose direction
+       matches the real relative position of the two endpoints, in both
+       Focus and Full map. A reason stacked below its proposal, itself above
+       a second sibling, no longer has to draw through that sibling to reach
+       the proposal — the specific case this was reproduced against.
+     - **Two different facts get two different symbols.** A pencil now means
+       "a person corrected this wording" (`human_edited`); the pin is
+       reserved for "a person fixed this CARD'S position" (`pinned`) —
+       previously both were the same Pin icon, so a reader could not tell
+       which was true of a given card.
+     - **Full-map-only banners stay in Full map.** `pin_conflicts` and the
+       topic-coverage banner describe the topic-tree LAYOUT; Focus positions
+       are computed fresh every render and never pinned, so showing them
+       there would be reporting on a layout that is not even on screen.
+     - **The orientation header stops being the tall header it was
+       criticised for.** A long objective now collapses behind a `<details>`
+       disclosure (a short one still shows inline) — section 7: "Keep the
+       full question readable in a compact orientation area, with the
+       objective expandable when long."
+     - **A real, runnable check for the frontend logic** —
+       `scripts/verify_consultation_focus.mjs` — fills the gap the review
+       named directly: "backend tests that feed prewritten model patches do
+       not test frontend selection or model comprehension." It transpiles
+       and imports the ACTUAL `consultationFocus.ts` (via the `typescript`
+       package already a dashboard devDependency, no `ts-node`, no new
+       dependency) rather than a hand-maintained re-implementation that could
+       drift from the real code, and covers: six genuinely distinct options
+       all shown; every relation kind counted; a shared node never
+       duplicated; the same concern reachable by two relation paths still
+       rendered once; detail levels changing what is SHOWN but never what is
+       COUNTED; a non-root `focusId` finding its own proposals; and the
+       honest empty state when nothing answers a question yet.
+     - **Verified against the real "Picking a class for Sean" session**
+       (read-only): `buildFocusView` on the live data found all 4 of its
+       `answers` edges, zero duplicate card ids, and confirmed a real,
+       separate finding worth recording plainly — three of those four
+       "proposals" are evaluation instructions ("Evaluate the courses
+       against...", "Choose the course that combines...") rather than named
+       alternatives, with only one ("Use Critical Decision Making in Groups
+       for immediate career-focused...") actually naming a course. This is a
+       CONTENT/classification problem in what earlier extraction proposed as
+       an `answers` edge, not a Focus rendering defect — Focus now displays
+       exactly what is on the map, correctly and completely, which is what
+       makes a misclassified proposal visible instead of hidden. It is
+       reachable today: rejecting an `answers` connection is an existing,
+       ordinary action in the root node's own connection list. Teaching the
+       reasoner's `answers` guidance to distinguish a genuine alternative
+       from an evaluation criterion is follow-up work, named here rather
+       than fixed silently or left undiscovered.
+     - **Explicitly NOT done:** reclassifying existing `idea` items into
+       finer roles (alternative / criterion / synthesis) — a genuine schema
+       and extraction question, not a Focus-mechanics one (section 4B); a
+       generated, concise card HEADING distinct from the full sentence
+       (section 4C) — risks silently editorializing the approved wording
+       without real design care, deferred rather than rushed; the bounded,
+       resumable archived-session repair workflow (section 6) — a
+       substantially larger, separate piece of work, not started this stage;
+       narrow-viewport, keyboard-only and touch audits of the new controls;
+       and any real-model verification of extraction quality (the synthetic
+       checks use fixed graphs, not a live call). No browser-automation tool
+       was available in this session either, consistent with every prior one
+       on this feature — every rendering claim rests on `tsc`, `npm run
+       build`, the new Node-based logic check, and reading the code.
+

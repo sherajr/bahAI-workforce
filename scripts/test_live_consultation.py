@@ -3791,6 +3791,56 @@ check("unplaced items are counted, even though this is not whole-graph fallback"
       # only idea_1 was actually placed (under theme_1).
       _dg_graph["unplaced_count"] == 3, str(_dg_graph["unplaced_count"]))
 
+
+section("a semantic connection places an item, without inventing a topic membership (rule 136)")
+
+# Reproduced against the exact defect the detail-and-overview brief named:
+# "generic category hubs... mixed with a real topic" -- before this, ANY
+# themeless item landed in a bucket keyed by its own KIND, so a proposal
+# directly answering the question sat in the same "Ideas" hub as an
+# unrelated fact, and a genuine cross-relation to an already-placed item was
+# thrown away as if it did not exist.
+_anchor_state = {
+    "question": "Which course?",
+    "themes": [{"id": "theme_1", "text": "Course comparison"}],
+    "ideas": [
+        {"id": "idea_1", "text": "Take Critical Decision Making in Groups"},   # placed under theme_1
+        {"id": "idea_2", "text": "A related but themeless observation"},       # supports idea_1
+        {"id": "idea_3", "text": "Take Interpersonal Communication instead"},  # answers root directly
+    ],
+    "needs_and_concerns": [
+        {"id": "concern_1", "text": "Totally unrelated, unconnected concern"},  # genuinely unplaced
+    ],
+    "state_revision": 1,
+}
+_anchor_edges = [
+    {"id": "ae1", "from_id": "theme_1", "to_id": "idea_1", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ae2", "from_id": "idea_2", "to_id": "idea_1", "relation": "supports",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ae3", "from_id": "idea_3", "to_id": "root", "relation": "answers",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+]
+_anchor_graph = lc_graph.build_graph(
+    {"id": "cons_anchor", "question": _anchor_state["question"]},
+    _anchor_state, [], [], _anchor_edges, {})
+_anchor_contains = {(e["from_id"], e["to_id"]) for e in _anchor_graph["edges"] if e["relation"] == "contains"}
+check("a themeless item connected to an already-placed one is shown under the SAME topic",
+      ("theme_1", "idea_2") in _anchor_contains, _anchor_contains)
+check("...rather than a generic 'Ideas' bucket next to the real topic",
+      not any(f == "bucket:idea" for f, _ in _anchor_contains), _anchor_contains)
+_answers_bucket_id = next((n["id"] for n in _anchor_graph["nodes"]
+                          if n["kind"] == "bucket" and n["label"] == "Connected to the question"), None)
+check("an item answering the question directly gets a MEANINGFUL bucket, not a kind bucket",
+      _answers_bucket_id is not None and (_answers_bucket_id, "idea_3") in _anchor_contains,
+      _anchor_contains)
+check("a genuinely unconnected item still falls back to the honest kind bucket",
+      ("bucket:concern", "concern_1") in _anchor_contains, _anchor_contains)
+check("connected_no_topic_count covers exactly the two semantically-placed items",
+      _anchor_graph["connected_no_topic_count"] == 2, _anchor_graph["connected_no_topic_count"])
+check("unplaced_count now covers ONLY the genuinely disconnected item, not the connected ones",
+      _anchor_graph["unplaced_count"] == 1, _anchor_graph["unplaced_count"])
+
 _fb_state = {"question": "An old session", "ideas": [{"id": "idea_1", "text": "Something"}],
             "needs_and_concerns": [{"id": "concern_1", "text": "Something else"}],
             "state_revision": 1}

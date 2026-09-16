@@ -712,15 +712,80 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
             if node["kind"] == "theme" and node_id not in parent_so_far:
                 add_edge(_edge(ROOT_ID, node_id, HIERARCHY_RELATION, synthetic=True, inferred=False))
         # Anything real with no theme parenting it (the model has not placed
-        # it yet, or it predates this feature) is grouped into a PROVISIONAL
-        # bucket by kind, rather than hanging off the root one at a time.
+        # it yet, or it predates this feature) used to go straight into a
+        # PROVISIONAL bucket by KIND -- "Ideas", "Facts", "Agreements" --
+        # regardless of whether it was already meaningfully connected to
+        # something real. That put a proposal that directly `answers` the
+        # question in the same generic "Ideas" hub as an unrelated fact
+        # (section 2 of the detail-and-overview brief: "generic category
+        # hubs... mixed with a real topic"). Three-way split instead (rule
+        # 136), from most to least meaningful:
         parent_so_far, _ = primary_parent_map(nodes, edges)
+        node_kind_of = {nid: n["kind"] for nid, n in nodes.items()}
+        cross_neighbors: dict[str, list[str]] = {}
+        for e in edges:
+            if e["relation"] == HIERARCHY_RELATION:
+                continue
+            cross_neighbors.setdefault(e["from_id"], []).append(e["to_id"])
+            cross_neighbors.setdefault(e["to_id"], []).append(e["from_id"])
+
+        def semantic_anchor(node_id: str) -> Optional[str]:
+            """One hop via any CROSS relation to something already placed in
+            the display tree -- the question itself, or a theme (directly, or
+            through a neighbour that already sits under one). Never chases a
+            second hop: a deterministic, bounded, one-step lookup, not a
+            transitive-closure solver."""
+            for other in cross_neighbors.get(node_id, []):
+                if other not in nodes:
+                    continue
+                if other == ROOT_ID:
+                    return ROOT_ID
+                if node_kind_of.get(other) == "theme":
+                    return other
+                if other in parent_so_far:
+                    return parent_so_far[other]
+            return None
+
         unplaced_by_kind: dict[str, list[str]] = {}
+        anchored_under: dict[str, list[str]] = {}  # existing theme id -> members
+        answers_bucket_members: list[str] = []
         for node_id, node in nodes.items():
             if node_id == ROOT_ID or node["kind"] in ("theme", "bucket"):
                 continue
-            if node_id not in parent_so_far:
+            if node_id in parent_so_far:
+                continue
+            anchor = semantic_anchor(node_id)
+            if anchor == ROOT_ID:
+                answers_bucket_members.append(node_id)
+            elif anchor is not None:
+                anchored_under.setdefault(anchor, []).append(node_id)
+            else:
                 unplaced_by_kind.setdefault(node["kind"], []).append(node_id)
+
+        # 1. Semantically connected to something that already has a real
+        # topic: shown under that SAME topic, as a sibling of what it
+        # connects to, rather than a generic kind bucket next to it.
+        for anchor_id, member_ids in anchored_under.items():
+            for member_id in member_ids:
+                add_edge(_edge(anchor_id, member_id, HIERARCHY_RELATION,
+                              synthetic=True, inferred=False, label="connected"))
+
+        # 2. Connected straight to the question itself (an `answers` or other
+        # cross-link to root, with no topic in between) -- exactly the
+        # proposals Focus already treats as answers, so they get a bucket
+        # that says so, never "Ideas"/"Agreements".
+        if answers_bucket_members:
+            answers_bucket = _bucket_node("answers")
+            answers_bucket["label"] = answers_bucket["detail"] = "Connected to the question"
+            nodes[answers_bucket["id"]] = answers_bucket
+            add_edge(_edge(ROOT_ID, answers_bucket["id"], HIERARCHY_RELATION,
+                          synthetic=True, inferred=False))
+            for member_id in answers_bucket_members:
+                add_edge(_edge(answers_bucket["id"], member_id, HIERARCHY_RELATION,
+                              synthetic=True, inferred=False))
+
+        # 3. Genuinely disconnected -- no topic AND no semantic connection of
+        # any kind. The honest last resort, unchanged from before.
         for kind, member_ids in unplaced_by_kind.items():
             bucket = _bucket_node(kind)
             nodes[bucket["id"]] = bucket
@@ -728,6 +793,15 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
             for member_id in member_ids:
                 add_edge(_edge(bucket["id"], member_id, HIERARCHY_RELATION,
                               synthetic=True, inferred=False))
+
+        # Coverage, reported as three honest, distinct counts rather than one
+        # "unplaced" number that conflated them (section 5C: "separate
+        # missing topic membership, no supported semantic connection, and
+        # folded detail"). `unplaced_count` keeps its ORIGINAL meaning --
+        # genuinely disconnected -- so an existing caller reading it sees a
+        # smaller, more honest number, never a larger or differently-shaped one.
+        connected_no_topic_count = (
+            sum(len(v) for v in anchored_under.values()) + len(answers_bucket_members))
         unplaced_count = sum(len(v) for v in unplaced_by_kind.values())
 
     parent_of, extra_contains = primary_parent_map(nodes, edges)
@@ -802,11 +876,21 @@ def build_graph(session: dict, state: dict, decisions: list[dict], actions: list
         "record_revision": int(session.get("record_revision") or 0),
         "layout_version": LAYOUT_VERSION,
         "fallback": fallback,
-        # How many real items sit in a provisional (not-yet-themed) bucket
-        # even though this is NOT a whole-graph fallback — 0 whenever every
-        # real item already has a theme, and always 0 in fallback mode itself
-        # (where `fallback: true` already says so for the whole map).
+        # How many real items have NEITHER a topic NOR any semantic
+        # connection at all -- the genuinely disconnected remainder, always 0
+        # in fallback mode itself (where `fallback: true` already says so for
+        # the whole map). Rule 136 narrowed this on purpose: an item with a
+        # real cross-relation to something placed is no longer counted here
+        # (see `connected_no_topic_count`), so this number can only shrink
+        # relative to an older read of the same session, never grow.
         "unplaced_count": unplaced_count if not fallback else 0,
+        # How many items have NO topic of their own but ARE shown under one
+        # anyway because they are semantically connected to something that
+        # does (an `answers`/`supports`/etc. link to a themed item, or to the
+        # question itself) -- distinct from `unplaced_count` precisely so a
+        # coverage view can say "connected but not explicitly grouped"
+        # rather than lumping it in with "no connection at all" (section 5C).
+        "connected_no_topic_count": connected_no_topic_count if not fallback else 0,
         "pin_conflicts": pin_conflicts,
         "nodes": list(nodes.values()),
         "edges": edges,

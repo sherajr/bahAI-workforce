@@ -31,25 +31,38 @@ See `AGENTS.md` for the full technical orientation — this file is just
 - The Video pipeline, the Colony (+ the Material World / nuclei), the project
   wallet, the API's owner gate, and the prompt-injection hold.
 - Live Consultation: the human-owned record (rules 94-99), request-ordering
-  survival (rules 100-110), and the concept graph (rules 121-135). Nested
+  survival (rules 100-110), and the concept graph (rules 121-137). Nested
   topics are allowed (theme may contain theme); layout v3 packs subtree
   bounds instead of a per-branch grid; Organize ideas can repair an already
   placed map and previews the validated proposal. A question-led relationship
   grammar (rule 133: `answers`, `clarifies`, `elaborates`) and relevance-aware
   extraction context with per-item source excerpts (rule 134) are both in.
-  Stage 3 (rule 135) made the map actually readable: a full ~160-char label
-  instead of 44, cards sized from their own served width/height instead of a
-  fixed 200px box, a real fix for `fitOverview`'s center-root-and-return bug,
-  role-based (question/proposal/reason/concern/outcome/topic) colour+icons on
-  every card, and a new client-side "Focus" default view (question → its
-  `answers` proposals → their reasons/concerns) that degrades honestly to the
-  full map when a session has no `answers` edges yet (every session extracted
-  before rule 133). Still ahead in the same MeetMap-inspired rework: the
-  archived-consultation repair workflow (backfilling the new relations onto
-  old sessions, consolidating duplicates), navigating Focus to a
-  non-root question, and real-model verification of extraction quality (the
-  synthetic fixture in `test_live_consultation.py` uses a stubbed model).
-  Closeout has not yet been used in a real meeting.
+  Stage 3 (rule 135) made the map actually readable (full labels, real card
+  sizing, a working `fitOverview`, role colour+icons, a first "Focus"
+  default view). Stage 4 (rules 136-137) made Focus and Full map both
+  genuinely usable: Focus has no duplicate shared-node cards, counts and
+  shows all five relation types (concern/reason/question/dependency/
+  adjustment) with per-group local expansion, three detail levels (Brief/
+  Standard/Detailed), non-root navigation ("Focus on this question",
+  breadcrumbs), and correctly-routed edges (8 handles, chosen by actual
+  relative position); Full map places a semantically-connected unplaced
+  item under its real topic (or a meaningful "Connected to the question"
+  bucket) instead of a generic kind bucket, reports coverage as two honest
+  counts, hides non-touching cross-links by default, and shows a
+  representative sample inside a collapsed branch instead of a bare count.
+  A new `scripts/verify_consultation_focus.mjs` exercises the real
+  TypeScript focus-layout logic directly (no frontend test framework exists
+  otherwise). Verified against the real "Picking a class for Sean" session,
+  read-only, which also surfaced a genuine, separate finding: 3 of its 4
+  `answers` proposals are evaluation instructions, not named alternatives —
+  a content/classification issue in earlier extraction, not a Focus defect,
+  named in rule 137 rather than fixed silently. Still ahead: the bounded,
+  resumable archived-session repair workflow (rewording, duplicate
+  consolidation — a substantially larger piece separate from this stage),
+  reclassifying alternative/criterion/synthesis more finely, a generated
+  card heading distinct from the full sentence, and real-model verification
+  of extraction quality (all checks so far use fixed/stubbed data). Closeout
+  has not yet been used in a real meeting.
 - Agent orientation split (`ed21927`): root `AGENTS.md` is a thin routing
   table; the numbered rules live in `docs/rules/*.md`, split by subsystem.
 
@@ -78,6 +91,93 @@ Empty when nothing is in flight.
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-16 (later) -- Claude Code (Sonnet 5) -- Focus gets real detail, Full map gets coherent (rules 136-137), stage 4 of the MeetMap-inspired rework
+
+Sheraj's next round of feedback on stage 3: "Focus map looking much better,
+actually making sense. Maybe could show more details. And the full map still
+is unreadable and jumbled." A detailed brief named concrete, reproduced
+defects rather than just describing the screenshots; this session confirmed
+each one against the actual `c70891e` checkout (and, for two of them, against
+the REAL "Picking a class for Sean" session, read-only) before changing
+anything, then fixed what could be fixed correctly in one sitting and named
+what could not.
+
+**Focus (rule 137, `dashboard/src/lib/consultationFocus.ts` rewritten):** a
+shared supporting concept used to render under EVERY proposal that cited it
+with the SAME React Flow id (a real duplicate-id bug, reproduced with a
+two-proposal/one-shared-fact fixture); only `supports`/`elaborates`/
+`challenges` were ever read, so `clarifies`/`depends_on`/`addresses` on a
+proposal were invisible and uncounted; `MAX_PROPOSALS = 4` silently dropped a
+genuine fifth alternative; one combined "+N" badge could not say what kind of
+thing was hidden; `focusId` always defaulted to root. Now: a node gets
+exactly one card ever, cited a second time via a routed edge instead of a
+duplicate; five relation groups per proposal (concern/reason/question/
+dependency/adjustment), each counted independently; every proposal shown,
+wrapped into rows instead of capped; three detail levels (Brief/Standard/
+Detailed) plus per-group local expansion ("2 more reasons"); real non-root
+navigation ("Focus on this question" from any question-role node, a
+breadcrumb, an "other questions" chip row); a search result outside the
+current neighbourhood re-tries the nearest OTHER focusable question before
+falling back to Full map. `ConceptGraph.tsx`'s cards also gained 8 handles
+(top/bottom/left/right, source+target) so an edge routes to whichever side
+actually faces the other card (`pickHandles`) instead of always top/bottom —
+the fix for connectors drawing through an intervening sibling card — and two
+different icons for "wording corrected by hand" (pencil) vs "position pinned
+by hand" (pin), previously both the same Pin icon.
+
+**Full map (rule 136, `agents/live_consultation_graph.py`):** an unplaced
+item was bucketed strictly by its own KIND even when it carried a real
+semantic connection to something already placed — "generic category hubs...
+mixed with a real topic." `build_graph`'s unplaced pass is now a three-way,
+one-hop `semantic_anchor` lookup: connected to something with a real topic ->
+shown under that SAME topic; connected straight to the question -> a
+meaningful "Connected to the question" bucket, not a kind bucket; neither ->
+the honest kind-bucket fallback, unchanged. Coverage is now two counts
+(`unplaced_count`, narrowed to genuinely disconnected only, and new
+`connected_no_topic_count`) instead of one that conflated them. Cross-links
+no longer draw across the whole canvas at 15% opacity when nothing is
+selected -- dropped entirely until a node is selected. A collapsed branch now
+shows up to three representative leaf labels, not just a count.
+
+**New verification, since no frontend test framework exists in this repo:**
+`scripts/verify_consultation_focus.mjs` transpiles and imports the ACTUAL
+`consultationFocus.ts` (via the `typescript` package already a dashboard
+devDependency -- no new dependency, no ts-node) and exercises it against
+every case the brief's own test table names that a pure function can prove:
+six distinct options all shown, every relation kind counted, no duplicate
+ids, the same concern reachable two ways still counted once, detail levels
+changing what is shown but never what is counted, non-root `focusId`, and the
+honest empty state. 19/19 pass. A new Python section in
+`test_live_consultation.py` covers the semantic-anchor placement end to end
+(6 new checks).
+
+**Verified against the real session, read-only** (`store` + `build_graph`
+called directly, no server restart, nothing written): `unplaced_count` fell
+343 -> 339 and `connected_no_topic_count` picked up exactly the 4 real
+`answers` edges. Feeding that same real graph through `buildFocusView`
+surfaced a genuine, separate finding, recorded rather than silently fixed or
+missed: 3 of those 4 "proposals" are evaluation instructions ("Evaluate the
+courses against...") rather than named alternatives -- a content problem in
+what an earlier Organize pass proposed as an `answers` edge, not a Focus
+rendering defect. It is correctable today (reject the connection in root's
+own connection list); teaching the reasoner's `answers` guidance to tell an
+alternative from a criterion is named as follow-up, not attempted here.
+
+**Verified overall:** 988 Python checks (was 982, +6) plus all other Python
+suites unchanged (2064 total), the new 19-check JS script, `import agents.api`
+clean, `npx tsc --noEmit` clean, `npm run build` clean (Consultation chunk
+335.4KB -> 343.5KB, entry unchanged at 247.8KB).
+
+**Explicitly NOT done:** the bounded, resumable archived-session repair
+workflow (rewording, duplicate consolidation across 300+ items) -- named in
+the brief as its own major piece and genuinely out of scope for one sitting;
+reclassifying `idea` items into finer alternative/criterion/synthesis roles;
+a generated concise card heading distinct from the full sentence; narrow-
+viewport/keyboard/touch audits of the new controls; and, as with every prior
+session on this feature, real browser and real-model verification -- no
+browser-automation tool was available, so rendering claims rest on `tsc`,
+`npm run build`, the new logic check, and reading the code.
 
 ### 2026-09-16 -- Claude Code (Sonnet 5) -- the map becomes readable, and a real Focus view (rule 135), stage 3 of the MeetMap-inspired rework
 
