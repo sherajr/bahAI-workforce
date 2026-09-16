@@ -23,7 +23,7 @@ touching — you don't need the rest.**
 | 42–49 | The project wallet | [docs/rules/wallet.md](docs/rules/wallet.md) |
 | 55–57 | Cancelling a run | [docs/rules/jobs.md](docs/rules/jobs.md) |
 | 70–72 | The API's owner gate + indirect prompt injection | [docs/rules/api.md](docs/rules/api.md) |
-| 73–110, 121–132 | Live Consultation (the Consultation tab) | [docs/rules/live-consultation.md](docs/rules/live-consultation.md) |
+| 73–110, 121–137 | Live Consultation (the Consultation tab) | [docs/rules/live-consultation.md](docs/rules/live-consultation.md) |
 | 112–116 | What the dashboard costs to open, and to leave | [docs/rules/dashboard.md](docs/rules/dashboard.md) |
 | 117–120 | A gathering, and a place to start | [docs/rules/gatherings.md](docs/rules/gatherings.md) |
 
@@ -77,8 +77,11 @@ python scripts/test_nuclei.py              # Material World (nuclei): 281 checks
 python scripts/test_api_auth.py            # The API's owner gate: 66 checks
 python scripts/test_secretary_injection.py # Prompt-injection hold: 50 checks
 python scripts/test_live_consultation.py   # Live Consultation, the shelf,
-                                           # gatherings and Home: 811 checks
+                                           # gatherings and Home: 988 checks
 python scripts/test_quote_verify.py        # Exact quotation verification: 50 checks
+node scripts/verify_consultation_focus.mjs # The Focus view's pure logic
+                                           # (no frontend test framework exists
+                                           # otherwise): 19 checks
 ```
 
 All of the suites above are offline and free. Check counts live **here only** —

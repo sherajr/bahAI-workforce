@@ -5,17 +5,22 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
-  ChevronDown, ChevronRight, Download, FileCode, Image as ImageIcon, LayoutGrid, List,
-  Loader2, LocateFixed, Maximize2, Minimize2, Network, PanelRightClose, PanelRightOpen, Pencil, Pin,
-  Quote, Scan, Search, Sparkles, Trash2, Undo2, X,
+  AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Compass, Download, FileCode,
+  Folder, HelpCircle, Image as ImageIcon, LayoutGrid, Lightbulb, Link2, List, Loader2, LocateFixed,
+  Maximize2, Minimize2, Network, PanelRightClose, PanelRightOpen, Pencil, Pin, Quote, Scan, Search,
+  Sparkles, Trash2, X,
 } from "lucide-react";
 import { api, recordActivity } from "../../lib/api";
 import type {
   ConceptGraph as ConceptGraphT, ConsultationAction, ConsultationCapabilities,
-  ConsultationDecision, GraphEdge, GraphNode, GraphRelation, OrganizePreview,
+  ConsultationDecision, GraphEdge, GraphNode, GraphRelation, GraphRole, OrganizePreview,
   OrganizeTreeNode,
 } from "../../lib/consultationTypes";
 import { Button, Card } from "../ui";
+import {
+  buildFocusView, focusableQuestions, GROUP_META, type DetailLevel, type FocusGroupCount,
+  type FocusView,
+} from "../../lib/consultationFocus";
 
 /**
  * The interactive concept map — a real, connected graph of the consultation,
@@ -36,9 +41,22 @@ const prefersReducedMotion = () =>
   typeof window !== "undefined"
   && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
-type BranchStats = { total: number; open: number };
+type BranchStats = { total: number; open: number; sample: string[] };
 type FlowNodeData = {
   graphNode: GraphNode; dimmed: boolean; matched: boolean; color: string; stats?: BranchStats;
+  role: GraphRole | null; roleLabel: string;
+  /** Overrides the kind-derived icon (`ROLE_ICON[role]`) for a Focus card,
+   *  whose role vocabulary (dependency/adjustment) is wider than the six
+   *  kind-roles `role` carries. */
+  icon?: typeof HelpCircle;
+  /** Focus view only, set on a proposal card: what it has and how much of
+   *  each relation type is currently shown, so a reader sees "2 more
+   *  reasons" / "3 open concerns" separately rather than one opaque "+N"
+   *  (rule 137). */
+  groups?: FocusGroupCount[];
+  /** Focus view only: expand one of this card's groups in place. `key` is
+   *  `${proposalId}::${groupKind}`. */
+  onToggleGroup?: (key: string) => void;
 };
 type FlowEdgeData = { relation: GraphRelation; dimmed: boolean };
 
@@ -52,11 +70,20 @@ const OPEN_STATUSES = new Set([
   "open", "reported", "disputed", "candidate", "proposed", "accepted", "in_progress",
 ]);
 
+const SAMPLE_PRIORITY: Record<string, number> = { proposal: 0, concern: 1, question: 2, outcome: 3 };
+const MAX_BRANCH_SAMPLE = 3;
+
 /** For every theme/bucket branch: how many leaves it holds (through ANY
- *  depth of nested branches), and how many
- *  of those still look unresolved — so a COLLAPSED card can say what is
- *  hidden inside it instead of only naming the topic. */
-function branchStats(graph: ConceptGraphT): Map<string, BranchStats> {
+ *  depth of nested branches), how many of those still look unresolved, and
+ *  a short, representative sample of what is actually inside -- so a
+ *  COLLAPSED card reads as "Course comparison: 12 items, e.g. Compare both
+ *  courses' syllabuses, Neither course's digital relevance is known..."
+ *  rather than an empty folder with a number on it (section 5A: "a short
+ *  branch summary, representative distinct possibilities... Empty folder
+ *  cards plus item counts are insufficient"). Proposals and concerns are
+ *  preferred over a generic fact when there is a choice, since those are
+ *  usually what a reader wants to know is inside before opening a branch. */
+function branchStats(graph: ConceptGraphT, capabilities: ConsultationCapabilities): Map<string, BranchStats> {
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const children = new Map<string, string[]>();
   for (const e of graph.edges) {
@@ -66,10 +93,11 @@ function branchStats(graph: ConceptGraphT): Map<string, BranchStats> {
     children.set(e.from_id, list);
   }
   const stats = new Map<string, BranchStats>();
-  function walk(id: string, seen: Set<string>): BranchStats {
-    if (seen.has(id)) return { total: 0, open: 0 };
+  function walk(id: string, seen: Set<string>): BranchStats & { leaves: GraphNode[] } {
+    if (seen.has(id)) return { total: 0, open: 0, sample: [], leaves: [] };
     seen = new Set([...seen, id]);
     let total = 0, open = 0;
+    const leaves: GraphNode[] = [];
     for (const childId of children.get(id) ?? []) {
       const child = byId.get(childId);
       if (!child) continue;
@@ -77,13 +105,21 @@ function branchStats(graph: ConceptGraphT): Map<string, BranchStats> {
         const sub = walk(childId, seen);
         total += sub.total;
         open += sub.open;
+        leaves.push(...sub.leaves);
       } else {
         total += 1;
         if (child.status && OPEN_STATUSES.has(child.status)) open += 1;
+        leaves.push(child);
       }
     }
-    const result = { total, open };
-    stats.set(id, result);
+    const ranked = [...leaves].sort((a, b) => {
+      const pa = SAMPLE_PRIORITY[roleOf(a.kind, capabilities) ?? ""] ?? 9;
+      const pb = SAMPLE_PRIORITY[roleOf(b.kind, capabilities) ?? ""] ?? 9;
+      return pa - pb;
+    });
+    const sample = ranked.slice(0, MAX_BRANCH_SAMPLE).map((n) => n.label);
+    const result = { total, open, sample, leaves };
+    stats.set(id, { total, open, sample });
     return result;
   }
   for (const n of graph.nodes) {
@@ -100,6 +136,41 @@ function relationStyle(relation: GraphRelation, capabilities: ConsultationCapabi
 
 function kindColor(kind: string, capabilities: ConsultationCapabilities): string {
   return capabilities.node_kinds.find((k) => k.id === kind)?.color ?? "#64748b";
+}
+
+// ── The reading roles (rule 133/135): a restrained, six-way lens over the 15
+// node kinds, so a card is scannable by what it is ARGUING -- a question, a
+// proposed answer, a reason, a concern, an outcome, or a topic container --
+// before a reader has to parse which of fifteen specific kinds it is. Colour
+// AND an icon carry the distinction (section 5: "distinguishable with words/
+// icons as well as color"), never colour alone. Falls back to the node's own
+// kind colour when a backend predates rule 133 (`role_of_kind` absent).
+const ROLE_COLOR: Record<GraphRole, string> = {
+  question: "#94a3b8", proposal: "#34d399", reason: "#38bdf8",
+  concern: "#fb923c", outcome: "#facc15", topic: "#a1a1aa",
+};
+const ROLE_ICON: Record<GraphRole, typeof HelpCircle> = {
+  question: HelpCircle, proposal: Lightbulb, reason: CheckCircle2,
+  concern: AlertTriangle, outcome: CheckCircle2, topic: Folder,
+};
+
+function roleOf(kind: string, capabilities: ConsultationCapabilities): GraphRole | null {
+  return capabilities.role_of_kind?.[kind as GraphNode["kind"]] ?? null;
+}
+
+function roleColor(kind: string, capabilities: ConsultationCapabilities): string {
+  const role = roleOf(kind, capabilities);
+  return role ? ROLE_COLOR[role] : kindColor(kind, capabilities);
+}
+
+// Labels are SERVED (`capabilities.node_roles`), never duplicated here (the
+// same reasoning as the rest of this legend, rule 87) -- a role with no
+// server-provided label (an older backend, or the fallback "focus"/"proposal"
+// synthesized client-side for the focus view) falls back to the node's kind.
+function roleLabelOf(role: GraphRole | null, kind: string, capabilities: ConsultationCapabilities): string {
+  const meta = role ? capabilities.node_roles?.find((r) => r.id === role) : undefined;
+  if (meta) return meta.label;
+  return kind === "bucket" ? "category" : kind;
 }
 
 /** Every descendant of a collapsed branch, via hierarchy edges only. */
@@ -125,29 +196,59 @@ function collapsedDescendants(graph: ConceptGraphT): Set<string> {
   return hidden;
 }
 
+// Every card gets a handle on all four sides, in BOTH directions, so an edge
+// can always leave/enter on the side actually facing the other node instead
+// of always top/bottom (rule 137: "a reason displayed below its proposal
+// must have a visible, correctly directed connection that avoids the
+// intervening cards" -- with only top-target/bottom-source, a reason
+// stacked BELOW its proposal, itself above a second sibling, had no way to
+// reach the proposal except drawing through that sibling). All eight are
+// invisible; `pickHandles` below chooses the pair that fits the actual
+// relative position of the two real endpoints.
+const HANDLE_SPECS: { id: string; type: "source" | "target"; position: Position }[] = [
+  { id: "top-source", type: "source", position: Position.Top },
+  { id: "top-target", type: "target", position: Position.Top },
+  { id: "bottom-source", type: "source", position: Position.Bottom },
+  { id: "bottom-target", type: "target", position: Position.Bottom },
+  { id: "left-source", type: "source", position: Position.Left },
+  { id: "left-target", type: "target", position: Position.Left },
+  { id: "right-source", type: "source", position: Position.Right },
+  { id: "right-target", type: "target", position: Position.Right },
+];
+
 function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">>) {
-  const { graphNode: n, dimmed, matched, color, stats } = data;
+  const { graphNode: n, dimmed, matched, color, stats, role, roleLabel, icon, groups, onToggleGroup } = data;
   const isRoot = n.kind === "root";
   const isBranch = n.kind === "theme" || n.kind === "bucket";
+  const RoleIcon = icon ?? (role ? ROLE_ICON[role] : null);
   return (
     <div
       role="button"
       tabIndex={0}
-      aria-label={`${n.kind}: ${n.label}`}
+      aria-label={`${roleLabel}: ${n.label}`}
       style={{
         borderColor: color,
         opacity: dimmed ? 0.25 : 1,
+        // The card's own SERVED width/height (`agents/live_consultation_graph.py`'s
+        // `_estimate_size`) is the single source of truth for its box, the
+        // same one collision-avoidance and export layout already use --
+        // rendering a fixed 200px box regardless is what made a full sentence
+        // read as three clipped words (rule 135).
+        width: n.width ?? 240,
+        minHeight: n.height ?? 72,
       }}
-      className={`w-[200px] rounded-lg border-2 bg-slate-900 px-3 py-2 text-left shadow-sm transition-opacity
+      className={`rounded-lg border-2 bg-slate-900 px-3 py-2 text-left shadow-sm transition-opacity
         ${selected ? "ring-2 ring-amber-300" : ""} ${matched ? "ring-2 ring-sky-400" : ""}
         ${isRoot ? "bg-slate-800" : ""}`}
     >
-      <Handle type="target" position={Position.Top} className="!opacity-0" />
-      <Handle type="source" position={Position.Bottom} className="!opacity-0" />
+      {HANDLE_SPECS.map((h) => (
+        <Handle key={h.id} id={h.id} type={h.type} position={h.position} className="!opacity-0" />
+      ))}
       <div className="flex items-center justify-between gap-1">
-        <span className="truncate text-[10px] font-semibold uppercase tracking-wide"
+        <span className="flex min-w-0 items-center gap-1 truncate text-[10px] font-semibold uppercase tracking-wide"
               style={{ color: n.origin === "fallback_grouping" ? "#a1a1aa" : color }}>
-          {n.kind === "bucket" ? "category" : n.kind}
+          {RoleIcon && <RoleIcon className="h-3 w-3 shrink-0" />}
+          <span className="truncate">{roleLabel}</span>
         </span>
         <div className="flex shrink-0 items-center gap-1">
           {/* A collapsed branch's own card is the only thing still on screen
@@ -164,15 +265,80 @@ function ConceptNode({ data, selected }: NodeProps<Node<FlowNodeData, "concept">
               {stats.total}{stats.open > 0 ? ` · ${stats.open} open` : ""}
             </span>
           )}
-          {n.human_edited && <Pin className="h-3 w-3 text-emerald-400" aria-label="corrected by hand" />}
+          {/* Two different facts, two different symbols (rule 137): a pencil
+             is "a person corrected this wording"; a pin is "a person fixed
+             this CARD'S POSITION" -- conflating them under one Pin icon
+             meant a reader could not tell which was true. */}
+          {n.human_edited && <Pencil className="h-3 w-3 text-emerald-400" aria-label="wording corrected by hand" />}
+          {n.pinned && <Pin className="h-3 w-3 text-amber-400" aria-label="position pinned by hand" />}
         </div>
       </div>
-      <p className="mt-0.5 line-clamp-3 text-sm leading-snug text-slate-100">{n.label}</p>
+      {/* No `line-clamp` here: the label is already a bounded DISPLAY
+         truncation (`_short_label`, now a full sentence's worth of
+         characters, rule 135) and the card's own height was sized for
+         exactly this text by the same server pass -- clamping again on top
+         of a server truncation is the double-truncation this rule fixes. */}
+      <p className="mt-0.5 whitespace-pre-wrap text-[15px] leading-snug text-slate-100">{n.label}</p>
       {n.status_label && (
         <p className="mt-1 truncate text-[10px] text-slate-400">{n.status_label}</p>
       )}
+      {/* A collapsed branch shows what is actually inside it, not just how
+         many (section 5A: "Empty folder cards plus item counts are
+         insufficient"). */}
+      {isBranch && n.collapsed && stats && stats.sample.length > 0 && (
+        <ul className="mt-1 space-y-0.5 border-t border-slate-800 pt-1">
+          {stats.sample.map((s, i) => (
+            <li key={i} className="truncate text-[11px] text-slate-500">• {s}</li>
+          ))}
+        </ul>
+      )}
+      {/* Focus view only: per-relation-type counts with their own local
+         expand control (rule 137) -- "2 more reasons", "3 open concerns",
+         never one opaque combined "+N". Stops the click from also
+         selecting/dragging the card underneath it. */}
+      {groups && groups.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1 border-t border-slate-800 pt-1.5">
+          {groups.map((g) => {
+            const meta = GROUP_META[g.kind];
+            const hidden = g.totalCount - g.shownCount;
+            if (hidden <= 0) return null;
+            const label = g.shownCount > 0
+              ? `${hidden} more ${hidden === 1 ? meta.label : meta.plural}`
+              : `${g.totalCount} ${g.totalCount === 1 ? meta.label : meta.plural}`;
+            return (
+              <button
+                key={g.kind}
+                onClick={(e) => { e.stopPropagation(); onToggleGroup?.(`${n.id}::${g.kind}`); }}
+                className="rounded-full bg-slate-800 px-1.5 py-0.5 text-[9px] font-medium text-slate-300 hover:bg-slate-700 hover:text-amber-200"
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
+}
+
+/** Which handle pair to route an edge through, based on where the two real
+ *  endpoints actually sit -- never top/bottom by default (rule 137). Boxes
+ *  are `{x, y, w, h}` in the SAME coordinate space (either the topic map's
+ *  own layout, or one Focus neighbourhood's local layout; never mixed). */
+function pickHandles(from: { x: number; y: number; w: number; h: number },
+                     to: { x: number; y: number; w: number; h: number }
+                     ): { sourceHandle: string; targetHandle: string } {
+  const fx = from.x + from.w / 2, fy = from.y + from.h / 2;
+  const tx = to.x + to.w / 2, ty = to.y + to.h / 2;
+  const dx = tx - fx, dy = ty - fy;
+  if (Math.abs(dy) >= Math.abs(dx)) {
+    return dy < 0
+      ? { sourceHandle: "top-source", targetHandle: "bottom-target" }
+      : { sourceHandle: "bottom-source", targetHandle: "top-target" };
+  }
+  return dx > 0
+    ? { sourceHandle: "right-source", targetHandle: "left-target" }
+    : { sourceHandle: "left-source", targetHandle: "right-target" };
 }
 
 const NODE_TYPES = { concept: ConceptNode };
@@ -192,8 +358,10 @@ function toFlowNodes(graph: ConceptGraphT, hidden: Set<string>, selectedId: stri
       // decision (section 6: "restrained colours actually applied to
       // nodes"). A fallback-grouping bucket keeps its own neutral grey so it
       // still reads as scaffolding, not something the group said.
-      color: n.origin === "fallback_grouping" ? "#71717a" : kindColor(n.kind, capabilities),
+      color: n.origin === "fallback_grouping" ? "#71717a" : roleColor(n.kind, capabilities),
       stats: stats.get(n.id),
+      role: roleOf(n.kind, capabilities),
+      roleLabel: roleLabelOf(roleOf(n.kind, capabilities), n.kind, capabilities),
     },
     selected: n.id === selectedId,
     draggable: n.kind !== "root",
@@ -202,27 +370,40 @@ function toFlowNodes(graph: ConceptGraphT, hidden: Set<string>, selectedId: stri
 
 function toFlowEdges(graph: ConceptGraphT, hidden: Set<string>, capabilities: ConsultationCapabilities,
                      focusId: string | null): Edge<FlowEdgeData>[] {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   return graph.edges
     .filter((e) => !hidden.has(e.from_id) && !hidden.has(e.to_id))
+    // Do not draw every cross-branch edge at once (section 5B): with
+    // nothing selected, a cross-link that touches neither side of the
+    // current selection is dropped entirely rather than merely dimmed --
+    // "many long connections, scattered cards" was largely this, at 15%
+    // opacity, still fully present and still crossing the whole canvas.
+    .filter((e) => e.kind !== "cross" || focusId == null || e.from_id === focusId || e.to_id === focusId)
     .map((e) => {
       const style = relationStyle(e.relation, capabilities);
       const touchesFocus = focusId != null && (e.from_id === focusId || e.to_id === focusId);
-      const showLabel = e.kind === "cross" && (focusId == null || touchesFocus);
       const colour = e.kind === "hierarchy" ? "#475569" : "#eab308";
+      const from = byId.get(e.from_id);
+      const to = byId.get(e.to_id);
+      const handles = (e.kind === "cross" && from && to)
+        ? pickHandles({ x: from.x, y: from.y, w: from.width ?? 240, h: from.height ?? 72 },
+                      { x: to.x, y: to.y, w: to.width ?? 240, h: to.height ?? 72 })
+        : null;
       return {
         id: e.id,
         source: e.from_id,
         target: e.to_id,
+        ...(handles ?? {}),
         type: e.kind === "hierarchy" ? "smoothstep" : "straight",
         animated: false,
-        label: showLabel ? (e.label || style.label) : undefined,
+        label: e.kind === "cross" ? (e.label || style.label) : undefined,
         labelStyle: { fill: "#cbd5e1", fontSize: 10 },
         labelBgStyle: { fill: "#0f172a", fillOpacity: 0.8 },
         style: {
           stroke: colour,
           strokeWidth: e.kind === "hierarchy" ? 1.5 : touchesFocus ? 2.5 : 1.5,
           strokeDasharray: style.dash,
-          opacity: focusId != null && !touchesFocus && e.kind === "cross" ? 0.15 : 0.9,
+          opacity: 0.9,
         },
         // A cross-link has no shape to read direction from the way a
         // hierarchy edge's tree layout already implies it — "depends_on" and
@@ -234,6 +415,73 @@ function toFlowEdges(graph: ConceptGraphT, hidden: Set<string>, capabilities: Co
         data: { relation: e.relation, dimmed: false },
       };
     });
+}
+
+// Focus's own reading-role vocabulary is WIDER than the six kind-roles
+// (`dependency`, `adjustment` have no equivalent in `ROLE_COLOR`/`ROLE_ICON`,
+// which describe a node's KIND, not its position in one neighbourhood) --
+// its own small, complete table rather than overloading the kind-role one.
+const FOCUS_ROLE_META: Record<FocusView["cards"][number]["role"],
+  { color: string; icon: typeof HelpCircle; label: string }> = {
+  focus: { color: ROLE_COLOR.question, icon: HelpCircle, label: "Question" },
+  proposal: { color: ROLE_COLOR.proposal, icon: Lightbulb, label: "Proposed answer" },
+  concern: { color: ROLE_COLOR.concern, icon: AlertTriangle, label: "Concern" },
+  reason: { color: ROLE_COLOR.reason, icon: CheckCircle2, label: "Reason" },
+  question: { color: ROLE_COLOR.question, icon: HelpCircle, label: "Question to investigate" },
+  dependency: { color: "#a78bfa", icon: Link2, label: "Depends on" },
+  adjustment: { color: "#22d3ee", icon: Compass, label: "Adjustment" },
+};
+
+function toFocusFlowNodes(focus: FocusView, selectedId: string | null, matches: Set<string>,
+                          onToggleGroup: (key: string) => void): Node<FlowNodeData, "concept">[] {
+  return focus.cards.map((c) => {
+    const meta = FOCUS_ROLE_META[c.role];
+    return {
+      id: c.id,
+      type: "concept",
+      position: { x: c.x, y: c.y },
+      data: {
+        graphNode: c.node,
+        dimmed: matches.size > 0 && !matches.has(c.node.id),
+        matched: matches.has(c.node.id),
+        color: meta.color,
+        role: null,
+        icon: meta.icon,
+        roleLabel: meta.label,
+        groups: c.groups,
+        onToggleGroup,
+      },
+      selected: c.node.id === selectedId,
+      // Never draggable: this layout is computed fresh every render and never
+      // persisted (unlike the topic map's `graph_node_view`), so a drag here
+      // would have nowhere real to go and no way to be remembered.
+      draggable: false,
+    };
+  });
+}
+
+function toFocusFlowEdges(focus: FocusView, capabilities: ConsultationCapabilities): Edge<FlowEdgeData>[] {
+  const byId = new Map(focus.cards.map((c) => [c.id, c]));
+  return focus.edges.map((e) => {
+    const style = relationStyle(e.relation, capabilities);
+    const colour = e.kind === "hierarchy" ? "#475569" : "#eab308";
+    const from = byId.get(e.from_id);
+    const to = byId.get(e.to_id);
+    const handles = (from && to) ? pickHandles(from, to) : null;
+    return {
+      id: e.id,
+      source: e.from_id,
+      target: e.to_id,
+      ...(handles ?? {}),
+      type: "straight",
+      label: e.label || style.label,
+      labelStyle: { fill: "#cbd5e1", fontSize: 10 },
+      labelBgStyle: { fill: "#0f172a", fillOpacity: 0.8 },
+      style: { stroke: colour, strokeWidth: 2, strokeDasharray: style.dash, opacity: 0.9 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: colour, width: 14, height: 14 },
+      data: { relation: e.relation, dimmed: false },
+    };
+  });
 }
 
 // ── The outline: a compact list/outline alternative (narrow screens, and
@@ -285,7 +533,7 @@ function Outline({ graph, onSelect, selectedId }: {
 
 function NodeDetail({
   node, graph, capabilities, sessionId, readOnly, decisions, actions, onClose, onChanged,
-  onShowSource, onSelect, onFocusBranch,
+  onShowSource, onSelect, onFocusBranch, onFocusQuestion,
 }: {
   node: GraphNode;
   graph: ConceptGraphT;
@@ -299,6 +547,11 @@ function NodeDetail({
   onShowSource: (ids: string[]) => void;
   onSelect: (id: string) => void;
   onFocusBranch?: (id: string) => void;
+  /** Re-center the Focus view on THIS node, when it is itself a question
+   *  (root, or a `question`/`investigate` item) -- non-root Focus navigation
+   *  (rule 137: "Provide Focus on this question... breadcrumbs, and a clear
+   *  return to the main question"). */
+  onFocusQuestion?: (id: string) => void;
 }) {
   const byId = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph.nodes]);
   const [draft, setDraft] = useState(node.detail);
@@ -400,6 +653,11 @@ function NodeDetail({
         {(node.kind === "theme" || node.kind === "bucket") && onFocusBranch && (
           <Button variant="secondary" className="text-xs" onClick={() => onFocusBranch(node.id)}>
             <LocateFixed className="h-3.5 w-3.5" /> Focus branch
+          </Button>
+        )}
+        {(node.kind === "root" || node.kind === "question" || node.kind === "investigate") && onFocusQuestion && (
+          <Button variant="secondary" className="text-xs" onClick={() => onFocusQuestion(node.id)}>
+            <Compass className="h-3.5 w-3.5" /> Focus on this question
           </Button>
         )}
 
@@ -858,6 +1116,36 @@ function ancestorIds(graph: ConceptGraphT, id: string): string[] {
   return path;
 }
 
+const NEIGHBOUR_RELATIONS = new Set<GraphRelation>(
+  ["supports", "challenges", "elaborates", "clarifies", "depends_on", "addresses"]);
+
+/** The nearest question Focus could sensibly be re-centred on to reach `id`,
+ *  or `null` when there is none (rule 137: a search/outline result outside
+ *  the CURRENT focus neighbourhood is not necessarily outside every one --
+ *  it may simply belong to a different question). Deliberately one hop, the
+ *  same bounded reach as the backend's own `semantic_anchor` (rule 136):
+ *  `id` itself if it already has proposals answering it; the question `id`
+ *  directly answers; or, one hop further, the question answered by
+ *  whichever proposal `id` bears on (its own reason/concern/dependency/
+ *  clarifying-question/adjustment). */
+function nearestFocusableQuestion(graph: ConceptGraphT, id: string): string | null {
+  const isQuestionKind = graph.nodes.some((n) => n.id === id
+    && (n.kind === "root" || n.kind === "question" || n.kind === "investigate"));
+  if (isQuestionKind && graph.edges.some((e) => e.relation === "answers" && e.to_id === id)) {
+    return id;
+  }
+  const answersEdge = graph.edges.find((e) => e.relation === "answers" && e.from_id === id);
+  if (answersEdge) return answersEdge.to_id;
+  const toProposal = graph.edges.find((e) =>
+    (e.from_id === id || e.to_id === id) && NEIGHBOUR_RELATIONS.has(e.relation));
+  if (toProposal) {
+    const proposalId = toProposal.from_id === id ? toProposal.to_id : toProposal.from_id;
+    const proposalAnswers = graph.edges.find((e) => e.relation === "answers" && e.from_id === proposalId);
+    if (proposalAnswers) return proposalAnswers.to_id;
+  }
+  return null;
+}
+
 // ── The canvas ───────────────────────────────────────────────────────────
 
 function Canvas({
@@ -889,6 +1177,21 @@ function Canvas({
   // (section 3: "make the detail/legend panel collapsible rather than
   // permanently reserving a wide column when it is unnecessary").
   const [showSidePanel, setShowSidePanel] = useState(false);
+  // The default reading mode (section 7): a question-led neighbourhood, not
+  // the whole `contains` topic tree. "focus" is the intent; whether it can
+  // actually be shown depends on `focusView.found` below -- a session with no
+  // `answers` edges yet degrades to the full map with an honest note rather
+  // than a manufactured diagram (section 8).
+  const [mode, setMode] = useState<"focus" | "full">("focus");
+  // WHICH question Focus is centred on -- root by default, but any question/
+  // investigate item with its own `answers` edges is reachable too (rule 137:
+  // "Focus on this question... non-root Focus navigation").
+  const [focusQuestionId, setFocusQuestionId] = useState("root");
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>("standard");
+  // `${proposalId}::${groupKind}` a person explicitly asked to see more of,
+  // independent of `detailLevel` (rule 137: "2 more reasons" style local
+  // expansion that keeps the selected option and main question in context).
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const draggingRef = useRef(false);
   const lastSyncedRef = useRef<string>("");
   const fittedSessionRef = useRef<string>("");
@@ -900,7 +1203,14 @@ function Canvas({
   }, []);
 
   const hidden = useMemo(() => collapsedDescendants(graph), [graph]);
-  const stats = useMemo(() => branchStats(graph), [graph]);
+  const stats = useMemo(() => branchStats(graph, capabilities), [graph, capabilities]);
+  const focusView = useMemo(
+    () => buildFocusView(graph, focusQuestionId, { detailLevel, expandedGroups }),
+    [graph, focusQuestionId, detailLevel, expandedGroups]);
+  const effectiveMode: "focus" | "full" = mode === "focus" && focusView.found ? "focus" : "full";
+  const otherQuestions = useMemo(
+    () => focusableQuestions(graph).filter((q) => q.id !== focusQuestionId),
+    [graph, focusQuestionId]);
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return new Set<string>();
@@ -911,6 +1221,20 @@ function Canvas({
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<FlowNodeData, "concept">>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<FlowEdgeData>>([]);
 
+  const onToggleGroup = useCallback((key: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const buildEdges = useCallback((focusId: string | null) =>
+    effectiveMode === "focus"
+      ? toFocusFlowEdges(focusView, capabilities)
+      : toFlowEdges(graph, hidden, capabilities, focusId),
+    [effectiveMode, focusView, graph, hidden, capabilities]);
+
   // Re-sync from the server whenever the graph actually changed, but never
   // while a drag is in progress -- and never reshuffle a node whose position
   // has not changed (section 5: "do not recenter the whole diagram").
@@ -919,15 +1243,25 @@ function Canvas({
     // owner corrected, or a connection a human drew/edited/rejected — none of
     // which bump content/graph/view. Leaving it out of the key meant a
     // correction could sit on screen unrefreshed until something else
-    // happened to move one of the other three (section 1).
+    // happened to move one of the other three (section 1). `effectiveMode`
+    // has to be in the key too: switching Focus/Full map is not a graph
+    // change, but it has to rebuild the same way one is -- and so does
+    // `focusView` itself, since re-centering on a different question or
+    // changing detail level changes what Focus renders without the
+    // underlying graph revisions moving at all.
     const key = `${graph.content_revision}:${graph.graph_revision}:${graph.view_revision}:` +
-      `${graph.record_revision}`;
+      `${graph.record_revision}:${effectiveMode}:${focusQuestionId}:${detailLevel}:` +
+      `${[...expandedGroups].sort().join(",")}`;
     if (draggingRef.current || key === lastSyncedRef.current) return;
     lastSyncedRef.current = key;
-    setNodes(toFlowNodes(graph, hidden, selectedId, matches, capabilities, stats));
-    setEdges(toFlowEdges(graph, hidden, capabilities, selectedId));
+    if (effectiveMode === "focus") {
+      setNodes(toFocusFlowNodes(focusView, selectedId, matches, onToggleGroup));
+    } else {
+      setNodes(toFlowNodes(graph, hidden, selectedId, matches, capabilities, stats));
+    }
+    setEdges(buildEdges(selectedId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, hidden, capabilities, stats]);
+  }, [graph, hidden, capabilities, stats, effectiveMode, focusView, onToggleGroup]);
 
   // Selection/search only ever restyle existing nodes; they never move one.
   useEffect(() => {
@@ -935,19 +1269,24 @@ function Canvas({
       ...n, selected: n.id === selectedId,
       data: { ...n.data, dimmed: matches.size > 0 && !matches.has(n.id), matched: matches.has(n.id) },
     })));
-    setEdges(toFlowEdges(graph, hidden, capabilities, selectedId));
+    setEdges(buildEdges(selectedId));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, matches]);
 
   const selectedNode = selectedId ? graph.nodes.find((n) => n.id === selectedId) ?? null : null;
 
   const fitOverview = useCallback(() => {
+    // Rule 135: this used to center on root at a fixed zoom and RETURN
+    // whenever root existed -- i.e. on every non-empty map -- so
+    // `overviewNodeIds`'s own subset (root plus a handful of top branches)
+    // was computed and then never used. A readable root alone is not an
+    // overview of the discussion; it always has to fit the actual subset,
+    // root included, so the group's main topics are on screen too.
     const live = rf.getNodes();
-    const root = live.find((n) => n.id === "root");
     const duration = prefersReducedMotion() ? 0 : 300;
-    if (root) {
-      rf.setCenter(root.position.x + 100, root.position.y + 48,
-        { zoom: MIN_READABLE_ZOOM, duration });
+    if (effectiveMode === "focus") {
+      // Already a small, deliberate neighbourhood (rule 135) -- fit all of it.
+      void rf.fitView({ nodes: live, padding: 0.25, minZoom: MIN_READABLE_ZOOM, maxZoom: 1.1, duration });
       return;
     }
     const ids = overviewNodeIds(graph);
@@ -959,7 +1298,7 @@ function Canvas({
       maxZoom: 1.05,
       duration,
     });
-  }, [graph, rf]);
+  }, [graph, rf, effectiveMode]);
 
   useEffect(() => {
     if (fittedSessionRef.current === sessionId) return;
@@ -971,15 +1310,68 @@ function Canvas({
     return () => window.cancelAnimationFrame(id);
   }, [sessionId, nodes.length, fitOverview]);
 
+  // Centers on whatever is actually ON SCREEN right now (`rf.getNodes()`),
+  // never `graph.nodes`' own x/y -- those are the FULL topic-map coordinates,
+  // which are meaningless while the focus view's own local layout is what is
+  // actually rendered (section 5: layout is a presentation concern, kept
+  // separate from a node's semantic identity).
   const focusNode = useCallback((id: string) => {
     setSelectedId(id);
     setShowSidePanel(true);
-    const n = graph.nodes.find((x) => x.id === id);
-    if (n) rf.setCenter(n.x + 100, n.y + 32,
+    const live = rf.getNodes().find((x) => x.id === id);
+    if (live) rf.setCenter(
+      live.position.x + (live.width ?? 200) / 2, live.position.y + (live.height ?? 64) / 2,
       { zoom: Math.max(MIN_READABLE_ZOOM, 1), duration: prefersReducedMotion() ? 0 : 400 });
-  }, [graph.nodes, rf]);
+  }, [rf]);
 
+  // A search/outline/connection target may sit outside the current focus
+  // neighbourhood entirely -- it still has to be reachable, so this switches
+  // to the full map first and waits for that node to actually be on screen
+  // before centering on it (`pendingFocusIdRef`), rather than centering on
+  // stale coordinates from before the switch.
+  const pendingFocusIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const id = pendingFocusIdRef.current;
+    if (!id || !nodes.some((n) => n.id === id)) return;
+    pendingFocusIdRef.current = null;
+    const raf = window.requestAnimationFrame(() => focusNode(id));
+    return () => window.cancelAnimationFrame(raf);
+  }, [nodes, focusNode]);
+
+  // Re-centering Focus on a different question rebuilds `nodes` on the NEXT
+  // render (via the sync effect above); fitting immediately would still be
+  // looking at the outgoing question's cards. This waits for that rebuild --
+  // the same one-render-later pattern as `pendingFocusIdRef` just above --
+  // rather than depending on `nodes.length` happening to change.
+  const pendingFitRef = useRef(false);
+  useEffect(() => {
+    if (!pendingFitRef.current) return;
+    pendingFitRef.current = false;
+    const raf = window.requestAnimationFrame(() => fitOverview());
+    return () => window.cancelAnimationFrame(raf);
+  }, [nodes, fitOverview]);
+
+  // A search/outline/connection target outside the CURRENT focus
+  // neighbourhood is not necessarily outside every focus neighbourhood --
+  // it may simply belong to a different question. Re-centering Focus on
+  // that question keeps the person in a small, meaningful view instead of
+  // stranding them in the full tangled map the moment they search for
+  // anything not already on screen (section 4A: "Search should reveal a
+  // meaningful neighbourhood around a result and preserve a way back").
+  // Only falls through to Full map when no such question can be found (a
+  // theme, a fact with no semantic connection, and so on).
   const revealAndFocus = useCallback(async (id: string) => {
+    if (effectiveMode === "focus" && !focusView.cards.some((c) => c.id === id)) {
+      const nearestQuestion = nearestFocusableQuestion(graph, id);
+      if (nearestQuestion && nearestQuestion !== focusQuestionId) {
+        pendingFocusIdRef.current = id;
+        setFocusQuestionId(nearestQuestion);
+        return;
+      }
+      pendingFocusIdRef.current = id;
+      setMode("full");
+      return;
+    }
     const path = ancestorIds(graph, id);
     const collapsedPath = path.filter((pid) => graph.nodes.find((n) => n.id === pid)?.collapsed);
     for (const pid of collapsedPath) {
@@ -987,7 +1379,17 @@ function Canvas({
     }
     if (collapsedPath.length) onChanged();
     focusNode(id);
-  }, [graph, sessionId, onChanged, focusNode]);
+  }, [graph, sessionId, onChanged, focusNode, effectiveMode, focusView, focusQuestionId]);
+
+  // "Focus on this question" / the other-questions selector (rule 137):
+  // deliberately narrow -- it only ever changes WHICH question Focus reads,
+  // never the mode-switch-to-full-map fallback logic above.
+  const focusOnQuestion = useCallback((id: string) => {
+    setFocusQuestionId(id);
+    setMode("focus");
+    setSelectedId(null);
+    pendingFitRef.current = true;
+  }, []);
 
   const focusBranch = useCallback((id: string) => {
     const n = graph.nodes.find((x) => x.id === id);
@@ -1033,6 +1435,24 @@ function Canvas({
     }
   };
 
+  const rootNode = graph.nodes.find((n) => n.id === "root");
+  // The question stays fully visible always; a long objective collapses by
+  // default so the orientation area does not itself become the "tall header"
+  // the detail-and-overview brief named (section 7: "Keep the full question
+  // readable in a compact orientation area, with the objective expandable
+  // when long"). A short objective just shows -- collapsing two sentences
+  // would cost a click to save no real space.
+  const OBJECTIVE_INLINE_LIMIT = 90;
+  const [rootQuestionText, objectiveText] = rootNode
+    ? (() => {
+        const marker = "\n\nObjective: ";
+        const idx = rootNode.detail.indexOf(marker);
+        return idx === -1
+          ? [rootNode.detail, ""]
+          : [rootNode.detail.slice(0, idx), rootNode.detail.slice(idx + marker.length)];
+      })()
+    : ["", ""];
+
   return (
     <div className={`flex flex-col gap-2 ${expanded ? "fixed inset-0 z-40 bg-slate-950 p-4" : "h-full"}`}>
       {organizeOpen && (
@@ -1040,24 +1460,106 @@ function Canvas({
                        onClose={() => setOrganizeOpen(false)}
                        onChanged={() => { fittedSessionRef.current = ""; onChanged(); }} />
       )}
+      {/* Persistent orientation (section 7): the MAIN question and its
+         purpose sit OUTSIDE the zooming canvas, in full, always -- so
+         panning, zooming or re-centering Focus on a sub-question never
+         hides what the group is actually investigating overall. */}
+      {rootNode && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+            The question
+          </p>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">{rootQuestionText}</p>
+          {objectiveText && (
+            objectiveText.length > OBJECTIVE_INLINE_LIMIT ? (
+              <details className="mt-1">
+                <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-300">
+                  Objective
+                </summary>
+                <p className="mt-0.5 whitespace-pre-wrap text-xs leading-relaxed text-slate-400">{objectiveText}</p>
+              </details>
+            ) : (
+              <p className="mt-1 text-xs text-slate-400">Objective: {objectiveText}</p>
+            )
+          )}
+          {/* Breadcrumb (rule 137: "breadcrumbs, and a clear return to the
+             main question") -- only appears once Focus is actually centred
+             on something other than the main question. */}
+          {effectiveMode === "focus" && focusQuestionId !== "root" && focusView.focusNode && (
+            <div className="mt-1.5 flex items-center gap-1.5 border-t border-slate-800 pt-1.5 text-xs text-amber-200/90">
+              <button onClick={() => focusOnQuestion("root")}
+                      className="flex items-center gap-1 text-slate-400 hover:text-amber-200">
+                <ArrowLeft className="h-3 w-3" /> Main question
+              </button>
+              <span className="text-slate-600">/</span>
+              <span className="truncate">Now focused on: {focusView.focusNode.label}</span>
+            </div>
+          )}
+        </div>
+      )}
+      {/* Other focusable questions (rule 137: non-root Focus navigation) --
+         reachable without detouring through Full map. */}
+      {effectiveMode === "focus" && otherQuestions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+          <Compass className="h-3.5 w-3.5 shrink-0" />
+          <span>Other questions:</span>
+          {otherQuestions.slice(0, 6).map((q) => (
+            <button key={q.id} onClick={() => focusOnQuestion(q.id)}
+                    className="rounded-full border border-slate-800 bg-slate-900/60 px-2 py-0.5 text-slate-300 hover:border-amber-400/50 hover:text-amber-200">
+              {q.label} <span className="text-slate-600">({q.proposalCount})</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {mode === "focus" && !focusView.found && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400">
+          No proposed answer is connected to {focusQuestionId === "root" ? "the question" : "this question"} yet,
+          so there is nothing to focus on — showing the full map instead. Once a proposal is linked
+          with “answers”, it will appear here as its own reading view.
+        </div>
+      )}
+      {effectiveMode === "focus" && focusView.shownProposalCount < focusView.totalProposalCount && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-1.5 text-xs text-slate-500">
+          Showing {focusView.shownProposalCount} of {focusView.totalProposalCount} proposed answers —
+          open Full map to see the rest.
+        </div>
+      )}
       {graph.fallback && (
         <div className="rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-400">
           No themes or connections have been drawn yet — grouped automatically by category
           for now.
         </div>
       )}
-      {graph.pin_conflicts && graph.pin_conflicts.length > 0 && (
+      {/* Pin conflicts and topic coverage are both properties of the FULL
+         topic-tree layout -- Focus positions are computed fresh every render
+         and never pinned, so these would be reporting on a layout that is
+         not even the one on screen (rule 137). */}
+      {effectiveMode === "full" && graph.pin_conflicts && graph.pin_conflicts.length > 0 && (
         <div className="rounded-lg border border-amber-900/60 bg-amber-950/40 px-3 py-1.5 text-xs text-amber-200">
           {graph.pin_conflicts.length} pinned card{graph.pin_conflicts.length === 1 ? "" : "s"} overlap.
           Unpin one, or drag it, then Arrange map — pins are never moved for you.
         </div>
       )}
-      {!graph.fallback && graph.unplaced_count > 0 && (
+      {/* Coverage (section 5C): three honest, distinct counts rather than
+         one "unplaced" number that used to conflate "no topic, but
+         genuinely connected to something" with "no connection at all". */}
+      {effectiveMode === "full" && !graph.fallback
+        && (graph.unplaced_count > 0 || (graph.connected_no_topic_count ?? 0) > 0) && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border
                         border-slate-800 bg-slate-900/40 px-3 py-1.5 text-xs text-slate-500">
-          <span>
-            {graph.unplaced_count} item{graph.unplaced_count === 1 ? "" : "s"} {
-              graph.unplaced_count === 1 ? "isn't" : "aren't"} under a topic yet.
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {(graph.connected_no_topic_count ?? 0) > 0 && (
+              <span className="flex items-center gap-1" title="Shown under the topic they connect to, but nobody has explicitly grouped them there">
+                <Link2 className="h-3 w-3 text-sky-400" />
+                {graph.connected_no_topic_count} connected, not explicitly grouped
+              </span>
+            )}
+            {graph.unplaced_count > 0 && (
+              <span>
+                {graph.unplaced_count} item{graph.unplaced_count === 1 ? "" : "s"} {
+                  graph.unplaced_count === 1 ? "has" : "have"} no topic and no connection yet
+              </span>
+            )}
           </span>
           {!readOnly && (
             <button onClick={() => setOrganizeOpen(true)}
@@ -1090,22 +1592,65 @@ function Canvas({
         </Button>
         {!showOutline && (
           <>
+            {/* The default reading mode (section 7): the question and its
+               proposed answers, not the whole topic tree -- a toggle rather
+               than a replacement, since the full connected map (rules
+               121-132) is still what "Organize ideas" and dragging/pinning
+               act on. */}
+            <div className="flex items-center gap-0.5 rounded-lg border border-slate-800 bg-slate-950 p-0.5">
+              <button
+                onClick={() => { setMode("focus"); setSelectedId(null); }}
+                title="The question and its proposed answers, with their reasons and concerns"
+                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                  mode === "focus" ? "bg-slate-800 text-amber-200" : "text-slate-400 hover:text-slate-200"}`}
+              >
+                Focus
+              </button>
+              <button
+                onClick={() => { setMode("full"); setSelectedId(null); }}
+                title="Everything on the map, organised by topic"
+                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                  mode === "full" ? "bg-slate-800 text-amber-200" : "text-slate-400 hover:text-slate-200"}`}
+              >
+                Full map
+              </button>
+            </div>
+            {/* How much supporting detail Focus shows per proposal by
+               default (rule 137, section 4A) -- an accessible, explicit
+               control rather than shrinking text to force more in. Never
+               changes what is COUNTED, only what starts expanded; anything
+               hidden is still reachable via its own "N more" chip. */}
+            {effectiveMode === "focus" && (
+              <div className="flex items-center gap-0.5 rounded-lg border border-slate-800 bg-slate-950 p-0.5">
+                {(["brief", "standard", "detailed"] as DetailLevel[]).map((level) => (
+                  <button
+                    key={level}
+                    onClick={() => setDetailLevel(level)}
+                    title={level === "brief" ? "Just the proposals, with counts"
+                          : level === "standard" ? "The most useful reasoning for each"
+                          : "As much supporting detail as fits"}
+                    className={`rounded px-2 py-1 text-xs font-medium capitalize transition-colors ${
+                      detailLevel === level ? "bg-slate-800 text-amber-200" : "text-slate-400 hover:text-slate-200"}`}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+            )}
             <Button variant="secondary" className="text-xs" onClick={fitOverview}
                     title="Fit the overview at a readable size — never shrink cards to fit every note">
               <Scan className="h-3.5 w-3.5" /> Fit overview
             </Button>
-            <Button variant="secondary" className="text-xs" onClick={fitOverview}
-                    title="Return to the overview of the question and its topics">
-              <Undo2 className="h-3.5 w-3.5" /> Back to overview
-            </Button>
-            <Button variant="secondary" className="text-xs" disabled={arrange.busy}
-                    onClick={() => {
-                      fittedSessionRef.current = "";
-                      void arrange.run();
-                    }}
-                    title="A deterministic, free reflow -- never an AI call">
-              <LayoutGrid className="h-3.5 w-3.5" /> Arrange map
-            </Button>
+            {effectiveMode === "full" && (
+              <Button variant="secondary" className="text-xs" disabled={arrange.busy}
+                      onClick={() => {
+                        fittedSessionRef.current = "";
+                        void arrange.run();
+                      }}
+                      title="A deterministic, free reflow -- never an AI call">
+                <LayoutGrid className="h-3.5 w-3.5" /> Arrange map
+              </Button>
+            )}
           </>
         )}
         {!readOnly && (
@@ -1169,7 +1714,11 @@ function Canvas({
               onNodeDragStart={() => { draggingRef.current = true; }}
               onNodeDragStop={(_, n) => {
                 draggingRef.current = false;
-                if (!readOnly) void api.setGraphNodeView(
+                // Focus view already refuses to drag (`nodesDraggable` below);
+                // this guard is a second line of defence against ever
+                // persisting a FOCUS-computed position into the topic map's
+                // own `graph_node_view` (rule 124).
+                if (!readOnly && effectiveMode === "full") void api.setGraphNodeView(
                   sessionId, n.id, { x: n.position.x, y: n.position.y, pinned: true });
               }}
               onNodeDoubleClick={(_, n) => {
@@ -1179,7 +1728,7 @@ function Canvas({
                     .then(onChanged);
                 }
               }}
-              nodesDraggable={!readOnly}
+              nodesDraggable={!readOnly && effectiveMode === "full"}
               nodesConnectable={false}
               proOptions={{ hideAttribution: true }}
               minZoom={0.4}
@@ -1189,7 +1738,7 @@ function Canvas({
               <Controls showInteractive={false} />
               <MiniMap
                 pannable zoomable
-                nodeColor={(n) => kindColor((n.data as unknown as FlowNodeData).graphNode.kind, capabilities)}
+                nodeColor={(n) => roleColor((n.data as unknown as FlowNodeData).graphNode.kind, capabilities)}
                 maskColor="rgba(2,6,23,0.75)"
                 style={{ backgroundColor: "#0f172a" }}
               />
@@ -1213,6 +1762,7 @@ function Canvas({
                 onShowSource={onShowSource}
                 onSelect={(id) => void revealAndFocus(id)}
                 onFocusBranch={focusBranch}
+                onFocusQuestion={focusOnQuestion}
               />
             ) : (
               <Legend capabilities={capabilities} graph={graph} />
@@ -1237,17 +1787,40 @@ function EmptyState() {
 
 function Legend({ capabilities, graph }: { capabilities: ConsultationCapabilities; graph: ConceptGraphT }) {
   const usedKinds = new Set(graph.nodes.map((n) => n.kind));
+  const usedRoles = new Set(
+    [...usedKinds].map((k) => roleOf(k, capabilities)).filter((r): r is GraphRole => r != null));
   return (
     <Card className="h-full overflow-y-auto p-4">
-      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Legend</p>
+      {/* The role legend is primary (section 5: "de-emphasize internal
+         taxonomy labels") -- what a card IS ARGUING, before which of fifteen
+         specific kinds it happens to be. */}
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+        What the map shows
+      </p>
       <ul className="space-y-1.5">
-        {capabilities.node_kinds.filter((k) => usedKinds.has(k.id)).map((k) => (
-          <li key={k.id} className="flex items-center gap-2 text-xs text-slate-300">
-            <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: k.color }} />
-            {k.plural}
-          </li>
-        ))}
+        {(capabilities.node_roles ?? []).filter((r) => usedRoles.has(r.id)).map((r) => {
+          const RoleIcon = ROLE_ICON[r.id];
+          return (
+            <li key={r.id} className="flex items-center gap-2 text-xs text-slate-300">
+              <RoleIcon className="h-3.5 w-3.5 shrink-0" style={{ color: ROLE_COLOR[r.id] }} />
+              {r.plural}
+            </li>
+          );
+        })}
       </ul>
+      <details className="mt-3">
+        <summary className="cursor-pointer text-[11px] text-slate-600 hover:text-slate-400">
+          Specific kinds ({usedKinds.size})
+        </summary>
+        <ul className="mt-1.5 space-y-1.5">
+          {capabilities.node_kinds.filter((k) => usedKinds.has(k.id)).map((k) => (
+            <li key={k.id} className="flex items-center gap-2 text-xs text-slate-400">
+              <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: k.color }} />
+              {k.plural}
+            </li>
+          ))}
+        </ul>
+      </details>
       <p className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
         Connections
       </p>

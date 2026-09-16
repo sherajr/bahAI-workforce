@@ -859,6 +859,20 @@ def list_turns(session_id: str, final_only: bool = False, limit: int | None = No
     return rows
 
 
+def get_turns_by_ids(session_id: str, ids, source: str = "live",
+                     db_path: Path | str | None = None) -> dict[str, dict]:
+    """A bounded lookup for exactly the turns a set of map items cite as their
+    source (rule 134's context repair) -- never the whole transcript resent
+    somewhere new, and scoped to THIS session in the WHERE clause like every
+    other read here (rule 100). Reuses `list_turns` rather than a second SQL
+    shape, so it stays correct if that query ever changes."""
+    wanted = {str(i) for i in (ids or []) if str(i or "").strip()}
+    if not wanted:
+        return {}
+    rows = list_turns(session_id, source=source, db_path=db_path)
+    return {str(r["id"]): r for r in rows if str(r["id"]) in wanted}
+
+
 def turns_since(session_id: str, since_rev: int = 0, source: str = "live",
                 limit: int = 200, db_path: Path | str | None = None) -> list[dict]:
     """Turns created OR changed since `since_rev` (rule 115)."""

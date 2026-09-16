@@ -1061,6 +1061,14 @@ check("capabilities names her", caps["assistant_name"] == core.ASSISTANT_NAME)
 check("and gives the UI her face", caps["assistant_avatar"] == core.ASSISTANT_AVATAR)
 check("it leaks no key", "sk-" not in json.dumps(caps))
 check("it lists the participation modes", {m["id"] for m in caps["modes"]} == set(core.MODES))
+check("rule 133: capabilities advertise the new argument grammar",
+      caps["graph_capabilities"]["argument_grammar"] is True)
+check("rule 133: capabilities serve the question-led reading roles",
+      {r["id"] for r in caps["node_roles"]} == set(lc_graph.ROLE_META))
+check("rule 133: capabilities map every node kind to a role",
+      caps["role_of_kind"] == lc_graph.NODE_ROLE)
+check("rule 133: the new relations are in the served relation legend",
+      {"answers", "clarifies", "elaborates"} <= {r["id"] for r in caps["edge_relations"]})
 
 r = client.post("/live-consultation/sessions",
                 json={"title": "Neighbourhood gathering", "question": "When should we gather?",
@@ -1155,7 +1163,8 @@ import agents.live_consultation_api as lc_api  # noqa: E402
 _real_analyze = brain.analyze
 
 
-def _stub_analyze(session, state_, new_turns, recent, final_pass=False, model=None, call=None):
+def _stub_analyze(session, state_, new_turns, recent, final_pass=False, model=None, call=None,
+                  **_kw):
     return _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                          call=lambda messages: REPLY)
 
@@ -2348,7 +2357,7 @@ _FIRST = json.dumps({
     "add": {"facts": [{"text": "The hall is free on Saturday.", "status": "reported"}],
             "action_items": [{"action": "Book the hall", "owner": "Sam"}]},
 })
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: _FIRST)
 client.post(f"/live-consultation/sessions/{_R}/analyze", json={"force": True})
@@ -2382,7 +2391,7 @@ def _call_that_edits(_messages):
 client.post(f"/live-consultation/sessions/{_R}/turns",
             json={"text": "Actually the hall is only free in the afternoon.",
                   "realtime_item_id": "r2", "is_final": True})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=_call_that_edits)
 _race = client.post(f"/live-consultation/sessions/{_R}/analyze", json={"force": True}).json()
@@ -2407,7 +2416,7 @@ _D = client.post("/live-consultation/sessions", json={"title": "Deletions"}).jso
 client.post(f"/live-consultation/sessions/{_D}/turns",
             json={"text": "Someone said something.", "realtime_item_id": "d1", "is_final": True})
 _ADD = json.dumps({"add": {"ideas": [{"text": "An idea nobody wants recorded."}]}})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: _ADD)
 client.post(f"/live-consultation/sessions/{_D}/analyze", json={"force": True})
@@ -2420,7 +2429,7 @@ check("the item is gone", not client.get(
 _READD = json.dumps({"update": [{"id": _idea["id"], "text": "An idea nobody wants recorded."}]})
 client.post(f"/live-consultation/sessions/{_D}/turns",
             json={"text": "And another thing.", "realtime_item_id": "d2", "is_final": True})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: _READD)
 client.post(f"/live-consultation/sessions/{_D}/analyze", json={"force": True})
@@ -2497,7 +2506,7 @@ _OBS = json.dumps({
     "observations": [{"kind": "note", "summary": "A private working note.",
                       "importance": 0.9}],
 })
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: _OBS)
 client.post(f"/live-consultation/sessions/{_DEL}/analyze", json={"force": True})
@@ -3414,6 +3423,303 @@ _accepted2, _ = lc_graph.validate_edges(
 check("a connection matching a rejection tombstone is dropped", _accepted2 == [])
 
 
+section("rule 133: a question-led relationship grammar")
+
+check("the new relations exist", {"answers", "clarifies", "elaborates"} <= set(lc_graph.EDGE_RELATIONS))
+check("each new relation has display metadata",
+      all(r in lc_graph.RELATION_META for r in ("answers", "clarifies", "elaborates")))
+check("every node kind maps to exactly one reading role, and vice versa",
+      set(lc_graph.NODE_KIND_META) == set(lc_graph.NODE_ROLE),
+      str(set(lc_graph.NODE_KIND_META) ^ set(lc_graph.NODE_ROLE)))
+check("root's role is 'question' -- what lets a proposal answer it directly",
+      lc_graph.NODE_ROLE["root"] == "question")
+check("a theme's role is 'topic', never a claim an argument relation can target",
+      lc_graph.NODE_ROLE["theme"] == "topic")
+
+_role_kind = {
+    "root": "root", "q1": "question", "idea1": "idea", "fact1": "fact",
+    "concern1": "concern", "dec1": "decision", "theme1": "theme",
+}
+_role_ids = set(_role_kind)
+_role_edges = [
+    {"from": "idea1", "to": "root", "relation": "answers"},         # good: proposal -> the question
+    {"from": "idea1", "to": "q1", "relation": "answers"},           # good: proposal -> a question
+    {"from": "concern1", "to": "root", "relation": "answers"},      # bad: a concern cannot answer
+    {"from": "idea1", "to": "fact1", "relation": "answers"},        # bad: a fact is not a question
+    {"from": "q1", "to": "idea1", "relation": "clarifies"},         # good
+    {"from": "idea1", "to": "q1", "relation": "clarifies"},         # bad: wrong source role
+    {"from": "fact1", "to": "concern1", "relation": "elaborates"},  # good
+    {"from": "theme1", "to": "idea1", "relation": "elaborates"},    # bad: grouping is not argument
+    {"from": "theme1", "to": "idea1", "relation": "supports"},      # good: unconstrained on purpose
+]
+_role_accepted, _role_notes = lc_graph.validate_edges(_role_edges, {}, _role_ids, _role_kind, set())
+_role_seen = {(e["from_id"], e["to_id"], e["relation"]) for e in _role_accepted}
+check("answers: a proposal answering the consultation's own question is accepted",
+      ("idea1", "root", "answers") in _role_seen)
+check("answers: a proposal answering a specific question is accepted",
+      ("idea1", "q1", "answers") in _role_seen)
+check("answers: a concern cannot answer anything (wrong source role)",
+      ("concern1", "root", "answers") not in _role_seen)
+check("answers: a proposal cannot 'answer' a fact (wrong target role)",
+      ("idea1", "fact1", "answers") not in _role_seen)
+check("clarifies: a question clarifying a proposal is accepted",
+      ("q1", "idea1", "clarifies") in _role_seen)
+check("clarifies: a proposal cannot clarify a question (wrong source role)",
+      ("idea1", "q1", "clarifies") not in _role_seen)
+check("elaborates: a reason elaborating a concern is accepted",
+      ("fact1", "concern1", "elaborates") in _role_seen)
+check("elaborates: a topic cannot elaborate anything",
+      ("theme1", "idea1", "elaborates") not in _role_seen)
+check("the four older cross-relations stay unconstrained -- a theme 'supporting' an idea "
+      "is existing, exercised behaviour, not something this rule narrows",
+      ("theme1", "idea1", "supports") in _role_seen)
+check("endpoint-role drops are counted and explained, not silent",
+      any("did not fit what that" in n for n in _role_notes), str(_role_notes))
+
+check("endpoint_role_ok is directly callable and agrees with validate_edges",
+      lc_graph.endpoint_role_ok("answers", "idea1", "root", _role_kind)
+      and not lc_graph.endpoint_role_ok("answers", "concern1", "root", _role_kind))
+check("a relation absent from RELATION_ENDPOINTS is unconstrained by role",
+      lc_graph.endpoint_role_ok("related_to", "theme1", "concern1", _role_kind)
+      and lc_graph.endpoint_role_ok("leads_to", "concern1", "theme1", _role_kind))
+
+
+section("rule 134: extraction context is relevance-aware, not first-N")
+
+# The reported failure mode was `items[:80]` -- a flat cap applied in
+# LIST-CONSTRUCTION order, so whatever was noticed LAST in a long meeting was
+# exactly what got dropped. 90 items on one still-active topic, split old vs.
+# new, must not lose the newest ten just because 80 older ones came first.
+_ctx1_state = {"question": "Q", "state_revision": 1,
+              "themes": [{"id": "theme_old", "text": "Old topic"},
+                         {"id": "theme_new", "text": "Active topic"}]}
+_ctx1_state["needs_and_concerns"] = (
+    [{"id": f"old_{i}", "text": f"old concern {i}", "lifecycle": "resolved"} for i in range(80)]
+    + [{"id": f"new_{i}", "text": f"new concern {i}", "lifecycle": "open"} for i in range(10)])
+_ctx1_edges = (
+    [{"from_id": "theme_old", "to_id": f"old_{i}", "relation": "contains"} for i in range(80)]
+    + [{"from_id": "theme_new", "to_id": f"new_{i}", "relation": "contains"} for i in range(10)])
+_ctx1_json, _ctx1_omitted = brain._organize_context_json(_ctx1_state, {"edges": _ctx1_edges})
+_ctx1_payload = json.loads(_ctx1_json)
+_ctx1_ids = {it["id"] for it in _ctx1_payload["items"]}
+check("a late-discussed item is not dropped because earlier items filled the budget",
+      all(f"new_{i}" in _ctx1_ids for i in range(10)), str(sorted(_ctx1_ids))[:200])
+check("truncation is reported in the payload, not silent",
+      _ctx1_omitted == 10 and _ctx1_payload["omitted_item_count"] == 10)
+check("the budget itself is still honoured", len(_ctx1_payload["items"]) == 80)
+
+# An OLD item on the topic the group just returned to must survive against a
+# flood of more-recent, unrelated material -- proving the score is topic-
+# aware, not pure recency (section 4B: "maintain discussion context across
+# topic changes").
+_ctx2_state = {"question": "Q", "state_revision": 1,
+              "themes": [{"id": "theme_a", "text": "Returning topic"},
+                         {"id": "theme_b", "text": "Everything else"}]}
+_ctx2_state["ideas"] = (
+    [{"id": "early_active", "text": "the very first idea on the topic just "
+      "returned to", "lifecycle": "open"}]
+    + [{"id": f"filler_{i}", "text": f"unrelated filler {i}", "lifecycle": "resolved"}
+       for i in range(85)]
+    + [{"id": f"recent_active_{j}", "text": f"a more recent idea on that same topic {j}",
+       "lifecycle": "open"} for j in range(4)])
+_ctx2_edges = (
+    [{"from_id": "theme_a", "to_id": "early_active", "relation": "contains"}]
+    + [{"from_id": "theme_b", "to_id": f"filler_{i}", "relation": "contains"} for i in range(85)]
+    + [{"from_id": "theme_a", "to_id": f"recent_active_{j}", "relation": "contains"}
+       for j in range(4)])
+_ctx2_json, _ = brain._organize_context_json(_ctx2_state, {"edges": _ctx2_edges})
+_ctx2_ids = {it["id"] for it in json.loads(_ctx2_json)["items"]}
+check("the oldest item on the topic just returned to is not crowded out by "
+      "85 more-recent, unrelated fillers", "early_active" in _ctx2_ids)
+check("the recently-active items on that same topic also survive",
+      all(f"recent_active_{j}" in _ctx2_ids for j in range(4)))
+
+# Source excerpts: attached from whatever turns the caller actually loaded,
+# never fabricated when none is available.
+_exc_state = {"question": "Q", "state_revision": 1,
+             "ideas": [{"id": "idea_x", "text": "Invite people individually",
+                       "source_turn_ids": ["5"]}],
+             "needs_and_concerns": [{"id": "concern_x", "text": "No source on record"}]}
+_exc_turns = [{"id": "5", "text": "We could invite two friends for tea next week."}]
+_exc_json, _ = brain._organize_context_json(_exc_state, {"turns": _exc_turns})
+_exc_items = {it["id"]: it for it in json.loads(_exc_json)["items"]}
+check("an item with a known source turn gets a real excerpt from it",
+      "invite two friends" in _exc_items["idea_x"]["excerpt"].lower(),
+      _exc_items["idea_x"]["excerpt"])
+check("an item with no locatable source gets an honest empty excerpt, never invented",
+      _exc_items["concern_x"]["excerpt"] == "")
+
+# organize() itself reports the omission in its note, not just the payload.
+_org_reply = json.dumps({"add": {"themes": []}, "edges": [], "retire_themes": []})
+_org_big_state = {"question": "Q", "state_revision": 1,
+                 "facts": [{"id": f"fact_{i}", "text": f"fact {i}"} for i in range(100)]}
+_org_big_result = brain.organize({"id": "s1", "question": "Q"}, _org_big_state,
+                                 call=lambda msgs: _org_reply)
+check("organize reports exactly how many items its bounded context left out",
+      _org_big_result.context_omitted == 20, str(_org_big_result.context_omitted))
+check("and says so in the note, not silently", "left out" in _org_big_result.note,
+      _org_big_result.note)
+_org_small_result = brain.organize(
+    {"id": "s1", "question": "Q"},
+    {"question": "Q", "state_revision": 1, "facts": [{"id": "f1", "text": "one fact"}]},
+    call=lambda msgs: _org_reply)
+check("no omission note when everything already fits",
+      _org_small_result.context_omitted == 0 and _org_small_result.note == "")
+
+# The ordinary per-turn pass: topic membership and existing connections.
+_bm_state = {"question": "Where should we hold it?", "state_revision": 4,
+            "themes": [{"id": "theme_v", "text": "Venue"}],
+            "ideas": [{"id": "idea_v", "text": "Use the community hall",
+                      "source_turn_ids": ["2"]}],
+            "needs_and_concerns": [{"id": "concern_v", "text": "Wheelchair access"}]}
+_bm_edges = [{"from_id": "theme_v", "to_id": "idea_v", "relation": "contains"},
+            {"from_id": "idea_v", "to_id": "concern_v", "relation": "addresses"}]
+_bm_messages = brain.build_messages(SESSION, _bm_state, [], [], edges_rows=_bm_edges)
+_bm_user_content = _bm_messages[1]["content"]
+check("the ordinary per-turn prompt shows an item's existing topic membership",
+      '"topic": "theme_v"' in _bm_user_content, _bm_user_content[:1500])
+check("and connections already on the map, so the model is not asked to guess blind",
+      "CONNECTIONS ALREADY ON THE MAP" in _bm_user_content and "addresses" in _bm_user_content)
+_bm_no_edges = brain.build_messages(SESSION, _bm_state, [], [])
+check("with no edges supplied, the previous behaviour is preserved exactly",
+      "CONNECTIONS ALREADY ON THE MAP" not in _bm_no_edges[1]["content"])
+
+# A bounded, session-scoped turn lookup (used to build the excerpts above).
+_gt_sid = client.post("/live-consultation/sessions", json={"title": "Turn lookup test"}).json()["id"]
+client.post(f"/live-consultation/sessions/{_gt_sid}/turns",
+           json={"text": "First thing said.", "realtime_item_id": "gt1", "is_final": True})
+client.post(f"/live-consultation/sessions/{_gt_sid}/turns",
+           json={"text": "Second thing said.", "realtime_item_id": "gt2", "is_final": True})
+_gt_all = store.list_turns(_gt_sid)
+_gt_first_id = str(_gt_all[0]["id"])
+_gt_looked_up = store.get_turns_by_ids(_gt_sid, [_gt_first_id, "ghost_999"])
+check("get_turns_by_ids returns exactly the real ids asked for, nothing invented for the rest",
+      set(_gt_looked_up) == {_gt_first_id}, str(set(_gt_looked_up)))
+check("with the right text", _gt_looked_up[_gt_first_id]["text"] == "First thing said.")
+check("an empty id list returns nothing", store.get_turns_by_ids(_gt_sid, []) == {})
+_gt_other_sid = client.post("/live-consultation/sessions", json={"title": "Other session"}).json()["id"]
+check("a turn id from a DIFFERENT session is never returned (rule 100's scoping)",
+      store.get_turns_by_ids(_gt_other_sid, [_gt_first_id]) == {})
+
+
+section("the synthetic fixture: a question-led consultation, extracted incrementally (rule 135)")
+
+# A fictional test fixture (readability brief, section 11) -- not a real
+# meeting. Fed as TWO separate patches, the way real incremental analysis
+# passes actually arrive, rather than one full-transcript dump: pass 1 covers
+# the public-speaking option and the concern raised about it; pass 2, a real
+# later analysis pass, adds a second and genuinely distinct option plus an
+# investigation that serves BOTH, exercising `merge`'s tmp_id resolution and
+# `validate_edges`' role checks together -- the same two functions
+# `_run_analysis` chains in production -- rather than either in isolation.
+_syn_state = {"question": "Which course should Sean take to communicate better?",
+             "objective": "Explaining thoughts clearly and understanding what other people mean",
+             "state_revision": 1}
+_syn_patch1 = {
+    "add": {
+        "ideas": [{"tmp_id": "opt_public", "text": "Take a public-speaking course",
+                  "source_turn_ids": ["3"]}],
+        "facts": [{"tmp_id": "reason_practice", "text": "A public-speaking course gives "
+                  "repeated practice presenting", "source_turn_ids": ["3"]}],
+        "needs_and_concerns": [{"tmp_id": "concern_listening", "text": "That might help with "
+                                "explaining, but it might not include much listening practice",
+                                "source_turn_ids": ["4"]}],
+    },
+    "edges": [
+        {"from": "opt_public", "to": "root", "relation": "answers", "source_turn_ids": ["3"]},
+        {"from": "reason_practice", "to": "opt_public", "relation": "supports", "source_turn_ids": ["3"]},
+        {"from": "concern_listening", "to": "opt_public", "relation": "challenges", "source_turn_ids": ["4"]},
+    ],
+}
+_syn_merged1, _syn_notes1, _syn_resolved1 = brain.merge(_syn_state, _syn_patch1)
+_opt_public_id = _syn_merged1["ideas"][0]["id"]
+_node_ids1, _node_kind1 = lc_graph.node_universe(_syn_merged1)
+_accepted1, _dropped1 = lc_graph.validate_edges(_syn_resolved1, {}, _node_ids1, _node_kind1, set())
+check("pass 1: the option, its reason and its concern all validate against the real ids "
+      "merge just assigned", len(_accepted1) == 3, str((_syn_resolved1, _dropped1)))
+check("...specifically, the option answers the consultation's own question",
+      any(e["relation"] == "answers" and e["from_id"] == _opt_public_id and e["to_id"] == "root"
+          for e in _accepted1))
+
+_syn_patch2 = {
+    "add": {
+        "ideas": [{"tmp_id": "opt_interpersonal", "text": "Take an interpersonal-communication "
+                  "course", "source_turn_ids": ["5"]}],
+        "facts": [{"tmp_id": "reason_listening", "text": "An interpersonal-communication course "
+                  "might practice active listening and small-group conversation",
+                  "source_turn_ids": ["5"]}],
+        "questions_to_investigate": [{"tmp_id": "invest_syllabus", "text": "Compare both courses' "
+                                     "syllabuses for listening practice and explaining ideas",
+                                     "source_turn_ids": ["6", "7"]}],
+        "action_items": [{"action": "Get the two syllabuses", "source_turn_ids": ["8"]}],
+    },
+    "edges": [
+        {"from": "opt_interpersonal", "to": "root", "relation": "answers", "source_turn_ids": ["5"]},
+        {"from": "reason_listening", "to": "opt_interpersonal", "relation": "supports",
+         "source_turn_ids": ["5"]},
+        # `_opt_public_id` -- the REAL id pass 1 already resolved it to, not
+        # its long-forgotten tmp_id -- because a later, separate analysis
+        # pass is shown the existing map by its real ids, never a previous
+        # pass's own scratch names (`tmp_id` only resolves within the ONE
+        # patch that introduced it).
+        {"from": "invest_syllabus", "to": _opt_public_id, "relation": "clarifies",
+         "source_turn_ids": ["6", "7"]},
+        {"from": "invest_syllabus", "to": "opt_interpersonal", "relation": "clarifies",
+         "source_turn_ids": ["6", "7"]},
+    ],
+}
+_syn_merged2, _syn_notes2, _syn_resolved2 = brain.merge(_syn_merged1, _syn_patch2)
+_opt_interpersonal_id = next(i["id"] for i in _syn_merged2["ideas"] if i["id"] != _opt_public_id)
+_investigate_id = _syn_merged2["questions_to_investigate"][0]["id"]
+_node_ids2, _node_kind2 = lc_graph.node_universe(_syn_merged2)
+_accepted2, _dropped2 = lc_graph.validate_edges(_syn_resolved2, {}, _node_ids2, _node_kind2, set())
+check("pass 2: the second, later-raised option answers the SAME question and stays a "
+      "distinct node from the first",
+      _opt_interpersonal_id != _opt_public_id
+      and any(e["relation"] == "answers" and e["from_id"] == _opt_interpersonal_id
+              and e["to_id"] == "root" for e in _accepted2))
+check("the shared investigation clarifies BOTH options, not only the one raised alongside it "
+      "in the same turn",
+      {(e["from_id"], e["to_id"]) for e in _accepted2 if e["relation"] == "clarifies"}
+      == {(_investigate_id, _opt_public_id), (_investigate_id, _opt_interpersonal_id)})
+check("a proposed action gets no invented owner (rule 83)",
+      _syn_merged2["action_items"][0].get("owner") is None)
+check("...and is not auto-accepted just because it was proposed (rule 95)",
+      _syn_merged2["action_items"][0].get("owner_accepted") is None)
+
+_syn_edges_rows = [dict(e, id=f"syn_{i}", human_edited=False)
+                   for i, e in enumerate(_accepted1 + _accepted2)]
+_syn_graph = lc_graph.build_graph({"id": "cons_syn", "question": _syn_state["question"]},
+                                  _syn_merged2, [], [], _syn_edges_rows, {})
+_syn_by_id = {n["id"]: n for n in _syn_graph["nodes"]}
+_syn_answers = [e for e in _syn_graph["edges"] if e["relation"] == "answers"]
+check("the finished graph shows exactly two distinct proposed answers to the one question, "
+      "never generalised into a single vaguer node",
+      {e["from_id"] for e in _syn_answers} == {_opt_public_id, _opt_interpersonal_id}
+      and {e["to_id"] for e in _syn_answers} == {"root"})
+check("the two options keep their own distinguishing words rather than reading as synonyms",
+      "public" in _syn_by_id[_opt_public_id]["detail"].lower()
+      and "interpersonal" in _syn_by_id[_opt_interpersonal_id]["detail"].lower())
+check("the listening concern raised once about public speaking is still reachable, not "
+      "dropped for having appeared only once",
+      any(e["relation"] == "challenges" and e["to_id"] == _opt_public_id
+          for e in _syn_graph["edges"]))
+check("no decision or acceptance was manufactured -- the fixture ends with two live options "
+      "and an open investigation, exactly as it should",
+      not _syn_merged2.get("decision_candidates")
+      and _syn_merged2["action_items"][0]["status"] != "accepted")
+
+# Adversarial case named directly in section 11: a proposal and its own
+# negation must never collapse into "the same decision" just because they
+# share most of their words -- `merge`'s de-duplication is exact-normalised-
+# text only, never fuzzy, precisely so this stays two rows.
+_neg_state = {"decision_candidates": [{"id": "d1", "text": "We should choose the community hall"}]}
+_neg_merged, _, _ = brain.merge(_neg_state, {"add": {"decision_candidates": [
+    {"text": "We should not choose the community hall"}]}})
+check("a proposal and its negation are never merged into one decision",
+      len(_neg_merged["decision_candidates"]) == 2, str(_neg_merged["decision_candidates"]))
+
+
 section("the concept map: derived, never a second copy")
 
 _dg_state = {
@@ -3440,10 +3746,26 @@ _dg_graph = lc_graph.build_graph({"id": "cons_x", "question": _dg_state["questio
                                  _dg_state, _dg_decisions, _dg_actions, _dg_edges_rows, {})
 _by_id = {n["id"]: n for n in _dg_graph["nodes"]}
 check("the root node carries the question", _by_id["root"]["detail"] == _dg_state["question"])
-check("a long item's label is a SHORT truncation",
-      len(_by_id["idea_1"]["label"]) < len(_by_id["idea_1"]["detail"]))
+# Rule 135: an 81-character sentence is exactly the case the old 44-char cap
+# broke -- it read as "Use the community hall on the corner…", cut off before
+# its own qualifier. Deliberately UPDATED, not left broken: the label must
+# now show the WHOLE sentence, not a shortened one, and label == detail is
+# the correct assertion of that fix, not a regression in truncation itself
+# (covered separately just below, on text that genuinely exceeds the budget).
+check("a full one-sentence idea is shown WHOLE, not clipped at the old 44-char cap",
+      _by_id["idea_1"]["label"] == _by_id["idea_1"]["detail"],
+      _by_id["idea_1"]["label"])
 check("but the full, exact wording is preserved in detail",
       _by_id["idea_1"]["detail"] == _dg_state["ideas"][0]["text"])
+
+_long_text = ("This proposal would require the group to first confirm with the landlord "
+             "whether step-free access is genuinely available on every floor, not only "
+             "the ground floor, before anyone commits to using this venue at all")
+_long_label = lc_graph._short_label(_long_text)
+check("a genuinely long item's label is STILL a short truncation, past the new budget",
+      len(_long_label) < len(_long_text) and len(_long_label) <= lc_graph.MAX_LABEL_CHARS + 1)
+check("...ending in an ellipsis, cut on a real word boundary rather than mid-word",
+      _long_label.endswith("…") and _long_text.startswith(_long_label[:-1]))
 check("a decision node's status comes from the DECISIONS TABLE, not the stale state item",
       _by_id["decision_1"]["status"] == "confirmed")
 check("and its rationale is the authoritative one",
@@ -3468,6 +3790,56 @@ check("unplaced items are counted, even though this is not whole-graph fallback"
       # concern_1, decision_1 and action_1 all lack a theme in this fixture --
       # only idea_1 was actually placed (under theme_1).
       _dg_graph["unplaced_count"] == 3, str(_dg_graph["unplaced_count"]))
+
+
+section("a semantic connection places an item, without inventing a topic membership (rule 136)")
+
+# Reproduced against the exact defect the detail-and-overview brief named:
+# "generic category hubs... mixed with a real topic" -- before this, ANY
+# themeless item landed in a bucket keyed by its own KIND, so a proposal
+# directly answering the question sat in the same "Ideas" hub as an
+# unrelated fact, and a genuine cross-relation to an already-placed item was
+# thrown away as if it did not exist.
+_anchor_state = {
+    "question": "Which course?",
+    "themes": [{"id": "theme_1", "text": "Course comparison"}],
+    "ideas": [
+        {"id": "idea_1", "text": "Take Critical Decision Making in Groups"},   # placed under theme_1
+        {"id": "idea_2", "text": "A related but themeless observation"},       # supports idea_1
+        {"id": "idea_3", "text": "Take Interpersonal Communication instead"},  # answers root directly
+    ],
+    "needs_and_concerns": [
+        {"id": "concern_1", "text": "Totally unrelated, unconnected concern"},  # genuinely unplaced
+    ],
+    "state_revision": 1,
+}
+_anchor_edges = [
+    {"id": "ae1", "from_id": "theme_1", "to_id": "idea_1", "relation": "contains",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ae2", "from_id": "idea_2", "to_id": "idea_1", "relation": "supports",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+    {"id": "ae3", "from_id": "idea_3", "to_id": "root", "relation": "answers",
+     "label": "", "inferred": True, "human_edited": False, "source_turn_ids": []},
+]
+_anchor_graph = lc_graph.build_graph(
+    {"id": "cons_anchor", "question": _anchor_state["question"]},
+    _anchor_state, [], [], _anchor_edges, {})
+_anchor_contains = {(e["from_id"], e["to_id"]) for e in _anchor_graph["edges"] if e["relation"] == "contains"}
+check("a themeless item connected to an already-placed one is shown under the SAME topic",
+      ("theme_1", "idea_2") in _anchor_contains, _anchor_contains)
+check("...rather than a generic 'Ideas' bucket next to the real topic",
+      not any(f == "bucket:idea" for f, _ in _anchor_contains), _anchor_contains)
+_answers_bucket_id = next((n["id"] for n in _anchor_graph["nodes"]
+                          if n["kind"] == "bucket" and n["label"] == "Connected to the question"), None)
+check("an item answering the question directly gets a MEANINGFUL bucket, not a kind bucket",
+      _answers_bucket_id is not None and (_answers_bucket_id, "idea_3") in _anchor_contains,
+      _anchor_contains)
+check("a genuinely unconnected item still falls back to the honest kind bucket",
+      ("bucket:concern", "concern_1") in _anchor_contains, _anchor_contains)
+check("connected_no_topic_count covers exactly the two semantically-placed items",
+      _anchor_graph["connected_no_topic_count"] == 2, _anchor_graph["connected_no_topic_count"])
+check("unplaced_count now covers ONLY the genuinely disconnected item, not the connected ones",
+      _anchor_graph["unplaced_count"] == 1, _anchor_graph["unplaced_count"])
 
 _fb_state = {"question": "An old session", "ideas": [{"id": "idea_1", "text": "Something"}],
             "needs_and_concerns": [{"id": "concern_1", "text": "Something else"}],
@@ -3523,7 +3895,7 @@ _GRAPH_REPLY = json.dumps({
          "source_turn_ids": ["1"]},
     ],
 })
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: _GRAPH_REPLY)
 _ares = client.post(f"/live-consultation/sessions/{_G}/analyze", json={"force": True}).json()
@@ -3598,6 +3970,25 @@ _unknownrel = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
                                 "relation": "not_a_real_relation"})
 check("an unrecognised relation is refused", _unknownrel.status_code == 400)
 
+# Rule 133: a human's own connection is held to the same relationship
+# grammar a model's proposal is, end to end through the real HTTP endpoint.
+_answers_root = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                            json={"from_id": _idea_node["id"], "to_id": "root",
+                                  "relation": "answers"})
+check("a human can mark a proposal as answering the consultation's own question",
+      _answers_root.status_code == 200, _answers_root.text[:200])
+check("the answers edge actually targets root",
+      _answers_root.json()["edge"]["to_id"] == "root")
+_answers_bad = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                           json={"from_id": _concern_node["id"], "to_id": _idea_node["id"],
+                                 "relation": "answers"})
+check("a concern cannot 'answer' an idea through the API either (rule 133)",
+      _answers_bad.status_code == 400, _answers_bad.text[:200])
+_clarify_bad = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
+                           json={"from_id": _idea_node["id"], "to_id": _concern_node["id"],
+                                 "relation": "clarifies"})
+check("a proposal cannot 'clarify' anything -- only a question can", _clarify_bad.status_code == 400)
+
 _manual = client.post(f"/live-consultation/sessions/{_G}/graph/edges",
                       json={"from_id": _idea_node["id"], "to_id": _concern_node["id"],
                             "relation": "supports", "label": "a good fit"})
@@ -3617,7 +4008,7 @@ check("the rejected connection is gone from the map",
       not any(e["id"] == _manual_edge_id for e in _g4["edges"]))
 
 # The tombstone: the SAME connection, re-proposed by the model, must not come back.
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: json.dumps({
                       "edges": [{"from": _idea_node["id"], "to": _concern_node["id"],
@@ -3639,7 +4030,7 @@ check("merging a nonexistent node is refused", _merge_resp.status_code == 404)
 _second_idea = client.post(f"/live-consultation/sessions/{_G}/turns",
                            json={"text": "Or the school gym.", "realtime_item_id": "g3",
                                  "is_final": True})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                   call=lambda m: json.dumps(
                       {"add": {"ideas": [{"text": "The school gym", "source_turn_ids": ["3"]}]}}))
@@ -3726,7 +4117,7 @@ _W1_REPLY = json.dumps({"add": {
     "action_items": [{"action": "Call the hall", "source_turn_ids": ["1"]}],
     "decision_candidates": [{"text": "Meet indoors", "source_turn_ids": ["1"]}],
 }})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W1_REPLY)
 client.post(f"/live-consultation/sessions/{_W1}/analyze", json={"force": True})
 
@@ -3790,7 +4181,7 @@ _W2_REPLY = json.dumps({"add": {
     "decision_candidates": [{"text": "Meet on Saturday", "source_turn_ids": ["1"]}],
     "ideas": [{"text": "An idea nobody ever reviews", "source_turn_ids": ["1"]}],
 }})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W2_REPLY)
 client.post(f"/live-consultation/sessions/{_W2}/analyze", json={"force": True})
 
@@ -3841,7 +4232,7 @@ _W3_REPLY = json.dumps({
                      "source_turn_ids": ["1"]}]},
     "edges": [{"from": "t1", "to": "n1", "relation": "contains"}],
 })
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W3_REPLY)
 client.post(f"/live-consultation/sessions/{_W3}/turns",
            json={"text": "The community hall would work.", "realtime_item_id": "w3b",
@@ -3873,7 +4264,7 @@ _W4_REPLY = json.dumps({"add": {"action_items": [
     {"action": "Book the hall", "source_turn_ids": ["1"]},
     {"action": "Reserve the community hall", "source_turn_ids": ["1"]},
 ]}})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W4_REPLY)
 client.post(f"/live-consultation/sessions/{_W4}/analyze", json={"force": True})
 
@@ -3902,7 +4293,7 @@ _W5_REPLY = json.dumps({"add": {"action_items": [
     {"action": "Book the hall", "source_turn_ids": ["1"]},
     {"action": "Reserve the hall", "source_turn_ids": ["1"]},
 ]}})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W5_REPLY)
 client.post(f"/live-consultation/sessions/{_W5}/analyze", json={"force": True})
 _w5_map = client.get(f"/live-consultation/sessions/{_W5}").json()["state"]["action_items"]
@@ -3931,7 +4322,7 @@ _W6_REPLY = json.dumps({"add": {"decision_candidates": [
     {"text": "Meet on Saturday", "source_turn_ids": ["1"]},
     {"text": "Gather this Saturday", "source_turn_ids": ["1"]},
 ]}})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W6_REPLY)
 client.post(f"/live-consultation/sessions/{_W6}/analyze", json={"force": True})
 _w6_map = client.get(f"/live-consultation/sessions/{_W6}").json()["state"]["decision_candidates"]
@@ -3962,7 +4353,7 @@ _W7_REPLY = json.dumps({"add": {
     "themes": [{"tmp_id": "ta", "text": "Venue"}, {"tmp_id": "tb", "text": "Programme"}],
     "ideas": [{"tmp_id": "n1", "text": "Use the hall", "source_turn_ids": ["1"]}],
 }})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W7_REPLY)
 client.post(f"/live-consultation/sessions/{_W7}/analyze", json={"force": True})
 _w7_graph = client.get(f"/live-consultation/sessions/{_W7}/graph").json()["graph"]
@@ -4012,7 +4403,7 @@ _manual7 = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
 _edge7_id = _manual7.json()["edge"]["id"]
 client.patch(f"/live-consultation/sessions/{_W7}/graph/edges/{_edge7_id}",
             json={"relation": "related_to"})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                  call=lambda m: json.dumps({"edges": [
                      {"from": _idea7["id"], "to": _theme_a["id"], "relation": "supports"}]}))
@@ -4031,7 +4422,7 @@ _manual7b = client.post(f"/live-consultation/sessions/{_W7}/graph/edges",
                               "relation": "challenges"})
 client.delete(f"/live-consultation/sessions/{_W7}/graph/edges/{_manual7b.json()['edge']['id']}")
 _W7_REPLY2 = json.dumps({"add": {"ideas": [{"text": "A second idea", "source_turn_ids": ["1"]}]}})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W7_REPLY2)
 client.post(f"/live-consultation/sessions/{_W7}/turns",
            json={"text": "A third turn.", "realtime_item_id": "w7c", "is_final": True})
@@ -4054,7 +4445,7 @@ _W8_REPLY = json.dumps({"add": {
     "ideas": [{"tmp_id": "n1", "text": "Idea one", "source_turn_ids": ["1"]},
              {"tmp_id": "n2", "text": "Idea two", "source_turn_ids": ["1"]}],
 }})
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass, call=lambda m: _W8_REPLY)
 client.post(f"/live-consultation/sessions/{_W8}/analyze", json={"force": True})
 _w8_graph = client.get(f"/live-consultation/sessions/{_W8}/graph").json()["graph"]
@@ -4388,7 +4779,7 @@ check("the incomplete closing pass is recorded PERSISTENTLY on the session, "
      "not only in the one response End returned",
       bool(_e1_detail["final_pass_note"]), json.dumps(_e1_detail.get("final_pass_note")))
 
-lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False: \
+lc_api.reasoner.analyze = lambda session, state_, new_turns, recent, final_pass=False, **_kw: \
     _real_analyze(session, state_, new_turns, recent, final_pass=final_pass,
                  call=lambda m: json.dumps({"summary": "Caught up."}))
 _finish = client.post(f"/live-consultation/sessions/{_E1}/finish-analysis")
@@ -4614,6 +5005,31 @@ try:
           str(len(_a50_contains)))
     check("canonical wording is untouched",
           next(n for n in _a50g["nodes"] if n["id"] == "question_0")["detail"] == "Question 0?")
+finally:
+    lc_api.reasoner.organize = _real_organize
+
+# Rule 134: when even the REAL organise pass's own bounded context has to
+# leave material out (90 items, cap 80), that is reported to the person
+# through the preview's own omissions list, not silently absorbed.
+_ORG90 = client.post("/live-consultation/sessions",
+                     json={"title": "Ninety items", "question": "How should we grow?",
+                           "participants_informed": True}).json()["id"]
+store.save_state(_ORG90, {
+    "question": "How should we grow?",
+    "unresolved_questions": [{"id": f"bigq_{i}", "text": f"Question {i}?"} for i in range(90)],
+})
+_ORG90_REPLY = json.dumps({"add": {"themes": []}, "edges": [], "retire_themes": []})
+lc_api.reasoner.organize = (
+    lambda session, state_, unplaced=None, model=None, call=None, context=None, **kw:
+    _real_organize(session, state_, unplaced, context=context, call=lambda msgs: _ORG90_REPLY))
+try:
+    _p90 = client.post(f"/live-consultation/sessions/{_ORG90}/graph/organize/preview")
+    check("a 90-item organise preview succeeds through the REAL (bounded) context builder",
+          _p90.status_code == 200, _p90.text[:300])
+    _p90j = _p90.json()
+    check("the bounded context's own omission is reported in omissions, not hidden",
+          any("left out" in n for n in _p90j.get("omissions") or []),
+          json.dumps(_p90j.get("omissions"))[:300])
 finally:
     lc_api.reasoner.organize = _real_organize
 

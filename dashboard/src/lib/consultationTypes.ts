@@ -104,10 +104,30 @@ export interface ConsultationCapabilities {
     organize_whole_map: boolean;
     organize_preview_map: boolean;
     organize_repair: boolean;
+    /** Present once the backend enforces the question-led relation grammar
+     *  (rule 133) -- `answers`/`clarifies`/`elaborates` and the endpoint-role
+     *  checks behind them. Missing on an older process, same discipline as
+     *  every other flag here. */
+    argument_grammar?: boolean;
     layout_version: number;
   };
   node_kinds: GraphNodeKindInfo[];
   edge_relations: GraphRelationInfo[];
+  /** The question-led reading roles (rule 133): a coarser lens over the 15
+   *  node kinds -- question / proposal / reason / concern / outcome / topic
+   *  -- so the map can be scanned by what a card IS ARGUING rather than by
+   *  its specific kind. Never replaces `node_kinds`; the detail panel still
+   *  shows the precise kind. Absent on a backend that predates rule 133. */
+  node_roles?: GraphRoleInfo[];
+  role_of_kind?: Record<GraphNodeKind, GraphRole>;
+}
+
+export type GraphRole = "question" | "proposal" | "reason" | "concern" | "outcome" | "topic";
+
+export interface GraphRoleInfo {
+  id: GraphRole;
+  label: string;
+  plural: string;
 }
 
 export interface GraphNodeKindInfo {
@@ -501,8 +521,8 @@ export type GraphNodeKind =
   | "decision" | "action" | "bucket";
 
 export type GraphRelation =
-  | "contains" | "supports" | "challenges" | "depends_on" | "addresses"
-  | "leads_to" | "related_to";
+  | "contains" | "answers" | "supports" | "challenges" | "depends_on" | "addresses"
+  | "clarifies" | "elaborates" | "leads_to" | "related_to";
 
 export interface GraphNode {
   id: string;
@@ -574,11 +594,18 @@ export interface ConceptGraph {
    *  tree shown is CATEGORY grouping (a fallback), not something the group
    *  discussed — the screen must say so plainly (section 3). */
   fallback: boolean;
-  /** How many real items sit in a provisional (not-yet-themed) bucket even
-   *  though this is NOT whole-graph fallback — some themes exist, but these
-   *  items are not under one yet. 0 whenever nothing is unplaced, and always
-   *  0 in fallback mode itself (which already says so for the whole map). */
+  /** How many real items have NEITHER a topic NOR any semantic connection at
+   *  all — genuinely disconnected (rule 136 narrowed this on purpose: an
+   *  item connected via `answers`/`supports`/etc. to something placed no
+   *  longer counts here, see `connected_no_topic_count`). Always 0 in
+   *  fallback mode (which already says so for the whole map). */
   unplaced_count: number;
+  /** How many items have no topic of their own but are shown under one
+   *  anyway because they are semantically connected to something that does
+   *  (rule 136) — distinct from `unplaced_count` so a coverage view can say
+   *  "connected but not explicitly grouped" rather than lumping it in with
+   *  "no connection at all" (section 5C). Absent on an older backend. */
+  connected_no_topic_count?: number;
   layout_version?: number;
   pin_conflicts?: { node_id: string; other_id: string; reason: string }[];
   nodes: GraphNode[];
