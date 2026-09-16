@@ -403,6 +403,11 @@ def capabilities():
         "graph_capabilities": {**graph.GRAPH_CAPABILITIES, "layout_version": graph.LAYOUT_VERSION},
         "node_kinds": [{"id": k, **v} for k, v in graph.NODE_KIND_META.items()],
         "edge_relations": [{"id": k, **v} for k, v in graph.RELATION_META.items()],
+        # The question-led reading roles (rule 133): a coarser lens over the
+        # kinds above, so a future focused view can group "what answers this
+        # question" without duplicating the mapping in TypeScript.
+        "node_roles": [{"id": k, **v} for k, v in graph.ROLE_META.items()],
+        "role_of_kind": graph.NODE_ROLE,
         "default_mode": core.DEFAULT_MODE,
         "default_framework": core.DEFAULT_FRAMEWORK,
         "default_presence": core.DEFAULT_PRESENCE,
@@ -1049,12 +1054,14 @@ def _run_analysis(session: dict, force: bool = False, final_pass: bool = False,
         base_revision = int(state.get("state_revision") or 0)
         generation = store.deletion_generation(sid)
         recent = store.list_turns(sid, final_only=True, limit=reasoner.RECENT_WINDOW)
+        edges_rows = store.list_graph_edges(sid)
 
         # THE NETWORK CALL. Nothing is held across it -- no lock on the database
         # and no assumption that the map will still say what it said. A pass can
         # take tens of seconds, and the person who is sitting there correcting
         # the record is doing it during exactly that window (rule 104).
-        result = reasoner.analyze(session, state, new_turns, recent, final_pass=final_pass)
+        result = reasoner.analyze(session, state, new_turns, recent, final_pass=final_pass,
+                                  edges_rows=edges_rows)
         _LAST_ANALYSIS[sid] = time.time()
         if not result.ok:
             return {"ran": True, "ok": False, "note": result.note}
@@ -2525,7 +2532,8 @@ def _unplaced_from_graph(built: dict) -> list[dict]:
     parented = {e["to_id"] for e in built["edges"]
                if e["relation"] == graph.HIERARCHY_RELATION and e["from_id"] in bucket_ids}
     by_id = {n["id"]: n for n in built["nodes"]}
-    return [{"id": nid, "kind": by_id[nid]["kind"], "text": by_id[nid]["detail"]}
+    return [{"id": nid, "kind": by_id[nid]["kind"], "text": by_id[nid]["detail"],
+            "source_turn_ids": by_id[nid].get("source_turn_ids") or []}
             for nid in parented if nid in by_id]
 
 
@@ -2688,8 +2696,16 @@ def preview_organize(session_id: str):
         decisions = store.list_decisions(session_id)
         actions = store.list_action_items(session_id)
         rejected = store.rejected_edge_keys(session_id)
-        turns = store.list_turns(session_id, final_only=True, limit=12)
-        context = {"edges": edges_rows, "rejected": rejected, "turns": turns}
+        recent_turns = store.list_turns(session_id, final_only=True, limit=12)
+        # Beyond the recent narrative window, fetch exactly the turns a
+        # currently-live item cites as its own source (section 4B: "the
+        # source spans needed to interpret the current exchange") -- bounded
+        # by however many distinct citations exist, never the whole
+        # transcript, and never in place of the recency window above.
+        cited_ids = _cited_turn_ids(state, unplaced) - {str(t["id"]) for t in recent_turns}
+        cited_turns = list(store.get_turns_by_ids(session_id, cited_ids).values()) if cited_ids else []
+        context = {"edges": edges_rows, "rejected": rejected,
+                  "turns": recent_turns + cited_turns, "recent_turns": recent_turns}
         result = reasoner.organize(session, state, unplaced, context=context)
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.note)
@@ -2701,12 +2717,15 @@ def preview_organize(session_id: str):
                 + (dry.get("note") or "Run Organize ideas again.")))
         summary = _organize_summary(result.patch, dry["merged"], dry["accepted"], unplaced)
         conflicts = [n for n in dry["val_notes"] if "by hand" in n]
+        omissions = list(dry["val_notes"])
+        if result.note:
+            omissions.append(result.note)
         extra = {
             "proposed_theme_count": len(result.patch.get("add", {}).get("themes") or []),
             "proposed_edge_count": len(result.patch.get("edges") or []),
             "accepted_edge_count": len(dry["accepted"]),
             "coverage": dry["coverage"],
-            "omissions": dry["val_notes"],
+            "omissions": omissions,
             "conflicts": conflicts,
             "proposed_tree": dry["proposed_tree"],
             "validated_edges": dry["accepted"],
@@ -2849,6 +2868,30 @@ def _assert_contains_ok(from_id: str, to_id: str, relation: str, node_kind: dict
                             detail="That grouping would loop back on itself.")
 
 
+def _cited_turn_ids(state: dict, unplaced: list[dict]) -> set:
+    """Every turn id a currently-live map item names as its own source -- the
+    bounded set `store.get_turns_by_ids` needs to build a short excerpt for
+    each one (rule 134) without ever fetching the whole transcript."""
+    ids: set = set()
+    for name in core.ITEM_LISTS:
+        for item in (state.get(name) or []):
+            if isinstance(item, dict):
+                ids.update(str(t) for t in (item.get("source_turn_ids") or []))
+    for u in unplaced:
+        ids.update(str(t) for t in (u.get("source_turn_ids") or []))
+    return ids
+
+
+def _assert_endpoint_ok(from_id: str, to_id: str, relation: str, node_kind: dict[str, str]) -> None:
+    """The human side of `graph.endpoint_role_ok` (rule 133) -- a person's own
+    connection is held to the same grammar a model's proposal is, so "answers"
+    (say) cannot be drawn onto something that is not a question either way."""
+    if not graph.endpoint_role_ok(relation, from_id, to_id, node_kind):
+        raise HTTPException(status_code=400, detail=(
+            f'"{graph.RELATION_META.get(relation, {}).get("label", relation)}" does not fit '
+            "those two kinds of idea — see the relation's own meaning."))
+
+
 @router.post("/sessions/{session_id}/graph/edges")
 def add_graph_edge(session_id: str, req: EdgeIn):
     """
@@ -2869,6 +2912,7 @@ def add_graph_edge(session_id: str, req: EdgeIn):
         raise HTTPException(status_code=400, detail="A connection cannot point a node at itself.")
     existing_parents, _human = graph.existing_parent_index(store.list_graph_edges(session_id))
     _assert_contains_ok(req.from_id, req.to_id, relation, node_kind, existing_parents)
+    _assert_endpoint_ok(req.from_id, req.to_id, relation, node_kind)
     if relation == graph.HIERARCHY_RELATION:
         store.drop_inferred_contains(session_id, req.to_id, keep_from_id=req.from_id)
     existing_edges = store.list_graph_edges(session_id)
@@ -2902,6 +2946,7 @@ def edit_graph_edge(session_id: str, edge_id: str, req: EdgePatchIn):
         existing_parents, _human = graph.existing_parent_index(store.list_graph_edges(session_id))
         _assert_contains_ok(existing["from_id"], existing["to_id"], relation, node_kind,
                             existing_parents)
+        _assert_endpoint_ok(existing["from_id"], existing["to_id"], relation, node_kind)
         fields["relation"] = relation
     if not fields:
         raise HTTPException(status_code=400, detail="Nothing to change.")

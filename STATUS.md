@@ -31,11 +31,25 @@ See `AGENTS.md` for the full technical orientation — this file is just
 - The Video pipeline, the Colony (+ the Material World / nuclei), the project
   wallet, the API's owner gate, and the prompt-injection hold.
 - Live Consultation: the human-owned record (rules 94-99), request-ordering
-  survival (rules 100-110), and the concept graph (rules 121-132). Nested
+  survival (rules 100-110), and the concept graph (rules 121-135). Nested
   topics are allowed (theme may contain theme); layout v3 packs subtree
   bounds instead of a per-branch grid; Organize ideas can repair an already
-  placed map and previews the validated proposal. Closeout has not yet been
-  used in a real meeting.
+  placed map and previews the validated proposal. A question-led relationship
+  grammar (rule 133: `answers`, `clarifies`, `elaborates`) and relevance-aware
+  extraction context with per-item source excerpts (rule 134) are both in.
+  Stage 3 (rule 135) made the map actually readable: a full ~160-char label
+  instead of 44, cards sized from their own served width/height instead of a
+  fixed 200px box, a real fix for `fitOverview`'s center-root-and-return bug,
+  role-based (question/proposal/reason/concern/outcome/topic) colour+icons on
+  every card, and a new client-side "Focus" default view (question → its
+  `answers` proposals → their reasons/concerns) that degrades honestly to the
+  full map when a session has no `answers` edges yet (every session extracted
+  before rule 133). Still ahead in the same MeetMap-inspired rework: the
+  archived-consultation repair workflow (backfilling the new relations onto
+  old sessions, consolidating duplicates), navigating Focus to a
+  non-root question, and real-model verification of extraction quality (the
+  synthetic fixture in `test_live_consultation.py` uses a stubbed model).
+  Closeout has not yet been used in a real meeting.
 - Agent orientation split (`ed21927`): root `AGENTS.md` is a thin routing
   table; the numbered rules live in `docs/rules/*.md`, split by subsystem.
 
@@ -64,6 +78,193 @@ Empty when nothing is in flight.
 ---
 
 ## Activity Log (newest first)
+
+### 2026-09-16 -- Claude Code (Sonnet 5) -- the map becomes readable, and a real Focus view (rule 135), stage 3 of the MeetMap-inspired rework
+
+Sheraj's verdict on stages 1-2, via a detailed written brief: "A little bit
+better, but still not there. This isn't understandable" — a screenshot showed
+a dark canvas of tiny, truncated, mostly-identical-looking cards. The brief's
+own "verified starting problems" table described an older reviewed commit, so
+this session re-confirmed each claim against the ACTUAL checkout (which
+already had stages 1-2's `answers`/`clarifies`/`elaborates` grammar and
+relevance-aware context, both uncommitted) before changing anything, and found
+two were still true and one was new: `MAX_LABEL_CHARS` really was still 44;
+`Canvas.fitOverview` really did center on root at a fixed zoom and RETURN
+before its own computed overview subset was ever used; and the client
+(`ConceptGraph.tsx`) clamped that already-short label to 3 lines on a
+hardcoded 200px box, a SECOND truncation the brief's own review of the Python
+code could not have seen, on top of the first.
+
+**What changed** (rule 135, `docs/rules/live-consultation.md`):
+`agents/live_consultation_graph.py`'s `MAX_LABEL_CHARS` is 160 (a full
+sentence with room for its qualifier), `NODE_W` widened 200→240, and
+`_estimate_size`'s line cap moved from a hardcoded 3 to a named
+`MAX_LABEL_LINES` (8) so the larger budget cannot be silently re-clipped the
+same way. `ConceptGraph.tsx`'s `ConceptNode` now sizes itself from each
+node's own SERVED `width`/`height` (`build_graph` already computed these
+per-node; the client was ignoring them) instead of a fixed box, drops the
+extra client-side clamp, and reads at 15px instead of 14px. `fitOverview`'s
+early return is gone — it always fits the actual subset on screen now.
+Every card's badge/border colour is now driven by the reading ROLE stage 1
+served but nothing rendered yet (question/proposal/reason/concern/outcome/
+topic, with an icon each) rather than the raw 15-kind palette, and the
+Legend leads with those six roles, the specific kinds folded under a
+`<details>` disclosure. New `dashboard/src/lib/consultationFocus.ts`
+computes a client-side-only "Focus" default view — the question, its
+`answers` proposals, and each proposal's reasons/concerns — as a toggle
+beside the existing full map; it never persists a position (two independent
+guards keep a Focus-only coordinate from ever reaching the topic map's own
+`graph_node_view`, rule 124) and degrades to an honest banner plus the full
+map on any session with no `answers` edges yet (i.e. every session extracted
+before rule 133). The question and its objective now sit outside the
+zooming canvas in both modes.
+
+**Verified:** 982 offline checks in `test_live_consultation.py` (was 969,
++13) — a new synthetic-fixture section (brief section 11, fictional, neutral
+test IDs) feeds two incremental patches through the REAL `reasoner.merge` +
+`graph.validate_edges` pipeline (the same two functions `_run_analysis`
+chains in production) and confirms two genuinely distinct course options
+both `answers` the one question, a concern raised once about the first stays
+reachable, a shared investigation `clarifies` BOTH options rather than only
+the one raised alongside it, no owner/acceptance is invented for a bare
+action proposal, and a proposal/negation pair never merges into one decision.
+One pre-existing assertion was UPDATED, not left broken, because the old
+behaviour it pinned (an 81-character idea gets truncated) is exactly what
+this pass fixed on purpose; a new assertion alongside it confirms genuinely
+long text (>160 chars) is still truncated, on a real word boundary. All ten
+offline suites pass (2058 checks total), `python -c "import agents.api"`
+clean, `npx tsc --noEmit` clean, `npm run build` clean (Consultation chunk
+328.15KB → 335.40KB, entry bundle unchanged at 247.85KB, rule 112).
+
+**Not done, honestly — no browser-automation tool was available in this
+session either**, so every claim about the rendered page rests on
+`tsc`/`npm run build`/reading the code, not on having clicked through it.
+The archived-session repair workflow (brief section 9 — backfilling
+`answers`/`supports`/`challenges` onto old sessions, consolidating
+duplicates) has not started, so an old session's gain today is limited to
+the geometry/role fixes; its Focus view stays the honest "nothing to focus
+on yet" banner until a new analysis pass or a future repair adds `answers`
+edges to it. Focus always centers on root — there is no way yet to focus a
+different question among several `unresolved_questions`/`investigate` items.
+The per-proposal card budget (4 proposals × 2 reasons/concerns) is a first
+reasoned cap, not tuned against section 7's "roughly 6-12 cards" target in
+every shape. No real model call exercised `answers`/`supports`/`challenges`
+extraction quality — the synthetic fixture proves the merge/validate
+pipeline handles correct model output right, not that a real model produces
+correct output. No keyboard-navigation or narrow-viewport audit was done for
+the new Focus toggle specifically.
+
+### 2026-09-15 (later) -- Claude Code (Sonnet 5) -- extraction context becomes relevance-aware and cites its sources (rule 134), stage 2 of the MeetMap-inspired rework [IN PROGRESS]
+
+Continuing the staged rework below: stage 1 (rule 133) added the relation
+vocabulary; this stage repairs the two "Verified limitations" the brief named
+directly and confirmed still true against the code — `_organize_context_json`
+really did cap its item list at `items[:80]` in LIST-CONSTRUCTION (i.e.
+chronological) order, so a long meeting's LATEST material was exactly what a
+full map lost past ~80 items, and no item anywhere carried a source excerpt
+into either prompt.
+
+**What changed** (rule 134, `docs/rules/live-consultation.md`):
+`agents/live_consultation_reasoner.py`'s `_organize_context_json` now scores
+each item by recency, whether it belongs to the topic the discussion just
+returned to (a cheap local proxy: the parent(s) of the most-recently-noticed
+handful of items), whether a person touched it by hand, and whether it is
+still open — keeps the top 80 — and reports `omitted_item_count` in the
+payload AND in `OrganizeResult.note`/the preview's `omissions` list, never
+silently. Every theme/item gets a short `excerpt` resolved from whatever
+turns the caller loaded; `preview_organize` now fetches, beyond the existing
+12-turn recency window, exactly the turns a currently-live item cites as its
+own source, via a new bounded, session-scoped `store.get_turns_by_ids`.
+Separately, the ORDINARY per-turn pass gained the two things the brief named
+as missing from it specifically: `_state_for_prompt` now stamps each item
+with the `"topic"` (theme) it already sits under and its own
+`source_turn_ids`, and `build_messages` lists existing non-`contains`
+connections so the model is not re-proposing (or contradicting) something
+already on the map. `analyze()`/`_run_analysis` thread `edges_rows` through
+for this, both as optional parameters so every other caller (this file's own
+tests) is unaffected.
+
+**Deliberately not done in this stage, named rather than discovered later:**
+`RECENT_WINDOW` itself is untouched (a tunable default, not a structural
+bug); the ordinary per-turn pass does not fetch excerpts for OUT-OF-WINDOW
+items the way Organize ideas now does — that pass is explicit, occasional,
+and already whole-map, which is this stage's answer for "reconnect to a
+topic raised much earlier"; extending the same targeted-fetch machinery to
+the continuously-running per-turn pass is separate, later work. The focused
+reading UI (section 5) and the archived-consultation rebuild workflow
+(section 6) have also not started.
+
+**Verified:** 969 offline checks (was 950, +19) — the relevance scorer
+proven against two synthetic shapes (a late-discussed topic that must
+survive a flat 80-item cap; an old item on a just-returned-to topic that
+must survive 85 more-recent unrelated fillers), excerpt attachment from a
+real vs. absent source turn, `get_turns_by_ids`' session scoping (a
+different session's turn id returns nothing), the ordinary per-turn prompt
+actually carrying `"topic"` and an existing connection, and the REAL (not
+stubbed) organize pass reporting its own 90-item truncation through the live
+HTTP preview endpoint's `omissions` list. `python -c "import agents.api"`
+and `npx tsc --noEmit` both clean; no frontend files touched.
+
+### 2026-09-15 -- Claude Code (Sonnet 5) -- a question-led relationship grammar (rule 133), stage 1 of a MeetMap-inspired rework
+
+Sheraj asked for the Live Consultation concept map to become a genuine
+question-led dialogue map (per a detailed brief adapting MeetMap, arXiv:
+2502.01564): what is the group investigating, what's been proposed in answer,
+what reasons and concerns bear on each, what's unresolved. The brief is large
+(semantic model, extraction/context repair, a focused reading UI, rebuilding
+old consultations, synthetic fixtures, live-model verification) and is being
+done in explicit stages with a check-in after each; this is stage 1 only.
+
+**What was actually missing, confirmed against the code before changing
+anything** (not assumed from the brief): the map could connect two ideas, but
+had no relation meaning "this proposal answers the question we're
+investigating" — the six existing cross-relations were `supports`,
+`challenges`, `depends_on`, `addresses`, `leads_to`, `related_to`, none of
+which say that. `_organize_context_json` really does cap items at 80,
+truncate wording to 120 characters, and never attaches a source excerpt per
+item, exactly as the brief described — untouched in this stage, named here as
+the confirmed next piece of work, not yet fixed.
+
+**What changed** (rule 133, `docs/rules/live-consultation.md`):
+`agents/live_consultation_graph.py` gains `answers`, `clarifies` and
+`elaborates`, plus a `NODE_ROLE` lens (question / proposal / reason / concern
+/ outcome / topic) over the existing 15 kinds — layered on top, never
+replacing a kind's own colour, status or lifecycle. `RELATION_ENDPOINTS`
+names the allowed source/target roles for exactly those three new relations
+and `validate_edges` enforces them (drop-and-report, never the whole patch,
+same discipline as every other check in that function); `agents/
+live_consultation_api.py`'s `add_graph_edge`/`edit_graph_edge` hold a human's
+own connection to the same grammar. Root is explicitly a valid `answers`
+target (role "question") — kept separate from `contains_target_ok`, which
+still refuses root as a display-tree parent for an unrelated reason.
+**Deliberate scope limit, checked against the test suite before deciding
+it:** the four OLDER cross-relations stay unconstrained by role — grepping
+the suite found `theme --supports--> idea` and `idea --challenges--> theme`
+already exercised and passing, i.e. looser real usage retrofitting would
+have broken; adding the missing relation was the unambiguous win, narrowing
+the old ones is a separate, riskier follow-up not done here. The reasoner's
+per-turn and Organize-ideas prompts (`agents/live_consultation_reasoner.py`)
+now teach all nine cross-relations with when each fits, including targeting
+literal `"root"` with `answers`. Capabilities advertise
+`graph_capabilities.argument_grammar`, `node_roles` and `role_of_kind`
+(served, not duplicated in TypeScript, same reasoning as every other legend
+here) — frontend rendering of the new vocabulary is NOT done yet; this stage
+is backend grammar and validation only.
+
+**Verified:** 950 offline checks (was 925, +25) covering the new relations'
+metadata, direct `endpoint_role_ok` calls, `validate_edges` accepting/
+rejecting every combination in the fixture above, the API refusing a
+human's own bad-grammar edge (400) and accepting a proposal answering root
+end to end over HTTP, and capabilities serving the new fields. `python -c
+"import agents.api"` clean, `npx tsc --noEmit` clean (no frontend files
+touched this stage, so this only confirms nothing else regressed).
+
+**Explicitly NOT done, so the next stage starts from a true baseline:**
+context selection (the 80-item/120-char/12-turn caps), attaching source
+excerpts per item, topic continuity across an interrupted-then-resumed
+subject, the focused question-led reading UI, the archived-consultation
+rebuild workflow, and the synthetic multi-turn fixture from section 7 of the
+brief. Nothing here was exercised against a real model call or in a browser.
 
 ### 2026-09-14 -- Grok 4.6 -- concept map nested layout + working Organize ideas
 

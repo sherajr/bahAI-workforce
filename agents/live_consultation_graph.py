@@ -46,6 +46,7 @@ GRAPH_CAPABILITIES = {
     "organize_whole_map": True,
     "organize_preview_map": True,
     "organize_repair": True,
+    "argument_grammar": True,
 }
 
 ROOT_ID = "root"
@@ -102,7 +103,8 @@ NODE_KIND_META: dict[str, dict] = {
 # parent, containing the root, and an item containing anything are still
 # refused; acyclicity is now a real walk, not "two layers by construction".
 HIERARCHY_RELATION = "contains"
-CROSS_RELATIONS = ("supports", "challenges", "depends_on", "addresses", "leads_to", "related_to")
+CROSS_RELATIONS = ("answers", "supports", "challenges", "depends_on", "addresses",
+                   "clarifies", "elaborates", "leads_to", "related_to")
 EDGE_RELATIONS = (HIERARCHY_RELATION, *CROSS_RELATIONS)
 # Who may be the "from" of a stored `contains` edge. The synthetic root and
 # fallback buckets also parent nodes, but only `build_graph` mints those.
@@ -110,13 +112,92 @@ CONTAINS_SOURCES = ("theme",)
 
 RELATION_META: dict[str, dict] = {
     "contains":    {"label": "Contains",     "style": "solid",  "hierarchy": True},
+    "answers":     {"label": "Answers",      "style": "solid",  "hierarchy": False},
     "supports":    {"label": "Supports",     "style": "solid",  "hierarchy": False},
     "challenges":  {"label": "Challenges",   "style": "dashed", "hierarchy": False},
     "depends_on":  {"label": "Depends on",   "style": "dashed", "hierarchy": False},
     "addresses":   {"label": "Addresses",    "style": "solid",  "hierarchy": False},
+    "clarifies":   {"label": "Clarifies",    "style": "dotted", "hierarchy": False},
+    "elaborates":  {"label": "Elaborates",   "style": "solid",  "hierarchy": False},
     "leads_to":    {"label": "Leads to",     "style": "solid",  "hierarchy": False},
     "related_to":  {"label": "Related to",   "style": "dotted", "hierarchy": False},
 }
+
+# ── The question-led reading roles (rule 133's "small visual vocabulary") ──
+# A role groups the existing, richer kinds into the five things a reader
+# actually needs to tell apart at a glance -- it never replaces a node's own
+# kind or status (section 3: "preserve the richer existing types and statuses
+# underneath"), only adds a coarser lens for `RELATION_ENDPOINTS` and a future
+# question-focused reading view to use. Themes/buckets are "topic": organising
+# containers, never claims -- keeping structural grouping out of the meaning
+# of an argument is the point (`contains` already covers "shown under this
+# topic"; roles are only ever consulted for CROSS relations).
+NODE_ROLE: dict[str, str] = {
+    "root": "question", "question": "question", "investigate": "question",
+    "idea": "proposal", "synthesis": "proposal", "agreement": "proposal",
+    "fact": "reason", "principle": "reason", "assumption": "reason",
+    "concern": "concern", "tension": "concern",
+    "decision": "outcome", "action": "outcome",
+    "theme": "topic", "bucket": "topic",
+}
+ROLE_META: dict[str, dict] = {
+    "question": {"label": "Question",        "plural": "Questions"},
+    "proposal": {"label": "Proposed answer", "plural": "Proposed answers"},
+    "reason":   {"label": "Reason",          "plural": "Reasons"},
+    "concern":  {"label": "Concern",         "plural": "Concerns"},
+    "outcome":  {"label": "Outcome",         "plural": "Outcomes"},
+    "topic":    {"label": "Topic",           "plural": "Topics"},
+}
+
+# Allowed endpoints for the relations this pass actually enforces direction
+# and meaning for (section 3: "define allowed endpoints and direction in one
+# shared vocabulary"). A relation absent here -- the four older cross-relations
+# plus `leads_to` and the cautious `related_to` fallback -- is deliberately
+# left UNCONSTRAINED: they already connect a wide range of existing kinds,
+# including a theme and an idea, in real stored data and in this suite, and
+# retroactively narrowing them is a separate, riskier change from adding the
+# relation this application was missing outright (the reviewed gap: "no
+# explicit answers relationship"). `None` on a side means no constraint there.
+RELATION_ENDPOINTS: dict[str, dict] = {
+    "answers": {
+        "source_roles": {"proposal"},
+        "target_roles": {"question"},
+    },
+    "clarifies": {
+        "source_roles": {"question"},
+        "target_roles": {"proposal", "outcome", "question", "reason", "concern"},
+    },
+    "elaborates": {
+        "source_roles": {"reason", "proposal", "concern"},
+        "target_roles": {"proposal", "reason", "concern", "question", "outcome"},
+    },
+}
+
+
+def endpoint_role_ok(relation: str, from_id: str, to_id: str, node_kind: dict[str, str]) -> bool:
+    """Whether a cross-relation's two ends make the claim it's making possible.
+
+    Unconstrained (True) for any relation with no entry in `RELATION_ENDPOINTS`
+    -- see that dict's own comment for why. This is a DIFFERENT question from
+    `contains_target_ok`: that function protects the display tree (root may
+    never be grouped under anything); this one is about what a claim of
+    meaning between two ideas requires -- and root is not exempt from that,
+    it is simply given the role "question", which is exactly what lets a
+    proposal "answers" the consultation's own question directly, not only a
+    narrower one raised along the way.
+    """
+    rule = RELATION_ENDPOINTS.get(relation)
+    if not rule:
+        return True
+    from_role = NODE_ROLE.get(node_kind.get(from_id, ""))
+    to_role = NODE_ROLE.get(node_kind.get(to_id, ""))
+    source_roles = rule.get("source_roles")
+    target_roles = rule.get("target_roles")
+    if source_roles is not None and from_role not in source_roles:
+        return False
+    if target_roles is not None and to_role not in target_roles:
+        return False
+    return True
 
 # Same convention as `agents/layout.py`'s SERIF_STACK: explicit Windows font
 # paths, tried in order, degrading to PIL's built-in default rather than
@@ -126,7 +207,16 @@ _PNG_FONT_STACK = ("C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
 _PNG_BOLD_FONT_STACK = ("C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf",
                         "C:/Windows/Fonts/tahomabd.ttf")
 
-MAX_LABEL_CHARS = 44
+# Rule 135: raised from 44 -- 44 characters cuts off a proposition before its
+# subject is even finished ("Need to understand what communic…"), which is the
+# specific complaint a full external review made of this map. 160 is "a full
+# short sentence, generally with room for its qualifier" (section 5's own
+# phrase for the target) -- long enough that "may help", "only if" and "we
+# disagree" survive on the CARD itself rather than requiring a click to
+# discover the claim was ever qualified. This is still a DISPLAY truncation
+# only, never stored (see `_short_label`); anything longer is reachable
+# unabridged in `detail` and the on-demand panel, never silently summarised.
+MAX_LABEL_CHARS = 160
 MAX_EDGE_LABEL_CHARS = 80
 # Bounds on a single proposed patch and on total stored edges, the same
 # reasoning as `reasoner.LIST_PROMPT_CAP`: an unbounded graph is an unbounded
@@ -136,13 +226,26 @@ MAX_EDGES_PER_PATCH = 40
 # budget than a per-turn analysis pass. Truncation is reported, never silent.
 MAX_ORGANIZE_EDGES = 200
 MAX_STORED_EDGES = 600
-# Canvas cards are 200px wide (`ConceptGraph.tsx`). Height varies with the
-# label; these are the collision box used by layout and by exports.
-NODE_W = 200.0
+# Canvas cards (`ConceptGraph.tsx`'s `ConceptNode`) size themselves from each
+# node's own served `width`/`height` rather than a client-side constant, so
+# this is the only place either number is chosen. Widened alongside
+# `MAX_LABEL_CHARS` (rule 135): a comfortable ~15px card font needs more than
+# 200px to hold a full sentence in a handful of lines rather than a narrow
+# column of many. Height still varies with the label; these are the collision
+# box used by layout and by exports.
+NODE_W = 240.0
 NODE_MIN_H = 72.0
 H_GAP = 28.0
 V_GAP = 44.0
 MAX_ROW_CHILDREN = 4
+# How many characters a card line holds and how many lines a card may grow to
+# before wrapping stops and the rest waits for a click (rule 135). Tuned for
+# NODE_W's usable text width (~200px after padding) at the card's ~15px font
+# -- a heuristic, like the rest of this deterministic layout, not a real text
+# measurement; `detail` and the on-demand panel are always the source of
+# truth for anything a line-count estimate gets wrong.
+CHARS_PER_LABEL_LINE = 26
+MAX_LABEL_LINES = 8
 
 
 def _short_label(text: str, limit: int = MAX_LABEL_CHARS) -> str:
@@ -482,11 +585,18 @@ def children_from_parents(parent_of: dict[str, str]) -> dict[str, list[str]]:
 
 
 def _estimate_size(node: dict) -> tuple[float, float]:
-    """A collision box matching the on-screen card, including wrapped labels."""
+    """A collision box matching the on-screen card, including wrapped labels.
+
+    Rule 135: the old cap of 3 lines was tuned to a 44-character label -- once
+    `MAX_LABEL_CHARS` grew to 160 (a full sentence with its qualifier) a 3-line
+    cap would silently clip most of it again, right back to the defect this
+    was meant to fix. The cap is now `MAX_LABEL_LINES`, sized for the label
+    budget instead of for the old one.
+    """
     label = (node.get("label") or node.get("detail") or "").strip()
     chars = max(1, min(MAX_LABEL_CHARS, len(label)))
-    lines = max(1, min(3, (chars + 25) // 26))
-    height = 32.0 + lines * 18.0 + 10.0
+    lines = max(1, min(MAX_LABEL_LINES, math.ceil(chars / CHARS_PER_LABEL_LINE)))
+    height = 32.0 + lines * 20.0 + 10.0
     if node.get("status_label"):
         height += 14.0
     if node.get("kind") in ("theme", "bucket") and node.get("collapsed"):
@@ -1103,6 +1213,7 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
     truncated = max(0, len(raw_edges) - cap)
     dropped_unknown = dropped_bad_contains = dropped_rejected = dropped_self = 0
     dropped_provenance = dropped_cycle = dropped_human = dropped_extra = 0
+    dropped_bad_endpoint = 0
     parent_of = dict(existing_parents or {})
     human_parented = set(human_parented or [])
     for raw in raw_edges[:cap]:
@@ -1139,6 +1250,9 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
             elif current_parent:
                 replaces_from = current_parent
             parent_of[to_id] = from_id
+        elif not endpoint_role_ok(relation, from_id, to_id, node_kind):
+            dropped_bad_endpoint += 1
+            continue
         if (from_id, to_id, relation) in rejected:
             dropped_rejected += 1
             continue
@@ -1170,6 +1284,9 @@ def validate_edges(raw_edges: list, tmp_map: dict[str, str], node_ids: set[str],
                      "someone made by hand, and were left for review")
     if dropped_extra:
         notes.append(f"{dropped_extra} extra grouping(s) were dropped so each idea has one parent")
+    if dropped_bad_endpoint:
+        notes.append(f"{dropped_bad_endpoint} proposed connection(s) did not fit what that "
+                     "relation means for those two kinds of idea, and were left for review")
     if dropped_rejected:
         notes.append(f"{dropped_rejected} proposed connection(s) had already been rejected by hand")
     if dropped_self:

@@ -104,10 +104,30 @@ export interface ConsultationCapabilities {
     organize_whole_map: boolean;
     organize_preview_map: boolean;
     organize_repair: boolean;
+    /** Present once the backend enforces the question-led relation grammar
+     *  (rule 133) -- `answers`/`clarifies`/`elaborates` and the endpoint-role
+     *  checks behind them. Missing on an older process, same discipline as
+     *  every other flag here. */
+    argument_grammar?: boolean;
     layout_version: number;
   };
   node_kinds: GraphNodeKindInfo[];
   edge_relations: GraphRelationInfo[];
+  /** The question-led reading roles (rule 133): a coarser lens over the 15
+   *  node kinds -- question / proposal / reason / concern / outcome / topic
+   *  -- so the map can be scanned by what a card IS ARGUING rather than by
+   *  its specific kind. Never replaces `node_kinds`; the detail panel still
+   *  shows the precise kind. Absent on a backend that predates rule 133. */
+  node_roles?: GraphRoleInfo[];
+  role_of_kind?: Record<GraphNodeKind, GraphRole>;
+}
+
+export type GraphRole = "question" | "proposal" | "reason" | "concern" | "outcome" | "topic";
+
+export interface GraphRoleInfo {
+  id: GraphRole;
+  label: string;
+  plural: string;
 }
 
 export interface GraphNodeKindInfo {
@@ -501,8 +521,8 @@ export type GraphNodeKind =
   | "decision" | "action" | "bucket";
 
 export type GraphRelation =
-  | "contains" | "supports" | "challenges" | "depends_on" | "addresses"
-  | "leads_to" | "related_to";
+  | "contains" | "answers" | "supports" | "challenges" | "depends_on" | "addresses"
+  | "clarifies" | "elaborates" | "leads_to" | "related_to";
 
 export interface GraphNode {
   id: string;

@@ -23,7 +23,7 @@ touching — you don't need the rest.**
 | 42–49 | The project wallet | [docs/rules/wallet.md](docs/rules/wallet.md) |
 | 55–57 | Cancelling a run | [docs/rules/jobs.md](docs/rules/jobs.md) |
 | 70–72 | The API's owner gate + indirect prompt injection | [docs/rules/api.md](docs/rules/api.md) |
-| 73–110, 121–132 | Live Consultation (the Consultation tab) | [docs/rules/live-consultation.md](docs/rules/live-consultation.md) |
+| 73–110, 121–135 | Live Consultation (the Consultation tab) | [docs/rules/live-consultation.md](docs/rules/live-consultation.md) |
 | 112–116 | What the dashboard costs to open, and to leave | [docs/rules/dashboard.md](docs/rules/dashboard.md) |
 | 117–120 | A gathering, and a place to start | [docs/rules/gatherings.md](docs/rules/gatherings.md) |
 
