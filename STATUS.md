@@ -19,7 +19,7 @@ See `AGENTS.md` for the full technical orientation — this file is just
 
 ---
 
-## Snapshot (as of 2026-09-14)
+## Snapshot (as of 2026-09-23)
 
 **Live and committed:**
 - Bookmark + quote-card pipelines, the visual layout editor, print sheets, and
@@ -27,7 +27,8 @@ See `AGENTS.md` for the full technical orientation — this file is just
   connected (0 products ever published). Canva autofill exists in code, is
   broken (0/10 attempts ever succeeded), and is off by default.
 - The Secretary (Abigail): Phases 1-3 live (chat, Google Workspace, WhatsApp).
-  Phase 4 (recovery rhythms) not started.
+  Phase 4 (recovery rhythms) not started. Security hardening (rules 138-139,
+  2026-09-23) is live and committed; see the log.
 - The Video pipeline, the Colony (+ the Material World / nuclei), the project
   wallet, the API's owner gate, and the prompt-injection hold.
 - Live Consultation: the human-owned record (rules 94-99), request-ordering
@@ -91,6 +92,82 @@ Empty when nothing is in flight.
 ---
 
 ## Activity Log (newest first)
+
+### 2026-10-26 -- Claude Code (Opus 5.5) -- cloudflared upgraded for Cloudflare's certificate advisory
+
+Cloudflare emailed that cloudflared versions before 2026.10.2 trust eight
+compromised eMudhra intermediate certificates. This machine had 2026.6.1
+(installed with winget). It was upgraded with
+`winget upgrade --id Cloudflare.cloudflared` to **2026.10.4**, using the
+official GitHub release with the installer hash checked, not any link from
+the email. The tunnel process was stopped first and then
+restarted with `Start-ScheduledTask "bahAI Secretary Tunnel"`. It was down for
+about a minute. Verified afterwards: 4 connections registered in
+`logs/tunnel.err.log`, and `https://secretary.peaceantz.com/whatsapp/privacy`
+returns 200. The advisory's "HTTPS origin" warning does not apply, because
+`~/.cloudflared/config.yml` only points at `http://localhost:8765`. No code
+changed. The winget install is machine-wide, so a future upgrade will show a
+Windows permission prompt.
+
+### 2026-09-29 -- Claude Code (Opus 5.5) -- Home's "Needs your decision" now opens somewhere you can decide
+
+Sheraj: clicking a "Needs your decision" item on Home went to the Consultation
+tab with nothing to decide. Three causes, all fixed. (1) Home passed only the
+tab name, so the tab showed whatever it had last. Consultation rows (decisions,
+Continue, Next actions) now pass their session id through an in-memory hand-off
+(`requestConsultationOpen` in `dashboard/src/lib/settings.ts`, consumed in
+`ConsultationPanel.tsx`). A "Review the record" row opens that meeting's
+closeout review. (2) An ended meeting opened on its report, which had no way to
+approve. The backend's `report/preview` + `report/approve` had never been wired
+into the UI. `ConsultationSummary.tsx` now shows a banner when the record is
+unapproved ("Review and approve", back to closeout) or stale/closed-out-unapproved
+("Read and approve": a modal showing the exact preview, approval bound to its
+revision per rule 102). (3) The closeout button said "Save the record" while it
+also approved it; it now says "Approve the record" and explains. The archive
+marks "Waiting for your approval"; Home's detail line says what opening does;
+rule 120 gained a bullet. Verified: tsc clean, `test_live_consultation` 988/988,
+focus 19/19. Read-only against the real DB, all 6 current Home record items
+route to closeout. Not yet: clicked through in a real browser, and the API has
+not been restarted, so Home's new detail wording shows after the next restart.
+The backend change is only that string.
+
+### 2026-09-23 -- Claude Code (Opus 5.5) -- Abigail security audit: rules 138-139, tunnel paths anchored
+
+Sheraj asked to tackle Abigail's security, remembering "something about her
+being on an open port". Probed from outside through the real tunnel
+(`secretary.peaceantz.com`): only `/whatsapp/webhook` (signature-gated, 403
+unsigned) and `/whatsapp/privacy` answer. The Secretary's pages 404 at the
+tunnel, and paths that slipped the tunnel's unanchored regex were 401'd by
+the owner gate. The open port he remembered is almost certainly the pre-rule-70
+`0.0.0.0` + wildcard-CORS API, fixed 2026-08-19. Anchored the ingress paths in
+`~/.cloudflared/config.yml` (backup `config.yml.bak-2026-09-23`, outside the
+repo) and restarted the tunnel. **Found and NOT changed:** the Ollama app's
+"Expose Ollama to the network" setting is on (`0.0.0.0:11434`, firewall
+allows it on Public networks, and the Wi-Fi profile is Public). That is
+Sheraj's setting to turn off in Ollama's settings.
+
+Code fixes (rule 138 in `docs/rules/api.md`, rule 139 in `secretary.md`):
+- A held action's description shows its content (`describe_held_call`).
+- A bare "approve" won't run a held `secretary_tool` action.
+- Calendar invites from others are outside content: `gcal._slim.from_others`,
+  withheld from the system-prompt glance, and a search that surfaces one taints
+  the turn.
+- Notes, tasks and reminders saved in a tainted turn are marked
+  (`outside_notes`, `from_outside`) and kept out of her prompt until Sheraj taps
+  Keep in the new Secretary-tab card (`/secretary/outside*`). This was Sheraj's
+  pick of three options.
+- `executor.begin_round` closes rule 72's admitted same-round gap.
+- Guest and stranger WhatsApp limits (`wa_rate` table).
+- Guest threads read through `get_guest_messages`.
+- Duplicate contact names are refused.
+- The webhook's verify-token handshake is constant-time.
+
+Verified: `test_secretary_injection` 50 -> 110 checks, and four deliberate
+breaks of the fixes were each caught. Every other suite unchanged and green,
+`tsc` clean. The API was restarted and the new endpoints answer on the real DB
+(migrations applied; 0 outside items, 0 pending). The real contacts list has no
+name clashes. Not yet done: commit (awaiting Sheraj), and seeing the
+Keep/Discard card with a real email-driven note in a live chat.
 
 ### 2026-09-16 (later) -- Claude Code (Sonnet 5) -- Focus gets real detail, Full map gets coherent (rules 136-137), stage 4 of the MeetMap-inspired rework
 

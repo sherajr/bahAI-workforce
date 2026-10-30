@@ -259,6 +259,15 @@ def _calendar_context() -> tuple[str, dict]:
         event_map[ref] = ev
         when = ev["start"].replace("T", " ")[:16]
         own = "yours" if ev["editable_by_secretary"] else f"cal: {ev['calendar_name'] or 'other'}"
+        if ev.get("from_others"):
+            # Rule 138: this is her SYSTEM prompt, where every word reads as
+            # Sheraj's. An invite's title and place were written by whoever
+            # sent it, so they stay out; search_calendar shows them, labelled
+            # and with the turn held, when she actually needs them.
+            sender = ev.get("organizer") or "someone else"
+            lines.append(f"- [{ref}] {when} | (invite from {sender} — title withheld here; "
+                         f"call search_calendar to read it) | ({own})")
+            continue
         loc = f" @ {ev['location']}" if ev["location"] else ""
         lines.append(f"- [{ref}] {when} | {ev['summary']}{loc} | {','.join(ev['tags'])} | ({own})")
     return "### Today & tomorrow at a glance\n" + "\n".join(lines), event_map
@@ -274,10 +283,23 @@ def _build_system_prompt() -> tuple[str, dict]:
     notes = store.read_all_memory_notes()
     if notes:
         known.append(f"### Your saved notes about Sheraj\n{notes}")
+    # Rule 138: anything saved in a turn that read outside content is listed
+    # by existence only. Its wording would otherwise sit in this prompt as if
+    # he had said it, in every future turn, where the injection hold never
+    # looks.
+    outside = store.list_outside_items()
+    if outside:
+        known.append(
+            f"### Saved from outside content, waiting for Sheraj\n{len(outside)} item(s) you "
+            "saved while reading an email, document or someone else's invite. Their wording "
+            "is withheld until he taps Keep in the Secretary tab — if he asks, tell him they "
+            "are waiting there; never guess what they say.")
     tasks = store.get_open_tasks()
     if tasks:
         lines = "\n".join(
-            f"- [{t['id']}] {t['description']}" + (f" (due {t['due']})" if t["due"] else "")
+            (f"- [{t['id']}] (from outside content — wording withheld until he keeps it)"
+             if t.get("from_outside") else f"- [{t['id']}] {t['description']}")
+            + (f" (due {t['due']})" if t["due"] else "")
             for t in tasks)
         known.append(f"### His open tasks\n{lines}")
 
@@ -291,7 +313,9 @@ def _build_system_prompt() -> tuple[str, dict]:
     if reminders:
         lines = "\n".join(f"- [{r['id']}] {r['fire_at']}"
                           + (f" ({r['recurrence']})" if r["recurrence"] else "")
-                          + f": {r['message']}" for r in reminders[:10])
+                          + (": (from outside content — wording withheld)" if r.get("from_outside")
+                             else f": {r['message']}")
+                          for r in reminders[:10])
         known.append(f"### Pending reminders\n{lines}")
 
     # ALWAYS stated, including when empty. Omitting the section when nothing is
@@ -398,6 +422,14 @@ def _handle_approval_shortcut(text: str) -> str | None:
                    "; ".join(f"#{p['id']} {p['description']}" for p in pending)
     elif len(pending) == 1:
         target = pending[0]
+        if target["kind"] == "secretary_tool" and verb != "reject":
+            # Rule 138: this one was written in a turn that read outside
+            # content -- possibly by that content. A bare "approve" is too easy
+            # to send without reading, so it takes the number, and the reply
+            # shows exactly what the number would do.
+            return (f"This one came from a conversation where I'd read outside content, "
+                    f"so please check it and reply \"approve {target['id']}\" if it's right:\n"
+                    f"#{target['id']} {target['description']}")
     else:
         return "Which one? " + "; ".join(f"#{p['id']} {p['description']}" for p in pending)
     if verb == "reject":
@@ -589,7 +621,7 @@ def guest_chat(contact: dict, user_message: str) -> dict:
     store.add_message("user", user_message, channel="whatsapp", sender=name)
 
     guest_system = _GUEST_SYSTEM.format(name=name)
-    history = store.get_recent_messages(HISTORY_WINDOW, thread=name)
+    history = store.get_guest_messages(name, HISTORY_WINDOW)
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
     reply = call_claude(messages, system=guest_system, model=_her_model())

@@ -5,7 +5,7 @@
 import type {
   AgentStatus, CanvaStatus, CardLanguage, Contact, EditProductPayload, EditProductResult,
   EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobBase, JobStep, JobSummary, PipelineResult,
-  GoogleStatus, LayoutOptions, LayoutRenderResult, NoteRow, PendingApproval, PendingXPost,
+  GoogleStatus, LayoutOptions, LayoutRenderResult, NoteRow, OutsideItem, PendingApproval, PendingXPost,
   AvailableOutcomes, GatheringDetail, GatheringStage, GatheringSummary,
   HomeSummary,
   ProductLayout, ProductRow, ProductsPage, RegenerateCardImageResult,
@@ -30,7 +30,7 @@ import type {
   VerifiedWriting,
   ConsultationParticipant, ConsultationTurn, DiarizeResult, ReportResult, ScheduledSpeech,
   ActionStatus, ConsultationAction, ConsultationDecision, ConsultationStateMap, MapItem,
-  ConceptGraph, GraphRelation, OrganizePreview,
+  ConceptGraph, GraphRelation, OrganizePreview, RecordApproval, RecordPreview,
 } from "./consultationTypes";
 
 export const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -776,6 +776,10 @@ export const api = {
     });
     return res;
   },
+  getOutsideItems: () =>
+    request<{ items: OutsideItem[] }>("GET", "/secretary/outside", undefined, { silent: true }),
+  resolveOutsideItem: (kind: OutsideItem["kind"], id: number, keep: boolean) =>
+    post<{ result: string }>(`/secretary/outside/${kind}/${id}`, { keep }),
   getGoogleStatus: () =>
     request<GoogleStatus>("GET", "/google/status", undefined, { silent: true }),
   getWhatsAppStatus: () =>
@@ -1369,6 +1373,13 @@ export const api = {
     post<DiarizeResult>(`/live-consultation/sessions/${id}/diarize`, {}),
   makeConsultationReport: (id: string) =>
     post<ReportResult>(`/live-consultation/sessions/${id}/report`, {}),
+  /** Reading the record before putting a name to it (rule 102). Free. */
+  previewConsultationRecord: (id: string) =>
+    get<RecordPreview>(`/live-consultation/sessions/${id}/report/preview`),
+  /** Bound to the revision that was on screen: a change in between is a 409
+   *  with the reason, never an approval of words nobody read (rule 102). */
+  approveConsultationRecord: (id: string, revision: number) =>
+    post<RecordApproval>(`/live-consultation/sessions/${id}/report/approve`, { revision }),
 
   /** Silent on purpose: this reports a fault, and a failure to report one must
    *  not raise a second banner on top of the first. */

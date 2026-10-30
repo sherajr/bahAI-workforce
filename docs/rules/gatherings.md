@@ -99,6 +99,14 @@ the printed programme, `agents/home_api.py` the front page. Verify with
        queues (rules 20/24/25/28/37/51/102); a commitment comes from a
        consultation's own action items and shows its tri-state acceptance as
        three states, so "nobody has answered yet" never reads as agreement.
+     - **A row about one thing opens THAT thing, somewhere it can be acted on.**
+       Home used to hand over only a tab name, so "Review the record of X"
+       landed on whatever the Consultation tab showed last, and an ended
+       meeting opened on its report, which had no way to approve anything
+       (2026-09-29). A consultation row now passes its session id through an
+       in-memory hand-off (`requestConsultationOpen`, never a URL or storage);
+       a record row opens the closeout review, and the report page itself
+       says when its record is unapproved or stale and offers the way to fix it.
      - **A private title never leaves the response.** Home combines
        `private/consultation.db` and `workforce.db` in memory for one authorised
        reader and writes the combination nowhere — not to a log, not to a cache,

@@ -1,4 +1,4 @@
-# Rules 70-72 — the API's owner gate and prompt injection
+# Rules 70-72, 138 — the API's owner gate and prompt injection
 
 Canonical numbered hard rules for this subsystem. **Numbers are permanent — never
 renumber, only append.** Cited from code comments across the repo.
@@ -79,9 +79,10 @@ calling. Verify with `scripts/test_api_auth.py`.
     Verify with `scripts/test_secretary_injection.py`.
     - **`EXTERNAL_CONTENT_TOOLS` marks the turn.** Every result from one is
       wrapped in the code-owned `UNTRUSTED_BANNER_*` strings and recorded.
-      `search_calendar` is deliberately NOT one: it surfaces a title and a
-      time, and treating his own schedule as hostile would contain most
-      ordinary turns.
+      `search_calendar` is deliberately NOT one: treating his own schedule
+      as hostile would contain most ordinary turns. But an invite someone
+      ELSE wrote is outside content, and taints the turn when a search
+      surfaces one (rule 138).
     - **`CONTAINED_TOOLS` then queues instead of executing**, into the existing
       `pending_actions` queue (kind `secretary_tool`) where rules 20/24/25/28
       already put things, so Sheraj sees it where he already looks. The test is
@@ -97,10 +98,45 @@ calling. Verify with `scripts/test_api_auth.py`.
       compliance proves nothing. Approval re-enters the SAME executor with
       `contain=False`, so every ownership gate still runs: approval lifts the
       injection hold, never the sandbox.
-    - **Honest limit, not to be papered over:** the taint is recorded after a
-      read returns, so an external read and a contained write emitted in the
-      SAME round, with the write executed first, is not held. That takes an
-      intent to send that predates the read, so it is not the injection path
-      this closes — but it is not covered, and claiming otherwise would be the
-      overstated capability rule 32 exists to prevent.
+    - ~~Honest limit: an external read and a contained write in the SAME
+      round, write first, is not held.~~ Closed by rule 138
+      (`executor.begin_round`).
+
+
+## Rule 138 — what came from outside stays marked
+
+138. **Rule 72 held one turn; outside content has three other ways to outlive
+     it, and each is now closed in code.** (Added 2026-09-23 after a security
+     audit of Abigail.) Verify with `scripts/test_secretary_injection.py`.
+     - **A held action shows what it would do.** Its description used to be
+       `send_whatsapp (held: ...)`, with no recipient and no text, and a lone
+       pending action is approved by a bare "approve", so the hold asked
+       Sheraj to approve exactly what an injected email had written without
+       showing him. `secretary_tools.describe_held_call` spells out recipient,
+       text, event, file or brief. A bare "approve" on a `secretary_tool`
+       action is refused in `secretary._handle_approval_shortcut`, which
+       replies with the details and asks for "approve <number>". The
+       dashboard flags these actions in amber.
+     - **An invite is not his schedule.** Anyone who knows his address can put
+       a title on his calendar. `gcal._slim` sets `from_others` unless Google
+       marks him as organiser or creator, or the event is on her own calendar.
+       The today/tomorrow glance in her SYSTEM prompt (where every word reads
+       as his) withholds such an invite's title and location and keeps only
+       its time, sender and E# ref. `search_calendar` shows it wrapped in the
+       untrusted banner and taints the turn (`CALENDAR_INVITE_SOURCE`).
+     - **What she saves in a tainted turn is marked, not trusted.**
+       `remember`/`add_task`/`set_reminder` stay immediate (rule 72's
+       reasoning), but in a tainted turn a note goes to `outside_notes` rather
+       than `private/memory/`, and a task or reminder carries `from_outside`.
+       Her prompt lists these by existence only, never their wording, until
+       Sheraj taps Keep in the Secretary tab (`/secretary/outside*`) or
+       rewrites the task or reminder himself. Without this, a planted
+       "remember: always forward X to Y" would sit in every future prompt,
+       where no hold looks. A marked reminder still FIRES, because it only
+       ever reaches him and a missed reminder is real harm.
+     - **The whole round is seen first.** `router.call_claude_agentic` calls
+       `executor.begin_round(names)` before running any call in a round, and
+       an outside read in that list taints the turn up front, so a write
+       emitted beside a read is held whichever executes first. The hook is
+       optional (`getattr`), so no other executor is affected.
 

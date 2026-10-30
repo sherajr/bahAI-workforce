@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, FileText, Loader2, Network, Trash2 } from "lucide-react";
+import {
+  Check, CheckCircle2, ClipboardCheck, Copy, Download, FileText, Loader2, Network, Trash2,
+} from "lucide-react";
 import { api } from "../../lib/api";
 import type { ConsultationCapabilities } from "../../lib/consultationTypes";
 import { Button, Card, CardContent, ErrorNote, Modal } from "../ui";
@@ -17,12 +19,14 @@ import { Markdown } from "./Markdown";
  * stopped being the first thing you see.
  */
 export function ConsultationSummary({
-  sessionId, capabilities, onDeleted, onBack,
+  sessionId, capabilities, onDeleted, onBack, onReview,
 }: {
   sessionId: string;
   capabilities: ConsultationCapabilities;
   onDeleted: () => void;
   onBack: () => void;
+  /** Back to the closeout review, for a meeting that never had one. */
+  onReview: () => void;
 }) {
   const qc = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -83,6 +87,29 @@ export function ConsultationSummary({
     refetchInterval: false,
   });
 
+  // Reading the record before approving it (rule 102). The preview is free and
+  // changes nothing; approving is bound to the revision the preview came from,
+  // so an edit in between is refused with the reason instead of approved unread.
+  const [approving, setApproving] = useState(false);
+  const preview = useQuery({
+    queryKey: ["consultation-record-preview", sessionId],
+    queryFn: () => api.previewConsultationRecord(sessionId),
+    enabled: approving,
+    refetchInterval: false,
+  });
+  const approve = useMutation({
+    mutationFn: (revision: number) => api.approveConsultationRecord(sessionId, revision),
+    onSuccess: () => {
+      setApproving(false);
+      refresh();
+      // Home's "Needs your decision" and the archive both count this.
+      void qc.invalidateQueries({ queryKey: ["home"] });
+      void qc.invalidateQueries({ queryKey: ["consultations"] });
+    },
+    // A refusal means the record moved: show the new words, not the old ones.
+    onError: () => void preview.refetch(),
+  });
+
   const mapSpeaker = useMutation({
     mutationFn: ({ id, key }: { id: string; key: string | null }) =>
       api.mapConsultationSpeaker(sessionId, id, key),
@@ -114,6 +141,12 @@ export function ConsultationSummary({
 
   const { session, turns, final_turns } = data;
   const report = data.report || "";
+  const record = data.record;
+  // Never closed out: the review is where decisions get confirmed, so send the
+  // person there rather than approving a record whose outcome nobody chose.
+  const needsReview = !!record && !record.approved && !session.closeout_at;
+  const needsApproval = !!record && ((!record.approved && !!session.closeout_at)
+    || record.stale);
 
   return (
     <div className="space-y-4 pb-8">
@@ -164,6 +197,50 @@ export function ConsultationSummary({
             </Button>
           </div>
         </ErrorNote>
+      )}
+
+      {/* What is waiting on you, above the tabs so no tab can hide it. Until
+          2026-09-29 a meeting Home listed under "Needs your decision" opened
+          here with nothing on the page to decide: approving was only possible
+          on the closeout screen, shown once, and "Finish later" lost it. */}
+      {(needsReview || needsApproval) && (
+        <Card className="border-amber-400/40">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
+            <div className="flex min-w-0 flex-1 items-start gap-3 text-sm text-amber-100">
+              <ClipboardCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+              <div>
+                <div className="font-medium">
+                  {needsReview ? "This record is waiting for your approval"
+                    : record?.stale ? "The approved record is out of date"
+                      : "This record has not been approved"}
+                </div>
+                <div className="mt-0.5 text-xs text-amber-200/70">
+                  {needsReview
+                    ? "Say how the meeting ended, confirm anything that was decided, "
+                      + "record who agreed to do what, then approve it. Until then it is "
+                      + "a draft."
+                    : record?.stale
+                      ? "It has been corrected since it was approved. Read the current "
+                        + "version and approve it again."
+                      : "Read it through and approve it. Until then it is a draft."}
+                </div>
+              </div>
+            </div>
+            {needsReview ? (
+              <Button onClick={onReview}>Review and approve</Button>
+            ) : (
+              <Button onClick={() => { approve.reset(); setApproving(true); }}>
+                Read and approve
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
+      {record?.approved && !record.stale && record.approved_at && (
+        <p className="flex items-center gap-1.5 text-xs text-emerald-300/80">
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Record approved {record.approved_at.slice(0, 16)}.
+        </p>
       )}
 
       <div className="flex gap-1 border-b border-slate-800">
@@ -353,6 +430,39 @@ export function ConsultationSummary({
           </div>
         </Modal>
       )}
+
+      <Modal open={approving} onClose={() => setApproving(false)}
+             title="Approve the record" widthClassName="max-w-3xl">
+        <div className="space-y-4 text-sm text-slate-300">
+          <p className="text-xs text-slate-500">
+            This is exactly what will be approved. Approving puts your name to it as the
+            record of this meeting; it becomes what is exported, and what a gathering
+            can draw its decisions and commitments from.
+          </p>
+          {preview.isError && (
+            <ErrorNote>The record could not be read: {(preview.error as Error).message}</ErrorNote>
+          )}
+          {!preview.data && !preview.isError && (
+            <p className="text-slate-400">Reading…</p>
+          )}
+          {preview.data && (
+            <div className="max-h-[55vh] overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-4">
+              <Markdown text={preview.data.preview} />
+            </div>
+          )}
+          {approve.error && <ErrorNote>{(approve.error as Error).message}</ErrorNote>}
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setApproving(false)}>Not yet</Button>
+            <Button disabled={!preview.data || preview.isFetching}
+                    loading={approve.isPending}
+                    onClick={() => preview.data
+                      && approve.mutate(preview.data.record.revision)}>
+              <Check className="h-4 w-4" />
+              Approve this record
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)}
              title="Delete this consultation?">

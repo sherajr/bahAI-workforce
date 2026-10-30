@@ -561,6 +561,18 @@ export interface SecretaryStatus {
   whatsapp_configured: boolean;
   pending_reminders: number;
   pending_approvals: number;
+  outside_items: number;
+}
+
+// Rule 138: something Abigail saved while reading outside content (an email,
+// a document, someone else's invite). Saved, but not his own words until kept.
+export interface OutsideItem {
+  kind: "note" | "task" | "reminder";
+  id: number;
+  text: string;
+  detail: string;
+  source: string;
+  created_at: string;
 }
 
 export interface SecretaryEvent {

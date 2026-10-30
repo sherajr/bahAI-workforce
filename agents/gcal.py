@@ -167,6 +167,14 @@ def _slim(ev: dict) -> dict:
     }
     slim["tags"] = tag_event(slim)
     slim["editable_by_secretary"] = is_her_calendar(slim["calendar_id"])
+    # Rule 138: anyone who knows his address can put an invite on his calendar,
+    # so a title, place or note Sheraj did not write is outside content, same
+    # as an email. Google marks his own events with organizer/creator.self.
+    organizer = ev.get("organizer") or {}
+    creator = ev.get("creator") or {}
+    slim["organizer"] = organizer.get("email", "")
+    slim["from_others"] = not (slim["editable_by_secretary"]
+                               or organizer.get("self") or creator.get("self"))
     return slim
 
 

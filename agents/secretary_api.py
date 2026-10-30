@@ -266,6 +266,62 @@ def whatsapp_webhook_verify(request: Request):
     return PlainTextResponse(challenge)
 
 
+# Rule 139: what anyone other than Sheraj can make this number do. Every guest
+# message is a paid Claude call on his key, and every stranger's message used to
+# buy an automatic reply, a dashboard notification and a DB write, with no
+# ceiling on either. Generous for a real conversation; a flood stops here.
+GUEST_MAX_PER_HOUR = 20
+GUEST_MAX_PER_DAY = 60
+GUEST_MAX_CHARS = 2000          # what one guest message may send to the model
+STRANGER_REPLIES_PER_DAY = 1    # the canned reply + notification, per number
+
+
+def _handle_guest(phone: str, contact: dict, text: str):
+    from agents import whatsapp, secretary, secretary_store
+    name = contact["name"]
+    hour = secretary_store.count_recent_inbound(phone, "guest", 1)
+    day = secretary_store.count_recent_inbound(phone, "guest", 24)
+    secretary_store.record_inbound_rate(phone, "guest")
+    if hour >= GUEST_MAX_PER_HOUR or day >= GUEST_MAX_PER_DAY:
+        # Still kept, so Sheraj reads every word in the Secretary tab -- only
+        # the paid reply stops. One notice to each side when the limit is
+        # first reached, never one per message.
+        secretary_store.add_message("user", text, channel="whatsapp", sender=name)
+        if hour == GUEST_MAX_PER_HOUR or day == GUEST_MAX_PER_DAY:
+            secretary_store.add_notification(
+                "whatsapp", f"{name} reached Abigail's message limit - she has paused "
+                            "replying to them for now; their messages are still in the Secretary tab")
+            try:
+                whatsapp.send_text(phone, "I've passed your messages on to Sheraj - I'll "
+                                          "be able to reply again a little later.")
+            except Exception:
+                pass
+        return
+    if len(text) > GUEST_MAX_CHARS:
+        text = text[:GUEST_MAX_CHARS] + " [message cut short - too long]"
+    try:
+        result = secretary.guest_chat(contact, text)
+        whatsapp.send_text(phone, result["reply"])
+    except Exception as e:
+        secretary_store.add_notification("scheduler_error",
+            f"WhatsApp guest reply to {name} failed: {whatsapp.why(e)}")
+
+
+def _handle_stranger(phone: str):
+    from agents import whatsapp, secretary_store
+    already = secretary_store.count_recent_inbound(phone, "stranger", 24)
+    secretary_store.record_inbound_rate(phone, "stranger")
+    if already >= STRANGER_REPLIES_PER_DAY:
+        return  # rule 139: answered once today already; say nothing more
+    try:
+        whatsapp.send_text(phone, "This is Abigail, Sheraj's personal assistant — "
+                                  "I can only take instructions from him directly.")
+    except Exception:
+        pass
+    secretary_store.add_notification(
+        "whatsapp", f"Message from a non-owner number ({phone[-4:]}) — auto-replied, not processed")
+
+
 def _handle_whatsapp_message(msg: dict):
     """Runs in a background task so the webhook can ack Meta immediately —
     Meta may retry the whole webhook delivery if it doesn't get a fast 200,
@@ -295,20 +351,9 @@ def _handle_whatsapp_message(msg: dict):
     else:
         contact = secretary_store.get_contact_by_phone(phone)
         if contact and contact.get("allowlisted"):
-            try:
-                result = secretary.guest_chat(contact, msg["text"])
-                whatsapp.send_text(phone, result["reply"])
-            except Exception as e:
-                secretary_store.add_notification("scheduler_error",
-                    f"WhatsApp guest reply to {contact['name']} failed: {whatsapp.why(e)}")
+            _handle_guest(phone, contact, msg["text"])
         else:
-            try:
-                whatsapp.send_text(phone, "This is Abigail, Sheraj's personal assistant — "
-                                          "I can only take instructions from him directly.")
-            except Exception:
-                pass
-            secretary_store.add_notification(
-                "whatsapp", f"Message from a non-owner number ({phone[-4:]}) — auto-replied, not processed")
+            _handle_stranger(phone)
 
 
 @router.post("/whatsapp/webhook")
@@ -372,6 +417,7 @@ def secretary_status():
         "whatsapp_configured": whatsapp.is_configured(),
         "pending_reminders": len(secretary_store.get_pending_reminders()),
         "pending_approvals": len(secretary_store.get_pending_actions()),
+        "outside_items": len(secretary_store.list_outside_items()),
     }
 
 
@@ -430,6 +476,28 @@ def secretary_resolve_approval(action_id: int, req: ApprovalRequest):
     return {"result": secretary.execute_pending_action(action_id)}
 
 
+# --- Saved from outside content (rule 138) -- Sheraj keeps or discards ---
+
+@router.get("/secretary/outside")
+def secretary_outside_items():
+    from agents import secretary_store
+    secretary_store.init_db()
+    return {"items": secretary_store.list_outside_items()}
+
+
+class OutsideResolveRequest(BaseModel):
+    keep: bool
+
+
+@router.post("/secretary/outside/{kind}/{item_id}")
+def secretary_resolve_outside(kind: str, item_id: int, req: OutsideResolveRequest):
+    from agents import secretary_store
+    secretary_store.init_db()
+    if not secretary_store.resolve_outside_item(kind, item_id, req.keep):
+        raise HTTPException(status_code=404, detail="That item is no longer waiting.")
+    return {"result": "kept" if req.keep else "discarded"}
+
+
 # --- WhatsApp contacts (the allowlist — owner-controlled only, never
 # LLM-writable; see agents/secretary_tools.py's SEND_WHATSAPP_TOOL docstring) ---
 
@@ -452,7 +520,10 @@ def secretary_add_contact(req: ContactRequest):
     secretary_store.init_db()
     if not req.name.strip() or not req.phone.strip():
         raise HTTPException(status_code=400, detail="Name and phone are both required")
-    cid = secretary_store.add_contact(req.name.strip(), req.phone.strip(), req.allowlisted)
+    try:
+        cid = secretary_store.add_contact(req.name.strip(), req.phone.strip(), req.allowlisted)
+    except ValueError as e:  # a duplicate name (rule 139) -- say which
+        raise HTTPException(status_code=400, detail=str(e))
     return {"id": cid}
 
 

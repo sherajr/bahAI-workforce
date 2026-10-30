@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { api, BASE } from "../lib/api";
 import type {
-  Contact, PendingApproval, SecretaryStatus, SecretaryUpcoming, WhatsAppStatus,
+  Contact, OutsideItem, PendingApproval, SecretaryStatus, SecretaryUpcoming, WhatsAppStatus,
 } from "../lib/types";
 import { Card, CardContent, CardHeader, CardTitle, Button, BadgePill, ErrorNote } from "./ui";
 
@@ -60,6 +60,8 @@ export function SecretaryPanel() {
   const [upcoming, setUpcoming] = useState<SecretaryUpcoming | null>(null);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [approvalsError, setApprovalsError] = useState<string | null>(null);
+  const [outside, setOutside] = useState<OutsideItem[]>([]);
+  const [outsideError, setOutsideError] = useState<string | null>(null);
   const [waStatus, setWaStatus] = useState<WhatsAppStatus | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [contactsError, setContactsError] = useState<string | null>(null);
@@ -87,7 +89,15 @@ export function SecretaryPanel() {
         setApprovals([]);
         setApprovalsError(err instanceof Error ? err.message : String(err));
       });
-      
+
+    setOutsideError(null);
+    api.getOutsideItems()
+      .then((r) => setOutside(r.items))
+      .catch((err) => {
+        setOutside([]);
+        setOutsideError(err instanceof Error ? err.message : String(err));
+      });
+
     api.getWhatsAppStatus().then(setWaStatus).catch(() => setWaStatus(null));
     
     setContactsError(null);
@@ -162,6 +172,15 @@ export function SecretaryPanel() {
       refreshChat();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not resolve the approval.");
+    }
+  };
+
+  const resolveOutside = async (item: OutsideItem, keep: boolean) => {
+    try {
+      await api.resolveOutsideItem(item.kind, item.id, keep);
+      refreshSide();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update that item.");
     }
   };
 
@@ -374,14 +393,55 @@ export function SecretaryPanel() {
                 ) : (
                   <>
                     <p className="text-xs text-slate-500">
-                      These touch calendars Abigail doesn't own, so nothing happens until you say so.
+                      These reach beyond Abigail's own calendar and folder, so nothing happens until you say so.
                     </p>
                     {approvals.map((a) => (
                       <div key={a.id} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+                        {a.kind === "secretary_tool" && (
+                          <div className="mb-1 text-xs text-amber-300">
+                            She asked for this after reading outside content. Check it's really what you want.
+                          </div>
+                        )}
                         <div className="text-sm text-slate-200">{a.description}</div>
                         <div className="mt-2 flex gap-2">
                           <Button onClick={() => resolveApproval(a.id, true)}>Approve</Button>
                           <Button variant="ghost" onClick={() => resolveApproval(a.id, false)}>Reject</Button>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Rule 138: saved while reading outside content — not his words until kept */}
+          {(outside.length > 0 || outsideError !== null) && (
+            <Card className="border-amber-400/30">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <StickyNote className="h-4 w-4 text-amber-300" />
+                  Saved from outside content
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {outsideError !== null ? (
+                  <ErrorNote>{outsideError}</ErrorNote>
+                ) : (
+                  <>
+                    <p className="text-xs text-slate-500">
+                      Abigail saved these while reading an email, a document or someone else's
+                      invite. She won't treat them as your own words until you keep them.
+                    </p>
+                    {outside.map((o) => (
+                      <div key={`${o.kind}-${o.id}`} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+                        <div className="text-sm text-slate-200">{o.text}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {o.detail} · from {o.source}
+                        </div>
+                        <div className="mt-2 flex gap-2">
+                          <Button onClick={() => resolveOutside(o, true)}>Keep</Button>
+                          <Button variant="ghost" onClick={() => resolveOutside(o, false)}>Discard</Button>
                         </div>
                       </div>
                     ))}

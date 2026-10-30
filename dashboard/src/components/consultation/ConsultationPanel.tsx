@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { KeyRound } from "lucide-react";
 import { api } from "../../lib/api";
-import { getConsultationUi, patchConsultationUi } from "../../lib/settings";
+import {
+  clearConsultationOpen, getConsultationUi, patchConsultationUi, peekConsultationOpen,
+} from "../../lib/settings";
 import { Card, CardContent, ErrorNote } from "../ui";
 import { ConsultationArchive } from "./ConsultationArchive";
 import { ConsultationCloseout } from "./ConsultationCloseout";
@@ -10,7 +12,7 @@ import { ConsultationSetup } from "./ConsultationSetup";
 import { ConsultationSummary } from "./ConsultationSummary";
 import { LiveConsultationSession } from "./LiveConsultationSession";
 
-type View = "archive" | "setup" | "live" | "closeout" | "summary";
+type View = "archive" | "setup" | "live" | "closeout" | "summary" | "opening";
 
 /**
  * The Consultation tab.
@@ -22,11 +24,17 @@ type View = "archive" | "setup" | "live" | "closeout" | "summary";
  */
 export function ConsultationPanel() {
   const saved = getConsultationUi();
+  // A link from Home to one particular consultation beats whatever this tab
+  // showed last: showing the old view first would put the wrong meeting on
+  // screen for a moment, under a heading that says it is waiting for you.
+  const [linked] = useState(() => peekConsultationOpen());
   const [view, setView] = useState<View>(
-    saved.view === "setup" || saved.view === "summary" || saved.view === "closeout"
-      ? (saved.view as View) : "archive");
+    linked ? "opening"
+      : saved.view === "setup" || saved.view === "summary" || saved.view === "closeout"
+        ? (saved.view as View) : "archive");
   const [sessionId, setSessionId] = useState<string | null>(saved.sessionId);
   const [autoStart, setAutoStart] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
 
   const { data: capabilities, error } = useQuery({
     queryKey: ["consultation-capabilities"],
@@ -38,12 +46,37 @@ export function ConsultationPanel() {
     patchConsultationUi({ view, sessionId });
   }, [view, sessionId]);
 
-  const openSession = async (id: string) => {
-    setSessionId(id);
-    const detail = await api.getConsultation(id);
-    setAutoStart(false);
-    setView(detail.session.status === "ended" ? "summary" : "live");
+  /**
+   * `review` is how Home's "Needs your decision" opens a meeting: an ended one
+   * whose record nobody has approved and that was never closed out goes to the
+   * closeout review, because that is the one screen where the decisions get
+   * confirmed and the record approved. Opening it on the report instead is
+   * what used to leave nothing on screen to decide.
+   */
+  const openSession = async (id: string, purpose: "review" | "open" = "open") => {
+    setOpenError(null);
+    try {
+      const detail = await api.getConsultation(id);
+      const s = detail.session;
+      setSessionId(id);
+      setAutoStart(false);
+      if (s.status !== "ended") setView("live");
+      else if (purpose === "review" && !s.closeout_at && !detail.record?.approved) {
+        setView("closeout");
+      } else setView("summary");
+    } catch (e) {
+      setOpenError(`That consultation could not be opened: ${(e as Error).message}`);
+      setView("archive");
+    }
   };
+
+  useEffect(() => {
+    if (!linked) return;
+    clearConsultationOpen();
+    void openSession(linked.sessionId, linked.purpose);
+    // Once, on mount: the link is a single hand-off, not a standing setting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (error) return <ErrorNote>{(error as Error).message}</ErrorNote>;
   if (!capabilities) return <p className="text-sm text-slate-400">Loading…</p>;
@@ -73,6 +106,12 @@ export function ConsultationPanel() {
             the consultation map will not be built.
           </CardContent>
         </Card>
+      )}
+
+      {openError && <ErrorNote>{openError}</ErrorNote>}
+
+      {view === "opening" && (
+        <p className="text-sm text-slate-400">Opening the consultation…</p>
       )}
 
       {view === "archive" && (
@@ -108,6 +147,7 @@ export function ConsultationPanel() {
           capabilities={capabilities}
           onDeleted={() => { setSessionId(null); setView("archive"); }}
           onBack={() => setView("archive")}
+          onReview={() => setView("closeout")}
         />
       )}
 
