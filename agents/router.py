@@ -463,6 +463,12 @@ def call_claude_agentic(messages: list[dict], system: str, tools: list[dict],
                              "could you try asking again?")
 
         working.append({"role": "assistant", "content": response.content})
+        # An executor may want to see the whole round before any call in it
+        # runs -- the Secretary's injection hold does, so a write emitted next
+        # to an outside read is held whichever executes first (rule 138).
+        begin_round = getattr(executor, "begin_round", None)
+        if begin_round is not None:
+            begin_round([b.name for b in response.content if b.type == "tool_use"])
         tool_results = []
         for block in response.content:
             if block.type != "tool_use":

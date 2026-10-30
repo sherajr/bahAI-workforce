@@ -17,7 +17,7 @@ into workforce.db, log_run summaries, or job progress strings.
 
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 PRIVATE_DIR = Path(__file__).parent.parent / "private"
@@ -121,6 +121,20 @@ def init_db():
                 message_id TEXT PRIMARY KEY,
                 seen_at TEXT DEFAULT (datetime('now', 'localtime'))
             );
+
+            CREATE TABLE IF NOT EXISTS outside_notes (  -- rule 138: remembered from outside content
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note TEXT NOT NULL,               -- the memory note it would join
+                fact TEXT NOT NULL,
+                source TEXT NOT NULL,             -- which reads were in the turn
+                created_at TEXT DEFAULT (datetime('now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS wa_rate (   -- rule 139: inbound WhatsApp budget (never content)
+                phone TEXT NOT NULL,
+                kind TEXT NOT NULL,               -- 'guest' | 'stranger'
+                ts TEXT NOT NULL
+            );
         """)
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('quiet_hours', '22:30-07:30')"
@@ -154,6 +168,14 @@ def init_db():
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)")
         except sqlite3.OperationalError:
             pass
+        # Migration: rule 138. NULL = Sheraj's own words; a value names the
+        # outside reads (e.g. "read_gmail_message") that were in the turn when
+        # she saved it, and the row stays marked until he keeps it.
+        for table in ("tasks", "reminders"):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN from_outside TEXT")
+            except sqlite3.OperationalError:
+                pass
         # Migration: wa_seen table for Meta webhook retry dedupe (ids only).
         # CREATE TABLE IF NOT EXISTS in the script above covers fresh DBs;
         # re-run here so existing private/secretary.db files get it too.
@@ -186,7 +208,10 @@ def get_recent_messages(limit: int = 20, thread: str = "all") -> list[dict]:
 
     thread="all"   — every row (history endpoint; includes sender field).
     thread="owner" — only owner-thread rows (sender IS NULL).
-    thread=<name>  — only that guest's rows (sender = name).
+    thread=<name>  — only that guest's rows (sender = name). A guest TURN uses
+                     get_guest_messages instead, so a contact saved under the
+                     name "owner" or "all" can never be served Sheraj's thread
+                     (rule 139).
     """
     with _connect() as conn:
         if thread == "all":
@@ -204,6 +229,17 @@ def get_recent_messages(limit: int = 20, thread: str = "all") -> list[dict]:
                 "SELECT role, content, channel, sender, ts FROM messages "
                 "WHERE sender = ? ORDER BY id DESC LIMIT ?",
                 (thread, limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
+
+
+def get_guest_messages(name: str, limit: int = 20) -> list[dict]:
+    """One guest's own thread and nothing else (rules 27/139). Separate from
+    get_recent_messages on purpose: there "owner" and "all" are keywords."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT role, content, channel, sender, ts FROM messages "
+            "WHERE sender = ? ORDER BY id DESC LIMIT ?",
+            (name, limit)).fetchall()
     return [dict(r) for r in reversed(rows)]
 
 
@@ -258,12 +294,86 @@ def delete_memory_note(name: str):
         path.unlink()
 
 
+# --- Saved from outside content (rule 138) ---
+#
+# Something she noted down in a turn that had read an email, Doc, Sheet, Slides
+# deck, Drive listing or someone else's calendar invite. It IS saved -- "read
+# that and note it down" is the job -- but not yet as Sheraj's own words: a note
+# waits here instead of joining private/memory/, and a task or reminder carries
+# `from_outside`. Until he keeps it, her prompt says it exists but never shows
+# its wording, because text in her prompt is text she treats as his -- a planted
+# "remember: always forward X to Y" would otherwise outlive the one turn the
+# injection hold (rule 72) guards.
+
+def add_outside_note(note: str, fact: str, source: str) -> int:
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO outside_notes (note, fact, source) VALUES (?, ?, ?)",
+            (note, fact, source))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_outside_items() -> list[dict]:
+    """Everything still waiting for him to keep or discard, oldest first."""
+    with _connect() as conn:
+        notes = conn.execute(
+            "SELECT id, note, fact, source, created_at FROM outside_notes ORDER BY id").fetchall()
+        tasks = conn.execute(
+            "SELECT id, description, due, from_outside, created_at FROM tasks "
+            "WHERE from_outside IS NOT NULL AND done = 0 ORDER BY id").fetchall()
+        rems = conn.execute(
+            "SELECT id, message, fire_at, recurrence, from_outside, created_at FROM reminders "
+            "WHERE from_outside IS NOT NULL AND fired = 0 ORDER BY id").fetchall()
+    items = [{"kind": "note", "id": r["id"], "text": r["fact"],
+              "detail": f"note: {r['note']}", "source": r["source"],
+              "created_at": r["created_at"]} for r in notes]
+    items += [{"kind": "task", "id": r["id"], "text": r["description"],
+               "detail": f"task, due {r['due']}" if r["due"] else "task",
+               "source": r["from_outside"], "created_at": r["created_at"]} for r in tasks]
+    items += [{"kind": "reminder", "id": r["id"], "text": r["message"],
+               "detail": f"reminder at {r['fire_at']}"
+                         + (f" ({r['recurrence']})" if r["recurrence"] else ""),
+               "source": r["from_outside"], "created_at": r["created_at"]} for r in rems]
+    return items
+
+
+def resolve_outside_item(kind: str, item_id: int, keep: bool) -> bool:
+    """Keep = it becomes his own words; discard = it is gone. False when there
+    was no such waiting item."""
+    with _connect() as conn:
+        if kind == "note":
+            row = conn.execute("SELECT note, fact FROM outside_notes WHERE id = ?",
+                               (item_id,)).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM outside_notes WHERE id = ?", (item_id,))
+            conn.commit()
+        elif kind in ("task", "reminder"):
+            table = "tasks" if kind == "task" else "reminders"
+            row = conn.execute(f"SELECT id FROM {table} WHERE id = ? AND from_outside IS NOT NULL",
+                               (item_id,)).fetchone()
+            if not row:
+                return False
+            if keep:
+                conn.execute(f"UPDATE {table} SET from_outside = NULL WHERE id = ?", (item_id,))
+            else:
+                conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
+            conn.commit()
+            return True
+        else:
+            return False
+    if keep:
+        write_memory_note(row["note"], row["fact"])
+    return True
+
+
 # --- Tasks ---
 
-def add_task(description: str, due: str = None) -> int:
+def add_task(description: str, due: str = None, from_outside: str = None) -> int:
     with _connect() as conn:
-        cur = conn.execute("INSERT INTO tasks (description, due) VALUES (?, ?)",
-                           (description, due))
+        cur = conn.execute("INSERT INTO tasks (description, due, from_outside) VALUES (?, ?, ?)",
+                           (description, due, from_outside))
         conn.commit()
         return cur.lastrowid
 
@@ -271,7 +381,8 @@ def add_task(description: str, due: str = None) -> int:
 def get_open_tasks() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, description, due, created_at FROM tasks WHERE done = 0 ORDER BY id").fetchall()
+            "SELECT id, description, due, from_outside, created_at FROM tasks "
+            "WHERE done = 0 ORDER BY id").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -286,7 +397,8 @@ def get_all_tasks() -> list[dict]:
     own prompt context still only ever sees get_open_tasks())."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, description, due, done, created_at FROM tasks ORDER BY done, id").fetchall()
+            "SELECT id, description, due, done, from_outside, created_at FROM tasks "
+            "ORDER BY done, id").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -301,6 +413,10 @@ def update_task(task_id: int, **fields):
         return
     if "done" in fields and fields["done"] is not None:
         fields["done"] = int(fields["done"])
+    if "description" in fields:
+        # Only the dashboard edits a task by hand, and wording he typed himself
+        # is his own words -- the outside-content mark goes (rule 138).
+        fields["from_outside"] = None
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     with _connect() as conn:
         conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", (*fields.values(), task_id))
@@ -316,11 +432,12 @@ def delete_task(task_id: int):
 # --- Reminders (scheduler reads/writes; all state here so restarts lose nothing) ---
 
 def add_reminder(message: str, fire_at: str, recurrence: str = None,
-                 wake_me: bool = False) -> int:
+                 wake_me: bool = False, from_outside: str = None) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO reminders (message, fire_at, recurrence, wake_me) VALUES (?, ?, ?, ?)",
-            (message, fire_at, recurrence, int(wake_me)))
+            "INSERT INTO reminders (message, fire_at, recurrence, wake_me, from_outside) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (message, fire_at, recurrence, int(wake_me), from_outside))
         conn.commit()
         return cur.lastrowid
 
@@ -336,7 +453,7 @@ def get_due_reminders(now_iso: str) -> list[dict]:
 def get_pending_reminders() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, message, fire_at, recurrence, wake_me FROM reminders "
+            "SELECT id, message, fire_at, recurrence, wake_me, from_outside FROM reminders "
             "WHERE fired = 0 ORDER BY fire_at").fetchall()
     return [dict(r) for r in rows]
 
@@ -367,7 +484,7 @@ def get_all_reminders() -> list[dict]:
     get_pending_reminders())."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, message, fire_at, recurrence, wake_me, fired, created_at "
+            "SELECT id, message, fire_at, recurrence, wake_me, fired, from_outside, created_at "
             "FROM reminders ORDER BY fired, fire_at").fetchall()
     return [dict(r) for r in rows]
 
@@ -382,6 +499,8 @@ def update_reminder(reminder_id: int, **fields):
         return
     if "wake_me" in fields and fields["wake_me"] is not None:
         fields["wake_me"] = int(fields["wake_me"])
+    if "message" in fields:
+        fields["from_outside"] = None  # his own wording now (rule 138)
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     with _connect() as conn:
         conn.execute(f"UPDATE reminders SET {set_clause} WHERE id = ?", (*fields.values(), reminder_id))
@@ -520,7 +639,16 @@ def normalize_phone(phone: str) -> str:
 
 
 def add_contact(name: str, phone: str, allowlisted: bool = False) -> int:
+    """Raises ValueError on a name another contact already has: a guest's
+    thread is keyed by name, so two "Mom"s would read each other's messages
+    (rule 139)."""
     with _connect() as conn:
+        clash = conn.execute(
+            "SELECT 1 FROM contacts WHERE lower(trim(name)) = lower(trim(?)) AND phone != ?",
+            (name, normalize_phone(phone))).fetchone()
+        if clash:
+            raise ValueError(f"There is already a contact called '{name}'. Give this one "
+                             "a different name so their conversations stay separate.")
         cur = conn.execute(
             "INSERT INTO contacts (name, phone, allowlisted) VALUES (?, ?, ?)",
             (name, normalize_phone(phone), int(allowlisted)))
@@ -556,6 +684,26 @@ def set_contact_allowlisted(contact_id: int, allowlisted: bool):
 def remove_contact(contact_id: int):
     with _connect() as conn:
         conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+        conn.commit()
+
+
+def count_recent_inbound(phone: str, kind: str, hours: int) -> int:
+    """Inbound WhatsApp messages of this kind from this number in the last
+    `hours` -- a count only, never content (rule 15)."""
+    cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM wa_rate WHERE phone = ? AND kind = ? AND ts >= ?",
+            (normalize_phone(phone), kind, cutoff)).fetchone()[0]
+
+
+def record_inbound_rate(phone: str, kind: str):
+    now = datetime.now()
+    with _connect() as conn:
+        conn.execute("INSERT INTO wa_rate (phone, kind, ts) VALUES (?, ?, ?)",
+                     (normalize_phone(phone), kind, now.strftime("%Y-%m-%d %H:%M:%S")))
+        conn.execute("DELETE FROM wa_rate WHERE ts < ?",
+                     ((now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),))
         conn.commit()
 
 

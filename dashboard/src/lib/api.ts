@@ -5,7 +5,7 @@
 import type {
   AgentStatus, CanvaStatus, CardLanguage, Contact, EditProductPayload, EditProductResult,
   EtsyPublishResult, EtsyStatus, ImproveResult, Job, JobBase, JobStep, JobSummary, PipelineResult,
-  GoogleStatus, LayoutOptions, LayoutRenderResult, NoteRow, PendingApproval, PendingXPost,
+  GoogleStatus, LayoutOptions, LayoutRenderResult, NoteRow, OutsideItem, PendingApproval, PendingXPost,
   AvailableOutcomes, GatheringDetail, GatheringStage, GatheringSummary,
   HomeSummary,
   ProductLayout, ProductRow, ProductsPage, RegenerateCardImageResult,
@@ -776,6 +776,10 @@ export const api = {
     });
     return res;
   },
+  getOutsideItems: () =>
+    request<{ items: OutsideItem[] }>("GET", "/secretary/outside", undefined, { silent: true }),
+  resolveOutsideItem: (kind: OutsideItem["kind"], id: number, keep: boolean) =>
+    post<{ result: string }>(`/secretary/outside/${kind}/${id}`, { keep }),
   getGoogleStatus: () =>
     request<GoogleStatus>("GET", "/google/status", undefined, { silent: true }),
   getWhatsAppStatus: () =>

@@ -1,4 +1,4 @@
-# Rules 15-28, 50-54 — the Secretary (Abigail)
+# Rules 15-28, 50-54, 139 — the Secretary (Abigail)
 
 Canonical numbered hard rules for this subsystem. **Numbers are permanent — never
 renumber, only append.** Cited from code comments across the repo.
@@ -123,6 +123,36 @@ Google access spans Calendar/Gmail/Drive/Docs/Sheets/Slides
     24-hour free-form window per `whatsapp.within_24h_window()` has closed);
     anyone else queues as a `pending_actions` row of kind `whatsapp_send`, the
     same unified queue as rules 20/24/25.
+
+
+## Rule 139 — what anyone but Sheraj can make her number do
+
+139. **Guests and strangers are bounded, and each guest's thread is theirs
+     alone.** (Added 2026-09-23 after a security audit.) Every guest message
+     is a paid Claude call on Sheraj's key, and every stranger's message used
+     to buy an automatic reply, a notification and a DB write, with no
+     ceiling on either. In `secretary_api.py`:
+     - A guest gets `GUEST_MAX_PER_HOUR` / `GUEST_MAX_PER_DAY` paid replies,
+       and one message sends at most `GUEST_MAX_CHARS` to the model. Past the
+       limit their messages are still STORED, so he reads every word. Only
+       the paid reply stops, with one notice to each side when the limit is
+       first reached, never one per message.
+     - A stranger gets the canned reply and the notification at most
+       `STRANGER_REPLIES_PER_DAY` per number. Counts live in `wa_rate`,
+       numbers and timestamps only (rule 15), pruned after two days.
+     - A guest turn reads history through `secretary_store.get_guest_messages`,
+       never `get_recent_messages(thread=name)`, where "owner" and "all" are
+       keywords: a contact saved under either name would have been served
+       Sheraj's whole conversation. `add_contact` refuses a name another
+       contact already has (case-insensitive), because two "Mom"s would share
+       one thread.
+     - The webhook's verify-token handshake compares with `hmac.compare_digest`.
+     - Outside the repo but load-bearing: the Cloudflare tunnel's ingress
+       paths (`~/.cloudflared/config.yml`) are anchored regexes
+       (`^/whatsapp/webhook$`, `^/whatsapp/privacy$`). Unanchored, any path
+       merely CONTAINING them reached the API. The owner gate (rule 70) still
+       refused those requests, but the tunnel is meant to be the first wall,
+       not a sieve in front of the second.
 
 
 ## Rules 50–54 — Abigail and the teams (`agents/secretary_colony.py`)

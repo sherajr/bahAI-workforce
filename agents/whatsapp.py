@@ -211,7 +211,8 @@ def within_24h_window(phone: str, store=None) -> bool:
 def verify_webhook_challenge(mode: str, token: str, challenge: str) -> str | None:
     """GET /whatsapp/webhook handshake. Returns the challenge to echo back,
     or None if the mode/token don't match (caller should 403)."""
-    if mode == "subscribe" and token and WHATSAPP_VERIFY_TOKEN and token == WHATSAPP_VERIFY_TOKEN:
+    if (mode == "subscribe" and token and WHATSAPP_VERIFY_TOKEN
+            and hmac.compare_digest(token.encode(), WHATSAPP_VERIFY_TOKEN.encode())):
         return challenge
     return None
 
