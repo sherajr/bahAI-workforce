@@ -4,6 +4,7 @@ import {
   Sparkles, Users,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { requestConsultationOpen } from "../lib/settings";
 import { homeOk } from "../lib/types";
 import type { HomeEntry, HomeNextAction, HomeReflection } from "../lib/types";
 import type { Tab } from "./Nav";
@@ -106,6 +107,13 @@ export function HomePanel({ onNavigate }: { onNavigate?: (tab: Tab) => void } = 
   });
 
   const go = (tab: string) => () => onNavigate?.(tab as Tab);
+  // A row about ONE consultation opens that consultation, not just the tab.
+  // Handing over only the tab name used to land on whatever the tab showed
+  // last, so "Review the record of X" opened with nothing on screen to decide.
+  const goConsultation = (sessionId: string, purpose: "review" | "open") => () => {
+    requestConsultationOpen({ sessionId, purpose });
+    onNavigate?.("consultation");
+  };
 
   const cont = home.data ? homeOk<HomeEntry[]>(home.data.continue) : null;
   const running = home.data ? homeOk<HomeEntry[]>(home.data.running) : null;
@@ -147,7 +155,8 @@ export function HomePanel({ onNavigate }: { onNavigate?: (tab: Tab) => void } = 
         ))}
         {cont && cont.map((c) => (
           <Row key={`${c.kind}-${c.id}`} title={c.title} detail={c.detail}
-               badge={c.when || c.stage} onGo={go(c.tab)} />
+               badge={c.when || c.stage}
+               onGo={c.kind === "consultation" ? goConsultation(c.id, "open") : go(c.tab)} />
         ))}
         {cont && cont.length === 0 && (!running || running.length === 0) && (
           <Empty>Nothing is part-finished. Start something below.</Empty>
@@ -159,7 +168,8 @@ export function HomePanel({ onNavigate }: { onNavigate?: (tab: Tab) => void } = 
         {!decisions && home.data && <SectionError what="The approval queues" />}
         {decisions && decisions.items.map((d) => (
           <Row key={`${d.kind}-${d.id}`} title={d.title} detail={d.detail}
-               onGo={go(d.tab)} tone="attention" />
+               onGo={d.kind === "record" ? goConsultation(d.id, "review") : go(d.tab)}
+               tone="attention" />
         ))}
         {decisions && decisions.items.length === 0 && (
           <Empty>Nothing is waiting on you.</Empty>
@@ -178,11 +188,12 @@ export function HomePanel({ onNavigate }: { onNavigate?: (tab: Tab) => void } = 
           <Row key={`b-${a.id}`}
                title={a.action}
                detail={`Blocked — ${a.blocker || "no reason recorded"}`}
-               badge="blocked" onGo={go(a.tab)} tone="attention" />
+               badge="blocked" onGo={goConsultation(a.session_id, "open")}
+               tone="attention" />
         ))}
         {next?.accepted.map((a) => (
           <Row key={`a-${a.id}`} title={a.action} detail={acceptanceNote(a)}
-               onGo={go(a.tab)} />
+               onGo={goConsultation(a.session_id, "open")} />
         ))}
         {next?.reflections.map((r) => (
           <Row key={`r-${r.id}`}

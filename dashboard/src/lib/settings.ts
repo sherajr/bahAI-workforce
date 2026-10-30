@@ -198,3 +198,31 @@ export function patchConsultationUi(patch: Partial<ConsultationUiState>) {
   const next = { ...getConsultationUi(), ...patch };
   localStorage.setItem(CONSULTATION_KEY, JSON.stringify(next));
 }
+
+// A link from another tab (Home) to ONE consultation. Home used to hand over
+// only the tab name, so "Review the record of X" landed on whatever the tab
+// last showed and nothing on screen was the thing to decide. Held in memory,
+// not storage: it is a hand-off within this page load, consumed once by the
+// Consultation tab when it mounts, and never survives a reload -- nor does a
+// consultation's id end up in a URL or on disk because of it (rule 120).
+export interface ConsultationOpenRequest {
+  sessionId: string;
+  /** "review" opens the closeout review when the record still needs one. */
+  purpose: "review" | "open";
+}
+
+let pendingConsultationOpen: ConsultationOpenRequest | null = null;
+
+export function requestConsultationOpen(req: ConsultationOpenRequest) {
+  pendingConsultationOpen = req;
+}
+
+/** Read without consuming, so a state initializer React runs twice in
+ *  development sees the same answer both times. */
+export function peekConsultationOpen(): ConsultationOpenRequest | null {
+  return pendingConsultationOpen;
+}
+
+export function clearConsultationOpen() {
+  pendingConsultationOpen = null;
+}

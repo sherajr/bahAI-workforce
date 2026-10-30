@@ -196,6 +196,8 @@ export interface ConsultationSession {
   closeout_at: string | null;
   reflection_at: string | null;
   transcript_deleted_at: string | null;
+  /** When a person approved the record (rule 102). Null is a draft. */
+  approved_at?: string | null;
 }
 
 export interface ConsultationParticipant {
@@ -465,6 +467,21 @@ export interface ReportResult {
   note: string;
   narrated: boolean;
   session: ConsultationSession;
+}
+
+/** Exactly what approving would approve, and the revision it belongs to
+ *  (rule 102). Free to read: it changes nothing and pays for nothing. */
+export interface RecordPreview {
+  preview: string;
+  record: RecordStatus;
+  approved: string;
+  differs_from_approved: boolean;
+}
+
+export interface RecordApproval {
+  approved: string;
+  session: ConsultationSession;
+  record: RecordStatus;
 }
 
 /** A governor answer that may also carry what to say, and (for the opening) the

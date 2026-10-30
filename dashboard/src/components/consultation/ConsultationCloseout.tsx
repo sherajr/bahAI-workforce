@@ -56,6 +56,8 @@ export function ConsultationCloseout({
   const refreshAll = () => {
     refresh();
     void qc.invalidateQueries({ queryKey: ["consultations"] });
+    // Home lists this meeting under "Needs your decision" until it is done.
+    void qc.invalidateQueries({ queryKey: ["home"] });
   };
 
   const confirmDecision = useMutation({
@@ -348,6 +350,15 @@ export function ConsultationCloseout({
       {finish.error && <ErrorNote>{(finish.error as Error).message}</ErrorNote>}
       {dropTranscript.error && <ErrorNote>{(dropTranscript.error as Error).message}</ErrorNote>}
 
+      {/* The button used to say "Save the record" while it also APPROVED the
+          record (closeout's `approve_record` defaults to true, rule 102), so
+          nothing on this screen told anybody it was the decision Home was
+          asking them for. It now says what it does. */}
+      <p className="text-xs text-slate-500">
+        Approving saves how the meeting ended and puts your name to the record as it
+        stands now. Until then it stays a draft.
+        {!outcome && " Choose how the meeting ended above first."}
+      </p>
       <div className="flex items-center justify-end gap-3">
         <span className="mr-auto text-xs text-slate-500">
           {retentionLabel}
@@ -356,7 +367,8 @@ export function ConsultationCloseout({
         <Button onClick={() => finish.mutate()} loading={finish.isPending}
                 disabled={!outcome}
                 title={outcome ? undefined : "Say how the meeting ended first."}>
-          Save the record
+          <Check className="h-4 w-4" />
+          Approve the record
         </Button>
       </div>
 

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, CircleDashed, Mic, Plus } from "lucide-react";
+import { CheckCircle2, CircleDashed, ClipboardCheck, Mic, Plus } from "lucide-react";
 import { api } from "../../lib/api";
 import type { ConsultationSession } from "../../lib/consultationTypes";
 import { Button, Card, CardContent, ErrorNote } from "../ui";
@@ -69,6 +69,13 @@ export function ConsultationArchive({
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-500">
               <span>{s.turn_count ?? 0} turns</span>
+              {/* Same test Home uses for "Needs your decision" (home_api.py). */}
+              {s.status === "ended" && !s.approved_at && !s.closeout_at && (
+                <span className="inline-flex items-center gap-1.5 text-amber-300">
+                  <ClipboardCheck className="h-3.5 w-3.5" />
+                  Waiting for your approval
+                </span>
+              )}
               {s.decision_confirmed ? (
                 <span className="inline-flex items-center gap-1.5 text-emerald-300">
                   <CheckCircle2 className="h-3.5 w-3.5" />

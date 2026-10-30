@@ -143,7 +143,10 @@ def _decisions_needed() -> dict:
         items.append({
             "kind": "record", "id": session["id"],
             "title": f"Review the record of “{session.get('title') or 'a consultation'}”",
-            "detail": "The meeting has ended and nobody has approved what it says.",
+            # Says what opening it will ask of you: the row opens the closeout
+            # review for this meeting, where the approval actually happens.
+            "detail": "The meeting has ended and nobody has approved what it says. "
+                      "Open it to confirm what was decided and approve the record.",
             "tab": "consultation",
         })
 
